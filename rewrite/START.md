@@ -4,6 +4,8 @@
 **バイナリがあること、モデルが完了と言ったこと、本番で依頼が完遂したことは別です。**
 実モデル試験では納品と報告まで進んだ例も、複数モデルが誤記を承認した例もあります。翌朝の完成を保証できる状態ではありません。
 
+Kubernetes に導入する場合は、[設定を写す前の a / b / c の選択](../deploy/ticket-engine/SETUP.md#choose-the-setup-path-before-copying-values)から進めます。課題管理・namespace・納品地点・依存の取得方法を決め、private な依存や読み取り専用の checkout でも検査が動くことを、受付を開ける前に確かめます。配布 bundle だけを持っている場合は、同じ版のソースの `deploy/ticket-engine/SETUP.md` を参照してください。
+
 ## 配布物
 
 - `bin/ticket-engine`: 受付、役割への引き渡し、実行履歴、再開。
@@ -11,7 +13,12 @@
 - `bin/ticket-status`: queue をそのまま見せる読み取り専用の画面 (どこにいて、何を渡され、何が返り、今なにが走っているか)。
 - `harnesses/`: Git準備、既存Hermes SDKへの接続、Linuxの役割隔離。
 - `examples/operator.json`: 実装、独立2者レビュー、納品、検証、報告の設定例。
+- `examples/operator-github.json`: 同じ役・進み方で、受付と報告先を GitHub Issues にした例。
+- `examples/operator-stages.json`: 順番を決めた工程を Backlog で受け付ける例。Kubernetes への導入で使います。
+- `examples/operator-github-stages.json`: 同じ順次工程・権限・質問と知識の追記を保持し、GitHub Issues で受け付ける例。Kubernetes で GitHub を使う場合はこちらから始めます。
+- `examples/operator-gateway.json`: モデルの接続を gateway 経由にした例。
 - `RUNTIME.md`: SDK、隔離、ネットワーク、監督機能の前提と未検証事項。
+- `OPERATING.md`: 質問への回答、コメント編集、分割回答、代理回答、停止の扱い。
 - `README.md`: 設定詳細と実験記録。
 
 判断はモデルに任せ、回答は普通の文章のまま次へ渡します。工程接続は、回答に印を付けて合格させる仕組みではありません。
@@ -43,15 +50,19 @@ SDKやコンテナimageはダウンロード・同梱しません。macOS用バ�
 | `/etc/ticket-automation/operator.json` | 実設定。役割には公開しない |
 | `/var/lib/ticket-automation/queue` | 再起動後にも残る履歴と作業場所。親ディレクトリを役割に公開しない |
 
-`examples/operator.json` から実設定を作り、次を変更します。未編集の例は `project_id=0` と未設定の受付開始日時で受付を開始できません。
+接続した役からモデルが次を選ぶ例は、Backlog なら `examples/operator.json`、GitHub Issues なら `examples/operator-github.json` です。Kubernetes の順次工程は、Backlog なら `examples/operator-stages.json`、GitHub Issues なら `examples/operator-github-stages.json` から実設定を作ります。[SETUP.md の設定手順](../deploy/ticket-engine/SETUP.md#4-writing-the-operator-configuration) を使い、受付 repo と納品先をそれぞれ設定してください。課題管理を選ぶために接続型と順次工程を入れ替える必要はありません。未編集の例は受付を開始できません。
 
-1. `backlog.base_url`: 接続先のAPI base URL。
-2. `intake.project_id / created_since`: 任せるプロジェクトと受付開始日時（RFC3339、境界を含む）。既存チケットを不用意に取り込まない値にします。
+1. Backlog は `backlog.base_url`、GitHub は `github.repository` (owner/repository) と `github.intake_label`。github.com では `github.api_url` を削除します (既定 `https://api.github.com`)。Enterprise Server では HTTPS の API base (`https://tracker.example/api/v3` の形) に置換します。github.com に `/api/v3` を付けないでください。
+2. `intake.created_since`: 受付開始日時（RFC3339、境界を含む）。最初は遠い将来にして閉じ、設定確認後に開きます。Backlog だけは `intake.project_id` も必要です。GitHub の例では project_id / category_ids / category_on_accept / statuses を足さず、backlog も同居させません。
 3. `intake.min_model_credit`: 共有しているモデル鍵の残り (米ドル) が、これを下回ったら作業を止める値。未設定か `0` なら残りを問い合わせません。`0` 以外にすると、`router.decision.key_env` の鍵の残りを、依頼の開始前と実行中の毎回確認します。問い合わせ先は `intake.model_credit_url` (既定は OpenRouter の鍵照会 URL、HTTPS のみ)。gateway を指すこともできます。
 4. `intake.stall_notice_minutes`: 実行中の依頼で工程が 1 つも完了しない時間がこれを超えたら、依頼者へ 1 回知らせる分数。未設定は 90 分、`0` で知らせません。
 5. 各processの `TASK_REPOSITORY`: 承認済みのソース。私有repoの認証は実行環境で準備します。再開時は既存の作業を上書きcloneしません。
 6. `instructions`: プロジェクト知識の在り処、変更範囲、納品先、許可された納品コマンド、実物の検証方法、完了条件。設定例は納品権限やCIを用意しません。
 7. 各processの `--write`: 書込を許可する既存のパス。どのファイルが変わるかは作ってみるまで分からないので、例は実装に `.` (作業場所全体)、納品に `release`、報告作成に `report` を許可しています。
+
+GitHub は受付ラベルと工程ラベルを先に作り、`automation` が既存の用途に使われていないか確認します。重なるなら別名を選びます。そのラベルを付けられる人は、日時条件内の open issue を本体へ渡せます。PR は対象外です。`intake.issue_ids` で絞る場合は issue の番号を指定します。
+課題管理用の PAT は専用アカウント・受付 repo 限定で Issues の read/write を持たせます。設定の `github.key_env` は `TRACKER_API_KEY` のような**変数名だけ**です。納品用の資格情報とは別です。権限の根拠と未確認事項は [SETUP.md](../deploy/ticket-engine/SETUP.md#github-issues) にあります。
+`REPLACE_WITH_`・`example.invalid`・`<...>` をすべて置換し、`bin/ticket-engine --config <実設定> --check` で受付範囲を読みます。これは通信も queue 作成もせず、PAT の権限や外部コマンドの動作までは確認しません。トラッカーや受付 repo を替える場合は新しい queue を使います。
 
 `--write .` は作業場所全体の書込許可ですが、checkout 自身の管理情報 `.git` は `.git` を名指しで許可しない限り読み取り専用のまま残ります (役が hook や設定を仕込み、鍵を持つ納品プロセスに実行させる経路を塞ぐため。納品プロセスだけが `.git` を名指しで受け取ります)。
 レビュー・投稿・最終読返には書込許可を付けていません。project testを独立processとして加えるなら `model_env` を付けず、必要な権限だけ与えます。
@@ -63,7 +74,7 @@ SDKやコンテナimageはダウンロード・同梱しません。macOS用バ�
 ### ゲートウェイ経由で呼び出す場合
 
 `model_selection.gateway` を設定すると、選んだモデルへの呼び出しだけが指定のゲートウェイを通ります。作業役とルーティングの利用料はゲートウェイ側の口座に付き、カタログ側の口座には付きません。
-判断サービス（`model_selection.judge` と `router.decision`）はカタログ側のままにします。実測では、このゲートウェイは判断APIを提供していません（HTTP 405）。
+判断サービス（`model_selection.judge` と `router.decision`）は、直接OpenRouterへ送る構成ならそのままにし、モデル用とは別にその鍵も残します。ゲートウェイだけにする場合は両方を外し、`model_selection.fallback` にゲートウェイのchat URL・接頭辞付きモデル名・鍵の変数名を設定します。`router.llm` も同じ接続先を使います。判断APIの対応は一覧にモデル名があるだけでは分かりません。接続方式の選択と、推論を起動しない一覧/鍵名の確認は [SETUP.md](../deploy/ticket-engine/SETUP.md#with-a-gateway-in-front-of-the-models) にあります。
 ゲートウェイは同じモデルを接頭辞付きのidで出します。接頭辞は同じモデルへの経路であり、別のモデルでも品質の裏付けでもありません。履歴には選ばれたidを `model`、経路を `model_prefix` として別々に残します。
 設定例は `examples/operator-gateway.json`。`examples/operator.json` との違いは4箇所だけです — `model_selection.gateway`、各processの `OPENROUTER_BASE_URL`、各processの `OPENROUTER_API_KEY` の渡し元、`router.llm` の宛先と鍵の名前。URLと鍵の変数名（例では `GATEWAY_API_KEY`）は実環境のものへ置き換えてください。
 ゲートウェイの一覧が取れない回は選択を行わず、既存の復旧へ戻ります。接頭辞なしの呼び出しへは切り替えません。
@@ -89,14 +100,19 @@ exec /opt/ticket-automation/bundle/bin/ticket-engine \
 課題を1件受け付けたら、同じ課題の履歴、実際の納品先、保存された最終コメントを確認します。
 
 工程は `要件詰め → (必要なら依頼者へ質問) → 調査 → 設計/実装 → 2者レビュー → 納品 → 実物検証 → 報告作成 → 2者報告レビュー → 投稿 → 読返`。
-要件詰めは、依頼・checkout・運用者の指示から自分で決められることを決め、依頼者にしか決められない点だけを選択肢付きで残します。質問できるのはこの入口だけで、作業を任せた後は既存の担当で解決します。
+要件詰めは、依頼・checkout・運用者の指示から自分で決められることを決め、依頼者にしか決められない点だけを選択肢付きで残します。この接続の例で質問できるのは入口です。質問可能な経路は workflow の設定で決まり、下の順次工程の例では失敗後にも要件確認へ戻ります。
 判定の基準は「誰も答えられない状態で、朝までに納品して確認まで終えられるか」。決まっていない点が残っていたら、調査より先にその場で依頼者へ打ち返します。1 件ごとに 2〜4 個の選択肢を付け、1 回の返信で答えられる形にします。依頼者にしか決められない点とは、依頼・repo・運用者の指示のどれもが答えておらず、かつ納品物の挙動・行き先・触ってよい範囲が変わる点です (依頼が「任せる」と言わずに空けたままの挙動、見分けのつかない対象、渡されていない権限や資格情報、矛盾する指示、取り消せない操作)。文言・命名・言語・詳しさ・書き方は質問にせず、依頼と repo の既存のやり方にいちばん近い読みを採って理由とともに書き残し、納品物のレビューに委ねます。一度決めた点は質問に再掲しません。見切り発車は一晩を失い、質問は返信 1 回で済むので、その種類の点かどうか判別できないときは質問する側に倒します。ただしこれは文言と工程のつなぎ方だけで、モデルの回答を検査して止める仕組みではありません。
 指摘は修正へ、実行障害は復旧先へ渡します。回数だけで失敗完了にはしませんが、モデルの誤判断や恒久障害まで解決できる保証ではありません。
 レビューが差し戻し続けて朝まで終わらないことを防ぐため、`workflow.launch_limit` で役の起動回数の上限を決めます (例では報告を書く draft_report に 2 回)。上限に達した役は次の選択肢から外れ、本体がその旨を履歴に書きます。上限は依頼を終わらせません (他に選べる役が無ければ再び提示されます)。上限を置くのは、差し戻す判断の場に「納品そのもの以外の前へ進む選択肢」がある役だけです。例で implement に上限を置かないのは、review の次が implement か deliver しか無く、上限が「指摘を残したまま納品」を強いるからです。失敗して同じ役に復旧した起動も回数に数えます。工程だけの形 (`stages`) には上限はありません。
 
-`examples/operator-stages.json` は同じ納品を別の形で書いたものです。 工程には敵対レビュー (`review`) が入っています: 運用者のコマンド `harnesses/adversarial_review.py` が、作業役とは別の会社のモデルに依頼・確定した要件・差分・テスト結果を渡し、「差し戻す / 通す」の構造化した判定だけを終了コードにします (差し戻しに上限は無く、回数は判定の出力に出る。収束しない依頼は依頼者の「停止」コメントで止める。判定が取れないまま通すことはしない: モデル側の不調 (接続できない、時間切れ、HTTP エラー、判定の無い返事) や想定外のエラーのときは、運用者が `REVIEW_MODELS` に並べたモデルに順に聞き直し、間隔を数秒から数分まで延ばしながら判定が取れるまで続け、判定を出したモデルの名前を結果に書く。聞き直しでは直らない事情 (設定ミス、https でない、資格情報が無い、テストコマンドの指定が読めない) のときは、理由を 1 度だけ出して工程をその場で止めたまま待つ (作業場所と TASK_HOME は一定の間隔ごとに見直し、使えるようになれば続ける)。設定を直して本体を再起動すると、止まったレビューは失敗として記録され、レビューの `on_failure` の工程 (例では作業工程) から進み、その後の工程とともにレビューがもう一度走る (依頼者には、再起動後に同じ依頼を続けている旨の通知が届く)。対象パスが変更に一致しないときは、変更全体をレビューに渡す。以前のように判定なしで通したい運用者は `REVIEW_UNAVAILABLE=pass` を設定する (判定が取れないと、レビューされないまま納品される)。ただしファイルが 1 つも変わっていないときは、この設定があっても、通してよいという本物の判定が取れない限り exit 1 で作業へ戻す。指摘は出力として履歴に残り作業役と報告役が読む。差分やテスト出力が長ければ切り、切った所に元の長さを書く)。本体はその文章を読みません。`router.mode` を `stages` にすると、次に何をするかはモデルではなく、運用者が並べた工程と、その工程のコマンドが 0 で終わったかどうかで決まります。モデルが「できました」と書いても進みません。質問できるのは入口の 1 回だけで、最後の工程もコマンドです。納品と、納品後の統合ブランチの検証は、`deploy/ticket-engine` の実行用イメージに入っている固定のプログラム (`/opt/ticket-automation/scripts` の `deliver_git.py` と `verify_merged.py`。この配布物には含まれません) を使います。ビルド・テスト・報告の照合のコマンドは運用者が用意します (`deploy/ticket-engine` に例があります)。checkout の取得元 (`TASK_REPOSITORY`) は `example.invalid` 配下の仮置きの URL で、実行用イメージの mirror のパスに置き換えるまで本体は起動を拒否します。納品先のリポジトリとブランチは、例の中の `example-owner/example-repository` と `example-integration-branch` をそれぞれ 1 回置き換えれば全工程に入ります (この 2 つは URL ではないので本体は例の値と見分けません。置き換え忘れは `deploy/ticket-engine/SETUP.md` の確認コマンドで見つけます)。導入の手順は `deploy/ticket-engine/SETUP.md` にあります。
+`examples/operator-stages.json` と `examples/operator-github-stages.json` は、同じ納品を順次工程で書いたものです。 工程には敵対レビュー (`review`) が入っています: 運用者のコマンド `harnesses/adversarial_review.py` が、作業役とは別の会社のモデルに依頼・確定した要件・差分・テスト結果を渡し、「差し戻す / 通す」の構造化した判定だけを終了コードにします (差し戻しに上限は無く、回数は判定の出力に出る。収束しない依頼は依頼者の「停止」コメントで止める。判定が取れないまま通すことはしない: モデル側の不調 (接続できない、時間切れ、HTTP エラー、判定の無い返事) や想定外のエラーのときは、運用者が `REVIEW_MODELS` に並べたモデルに順に聞き直し、間隔を数秒から数分まで延ばしながら判定が取れるまで続け、判定を出したモデルの名前を結果に書く。聞き直しでは直らない事情 (設定ミス、https でない、資格情報が無い、テストコマンドの指定が読めない) のときは、理由を 1 度だけ出して工程をその場で止めたまま待つ (作業場所と TASK_HOME は一定の間隔ごとに見直し、使えるようになれば続ける)。設定を直して本体を再起動すると、止まったレビューは中断として記録され、レビューの `on_failure` の工程 (両例とも要件確認 `elicit`) から進み、その後の工程とともにレビューがもう一度走る (依頼者には、再起動後に同じ依頼を続けている旨の通知が届く)。対象パスが変更に一致しないときは、変更全体をレビューに渡す。以前のように判定なしで通したい運用者は `REVIEW_UNAVAILABLE=pass` を設定する (判定が取れないと、レビューされないまま納品される)。ただしファイルが 1 つも変わっていないときは、この設定があっても、通してよいという本物の判定が取れない限り exit 1 で要件確認 `elicit` へ戻す。指摘は出力として履歴に残り作業役と報告役が読む。差分やテスト出力が長ければ切り、切った所に元の長さを書く)。本体はその文章を読みません。`router.mode` を `stages` にすると、次に何をするかはモデルではなく、運用者が並べた工程と、その工程のコマンドが 0 で終わったかどうかで決まります。モデルが「できました」と書いても進みません。初回と、検査・レビュー・納品の失敗後に要件確認へ戻ったとき、必要なら質問できます。回答だけで権限を増やすものではありません。最後の工程はコマンドです。納品と、納品後の統合ブランチの検証は、`deploy/ticket-engine` の実行用イメージに入っている固定のプログラム (`/opt/ticket-automation/scripts` の `deliver_git.py` と `verify_merged.py`。この配布物には含まれません) を使います。ビルド・テスト・報告の照合のコマンドは運用者が用意します (`deploy/ticket-engine` に例があります)。checkout の取得元 (`TASK_REPOSITORY`) は `example.invalid` 配下の仮置きの URL で、実行用イメージの mirror のパスに置き換えるまで本体は起動を拒否します。納品先のリポジトリとブランチは、例の中の `example-owner/example-repository` と `example-integration-branch` をそれぞれ 1 回置き換えれば全工程に入ります (この 2 つは URL ではないので本体は例の値と見分けません。置き換え忘れは `deploy/ticket-engine/SETUP.md` の確認コマンドで見つけます)。導入の手順は `deploy/ticket-engine/SETUP.md` にあります。
 
 ## 4. 再開と停止
+
+回答を編集する場合や代理で答える場合は、[コメントの運用手順](OPERATING.md)を先に読んでください。最初の回答 1 件だけが履歴に入り、後からの編集で自動的に差し替わるわけではありません。
+
+以下の category / statuses / 実績時間の設定は Backlog 専用です。GitHub では `github.labels` で工程を示し、担当者の切替は行いますが実績時間は送りません。GitHub issue を閉じたり受付ラベルを外したりしても、受付済みの依頼は止まりません。停止は同じ `停止` コメントです。
+GitHub が待ち時間を返している間は要求を送りません。停止確認の読み取りが 3 回続けて失敗すると、動いている役のプロセスも止め、読めるようになってから同じ依頼を起動し直します。プロセスを動かしたまま待つ仕組みではありません。
 
 - 通常の再起動では同じ設定と**同じqueue**を使います。新しいqueueに替えると重複受付になり得ます。
 - 中断した外部操作は「既に反映されたかもしれない」と次へ渡します。外部操作の厳密な1回実行を保証するものではありません。

@@ -32,6 +32,31 @@ func stagesExample(t *testing.T) config {
 	return cfg
 }
 
+func TestOrderedExampleReconsidersFailuresWithoutGrantingWiderAccess(t *testing.T) {
+	cfg := stagesExample(t)
+	for _, phrase := range []string{"A failed verification, review or delivery returns to elicitation", "concrete alternatives", "an in-scope alternative", "an answer does not change filesystem, delivery or credential permissions", "Do not ask again about a settled point"} {
+		if !strings.Contains(cfg.Instructions, phrase) {
+			t.Errorf("shared recovery instruction omits %q", phrase)
+		}
+	}
+	for _, role := range cfg.Roles {
+		if role.Name == "elicit" || role.Name == "ask_requester" {
+			for _, text := range []string{role.Purpose, role.Processes[0].Instructions} {
+				for _, phrase := range []string{"newly required expansion of authority", "unknown cause", "initial elicitation only"} {
+					if !strings.Contains(text, phrase) {
+						t.Errorf("%s recovery guidance omits %q", role.Name, phrase)
+					}
+				}
+			}
+		}
+		if role.Name == "elicit" {
+			if !strings.Contains(role.Processes[0].Instructions, "On a return after a failed stage, read that failure and the previous work first") {
+				t.Fatal("requirements role was not told to reconsider the actual failure")
+			}
+		}
+	}
+}
+
 func TestStageDescriptionsDoNotPromiseAMergeForPullRequestOnlyDelivery(t *testing.T) {
 	want := map[string]string{
 		"deliver":       "Carry the reviewed change to the operator-approved repository with the image's fixed delivery process: open a pull request, and merge it only when the configured DELIVERY_MERGE_METHOD permits it.",
@@ -50,9 +75,34 @@ func TestStageDescriptionsDoNotPromiseAMergeForPullRequestOnlyDelivery(t *testin
 	}
 }
 
+func TestStageProcessInstructionsDescribeBothDeliveryDepths(t *testing.T) {
+	want := map[string][]string{
+		"deliver":       {"DELIVERY_MERGE_METHOD=none", "nothing is merged", "configured merge method"},
+		"verify_merged": {"DELIVERY_MERGE_METHOD=none", "pull request's head", "integration branch", "build and tests"},
+	}
+	for _, role := range stagesExample(t).Roles {
+		phrases, checked := want[role.Name]
+		if !checked {
+			continue
+		}
+		if len(role.Processes) != 1 {
+			t.Fatalf("%s: expected the fixed command's one instruction", role.Name)
+		}
+		for _, phrase := range phrases {
+			if !strings.Contains(role.Processes[0].Instructions, phrase) {
+				t.Errorf("%s process instruction omits %q", role.Name, phrase)
+			}
+		}
+		delete(want, role.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing process instructions: %v", want)
+	}
+}
+
 // The shipped ordered run: every stage that decides whether the work carries on
 // is a command the runtime observes, the run ends on one, and the requester is
-// reachable only from the entrance.
+// reachable from requirements, initially and after a failed command.
 func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 	cfg := stagesExample(t)
 	if cfg.Router.Mode != "stages" {
@@ -61,10 +111,10 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 	want := []chain.Stage{
 		{Name: "elicit", Kind: chain.ModelStage},
 		{Name: "work", Kind: chain.ModelStage},
-		{Name: "verify", Kind: chain.CommandStage, OnFailure: "work"},
-		{Name: "review", Kind: chain.CommandStage, OnFailure: "work"},
-		{Name: "deliver", Kind: chain.CommandStage, OnFailure: "work"},
-		{Name: "verify_merged", Kind: chain.CommandStage, OnFailure: "work"},
+		{Name: "verify", Kind: chain.CommandStage, OnFailure: "elicit"},
+		{Name: "review", Kind: chain.CommandStage, OnFailure: "elicit"},
+		{Name: "deliver", Kind: chain.CommandStage, OnFailure: "elicit"},
+		{Name: "verify_merged", Kind: chain.CommandStage, OnFailure: "elicit"},
 		{Name: "report", Kind: chain.ModelStage},
 		{Name: "confirm_report", Kind: chain.CommandStage, OnFailure: "report"},
 	}
@@ -114,6 +164,10 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 	if roles["deliver"].Processes[0].Receipt == "" {
 		t.Fatal("the delivery stage leaves the runtime nothing to read back")
 	}
+	method := roles["review"].Processes[0].Env["DELIVERY_MERGE_METHOD"]
+	if method == "" || method != roles["deliver"].Processes[0].Env["DELIVERY_MERGE_METHOD"] {
+		t.Fatal("review and delivery must size the same pull request introduction")
+	}
 	if _, staged := roles["ask_requester"]; !staged {
 		t.Fatal("the example has no question role")
 	}
@@ -159,7 +213,7 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 	})
 	root := filepath.Join(t.TempDir(), "must-not-be-created")
 	var log bytes.Buffer
-	err := watchRequests(context.Background(), cfg, root, &log)
+	err := watchRequests(exampleCheckContext(t), cfg, root, &log)
 	if err == nil || !strings.Contains(err.Error(), "explicit intake.project_id") {
 		t.Fatalf("unset scope did not stop intake: %v", err)
 	}
@@ -214,6 +268,11 @@ const stagesReceipt = "delivered release/greeting.txt\n"
 const stagesReport = "できるようになったこと\n試験用の納品先からHello 日本語を読み戻せます。これは本番ではありません。\n"
 const stagesQuestion = "依頼者にしか決められない点があります。納品先は (a) release/ か (b) dist/ のどちらにしますか。\n"
 const stagesAnswer = "(a) release/ でお願いします。\n"
+const stagesScopeQuestion = "許可された範囲のままでは満たせません。(a) 許可済みの静的ページで挨拶を表示する (b) 運用者に API の変更権限を設定してもらう、どちらにしますか。\n"
+const stagesScopeAnswer = "(a) 許可済みの静的ページでお願いします。\n"
+const stagesScopeFailure = "The requested API change is outside the granted paths; a static page within the current grant is an alternative."
+const stagesKnowledgePath = "project/answers.md"
+const stagesKnowledge = "## Delivery target\n\nQuestion: release/ or dist/?\nAnswer: release/.\n"
 
 // Every model stage in the fixture claims the whole request is finished. In an
 // ordered run that claim is never read, so it must move nothing at all.
@@ -249,6 +308,7 @@ func TestStagesRoleHelper(t *testing.T) {
 	}
 	storedComments := func() []string { return fixtureComments(t) }
 	post := func(text string) { fixturePost(t, text) }
+	repairQuestion := os.Getenv("EXAMPLE_SCOPE_QUESTION") != ""
 	// os.Exit below skips deferred work, so the claim is written up front.
 	if slices.Contains([]string{"elicit", "ask_requester", "work", "report"}, action) {
 		fmt.Print(stagesClaim)
@@ -256,31 +316,72 @@ func TestStagesRoleHelper(t *testing.T) {
 	switch action {
 	case "elicit":
 		entries, err := os.ReadDir(".")
-		if err != nil || len(entries) != 0 {
+		if err != nil || len(entries) != 0 && !bytes.Contains(prompt, []byte("stage did not exit 0")) && !bytes.Contains(prompt, []byte(stagesScopeAnswer)) {
 			t.Fatal("the entrance prepared or changed project work", err)
 		}
+		if repairQuestion && len(entries) != 0 && !bytes.Contains(prompt, []byte(stagesScopeFailure)) {
+			t.Fatal("requirements lost the worker's actual scope problem")
+		}
 	case "ask_requester":
-		post(stagesQuestion)
+		question := stagesQuestion
+		if repairQuestion {
+			if !bytes.Contains(prompt, []byte(stagesScopeFailure)) {
+				t.Fatal("the question role lost the actual scope problem")
+			}
+			question = stagesScopeQuestion
+		}
+		post(question)
 		stored := storedComments()
-		if len(stored) == 0 || stored[len(stored)-1] != stagesQuestion {
+		if len(stored) == 0 || stored[len(stored)-1] != question {
 			t.Fatal("the stored question differs from the actual question")
 		}
 	case "work":
+		if repairQuestion && !bytes.Contains(prompt, []byte(stagesScopeAnswer)) {
+			fmt.Println(stagesScopeFailure)
+			break
+		}
 		write("src/greeting.txt", stagesArtifact)
+		if os.Getenv("EXAMPLE_KNOWLEDGE") == "answered" {
+			if !bytes.Contains(prompt, []byte(stagesAnswer)) || !bytes.Contains(prompt, []byte(stagesKnowledgePath)) {
+				t.Fatal("work lost the answer or the configured knowledge destination")
+			}
+			comments := storedComments()
+			if !slices.Contains(comments, stagesQuestion) || !slices.Contains(comments, stagesAnswer) {
+				t.Fatal("the work role cannot read the actual exchange through its assigned scope")
+			}
+			if _, err := os.Stat(stagesKnowledgePath); os.IsNotExist(err) {
+				write(stagesKnowledgePath, stagesKnowledge)
+			} else {
+				read(stagesKnowledgePath, stagesKnowledge)
+			}
+			fmt.Print("Recorded the actual question and answer without a duplicate: " + stagesKnowledge)
+		}
 	case "verify":
-		read("src/greeting.txt", stagesArtifact)
 		// One configured check fails the first time it runs, so the repair
 		// stage and the second observation are actually exercised.
 		if os.Getenv("EXAMPLE_STAGE_PROCESS") == "project-tests" {
 			marker, err := os.OpenFile(".fixture-verify", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 			if err == nil {
 				marker.Close()
-				fmt.Print("1 check failed against the current change\n")
+				if repairQuestion {
+					fmt.Println(stagesScopeFailure)
+				} else {
+					fmt.Print("1 check failed against the current change\n")
+				}
 				os.Exit(1)
 			}
 		}
+		if !repairQuestion || os.Getenv("EXAMPLE_STAGE_PROCESS") == "project-tests" {
+			read("src/greeting.txt", stagesArtifact)
+		}
 	case "review":
 		read("src/greeting.txt", stagesArtifact)
+		if os.Getenv("EXAMPLE_KNOWLEDGE") == "answered" {
+			read(stagesKnowledgePath, stagesKnowledge)
+			if !bytes.Contains(prompt, []byte(stagesAnswer)) || !bytes.Contains(prompt, []byte(stagesKnowledge)) {
+				t.Fatal("review lost the answer or the worker's knowledge report")
+			}
+		}
 		// The adversarial review objects once, so the work stage runs again
 		// on its objection and the review is observed a second time.
 		marker, err := os.OpenFile(".fixture-review", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -293,6 +394,10 @@ func TestStagesRoleHelper(t *testing.T) {
 	case "deliver":
 		read("src/greeting.txt", stagesArtifact)
 		write("release/greeting.txt", stagesArtifact)
+		if os.Getenv("EXAMPLE_KNOWLEDGE") == "answered" {
+			read(stagesKnowledgePath, stagesKnowledge)
+			write("release/answers.md", stagesKnowledge)
+		}
 		// The receipt goes where the example's delivery process names it, so
 		// the runtime's read-back of that setting is what is exercised.
 		write(os.Getenv("EXAMPLE_STAGE_RECEIPT"), stagesReceipt)
@@ -428,9 +533,26 @@ func stagesFixtureConfig(t *testing.T) config {
 // stage runs and the command is observed again; nothing any model wrote moves
 // the run, and only the last stage's exit status ends it.
 func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) {
-	for _, asked := range []bool{false, true} {
-		t.Run(fmt.Sprintf("asked=%v", asked), func(t *testing.T) {
+	for _, when := range []string{"never", "entrance", "after-scope-failure"} {
+		t.Run(when, func(t *testing.T) {
+			asked, repairQuestion := when != "never", when == "after-scope-failure"
+			question, answer := stagesQuestion, stagesAnswer
+			if repairQuestion {
+				question, answer = stagesScopeQuestion, stagesScopeAnswer
+			}
 			cfg := stagesFixtureConfig(t)
+			cfg.Instructions += "\nApproved knowledge write destination: " + stagesKnowledgePath + "."
+			if asked {
+				for i := range cfg.Roles {
+					for j := range cfg.Roles[i].Processes {
+						if repairQuestion {
+							cfg.Roles[i].Processes[j].Env["EXAMPLE_SCOPE_QUESTION"] = "1"
+						} else {
+							cfg.Roles[i].Processes[j].Env["EXAMPLE_KNOWLEDGE"] = "answered"
+						}
+					}
+				}
+			}
 			issue := 61
 			if asked {
 				issue = 62
@@ -440,10 +562,15 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			var comments []any
 			stored, posts, catalogs, selections, routes := 0, 0, 0, 0, 0
 			answered := false
+			allowAnswer, restarted := !repairQuestion, false
 			var offered [][]string
 			want := []string{"work"}
 			if asked {
 				want = []string{"ask_requester", "work"}
+			}
+			want = append(want, "work", "work") // verification and review each fail once
+			if repairQuestion {
+				want = []string{"work", "ask_requester", "work", "work"}
 			}
 			add := func(user int, content string) map[string]any {
 				stored++
@@ -460,9 +587,9 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 					case "GET /api/v2/issues":
 						return selectionReply(r, 200, []any{watchedIssue(issue, stagesRequest, "2026-01-03T00:00:00Z")}), nil
 					case "GET /api/v2/issues/" + key + "/comments":
-						if _, err := os.Stat(filepath.Join(root, "jobs", fmt.Sprint(issue), "question.json")); err == nil && !answered {
+						if _, err := os.Stat(filepath.Join(root, "jobs", fmt.Sprint(issue), "question.json")); err == nil && !answered && allowAnswer {
 							answered = true
-							add(55, stagesAnswer)
+							add(55, answer)
 						}
 						return selectionReply(r, 200, append([]any{}, comments...)), nil
 					case "POST /api/v2/issues/" + key + "/comments":
@@ -524,6 +651,16 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			deadline := time.Now().Add(60 * time.Second)
 			for {
 				state, err := loadWatchState(root, issue)
+				if err == nil && state.Waiting && repairQuestion && !restarted {
+					if _, err := os.Stat(filepath.Join(root, "jobs", fmt.Sprint(issue), "question.json")); err == nil {
+						finish()
+						mu.Lock()
+						allowAnswer = true
+						mu.Unlock()
+						restarted = true
+						finish = startStopQueue(t, cfg, root, 30*time.Millisecond, &log)
+					}
+				}
 				if err == nil && state.Done {
 					break
 				}
@@ -534,6 +671,9 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 				time.Sleep(10 * time.Millisecond)
 			}
 			finish()
+			if repairQuestion && !restarted {
+				t.Fatal("scope question did not survive a restart while waiting")
+			}
 			state, err := loadWatchState(root, issue)
 			if err != nil || state.Pending != nil || state.Waiting || state.Step != "confirm_report" {
 				t.Fatalf("the run ended somewhere other than its last stage: %+v %v", state.Step, err)
@@ -541,6 +681,13 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			actual, err := os.ReadFile(filepath.Join(root, "jobs", fmt.Sprint(issue), "workspace", "release", "greeting.txt"))
 			if err != nil || string(actual) != stagesArtifact {
 				t.Fatal("actual delivery missing", err)
+			}
+			knowledge, knowledgeErr := os.ReadFile(filepath.Join(root, "jobs", fmt.Sprint(issue), "workspace", "release", "answers.md"))
+			if asked && !repairQuestion && (knowledgeErr != nil || string(knowledge) != stagesKnowledge) {
+				t.Fatalf("knowledge did not survive the repair and delivery: %q %v", knowledge, knowledgeErr)
+			}
+			if (!asked || repairQuestion) && !os.IsNotExist(knowledgeErr) {
+				t.Fatal("a fixture without knowledge writeback produced a knowledge file", knowledgeErr)
 			}
 			launches, records, failures, workingModels, answers := map[string]int{}, 0, 0, 0, 0
 			receipts := 0
@@ -554,7 +701,7 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 				}
 				if result.Speaker == "requester" {
 					answers++
-					if result.Output != stagesAnswer {
+					if result.Output != answer {
 						t.Fatalf("the requester's own words were changed: %+v", result)
 					}
 					continue
@@ -591,7 +738,7 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			}
 			questions := 0
 			for _, row := range comments {
-				if row.(map[string]any)["content"] == stagesQuestion {
+				if row.(map[string]any)["content"] == question {
 					questions++
 				}
 			}

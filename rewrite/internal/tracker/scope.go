@@ -45,14 +45,14 @@ type IssueScope struct {
 	stored func(int64) error
 }
 
-// KeepLatestPost makes a scope leave one comment. The scope lives for one
+// KeepLatestPost asks a scope to retain its last comment. The scope lives for one
 // launch and remembers the comments stored through it; when the launch is
-// over, RemoveEarlierPosts removes all of them but the one stored last (the
+// over, RemoveEarlierPosts tries to remove all but the one stored last (the
 // highest id the tracker gave). A role that posts a trial line before what it
-// means to say therefore leaves only the latter. Nothing is read to decide
+// means to say can leave only the latter. Nothing is read to decide
 // which: the last stored stays. The removal happens after the role's posts
 // were answered, never in their path, and is best effort: a comment the
-// tracker will not remove stays, which is what there was before this option.
+// tracker will not remove stays, as does one beyond the cleanup time limit.
 func KeepLatestPost(s *IssueScope) { s.latest = true }
 
 // ObserveStoredPost records a successful POST's native comment id before its

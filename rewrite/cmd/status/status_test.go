@@ -158,6 +158,184 @@ func TestOverviewListsEveryRequestWithItsPosition(t *testing.T) {
 	}
 }
 
+func TestWorkLimitStatusSeparatesMeasuredTimeFromAnOpenInterval(t *testing.T) {
+	for _, variant := range []string{"running", "active-limit", "hard-exit-limit", "new interval", "damaged", "delivered"} {
+		t.Run(variant, func(t *testing.T) {
+			root := fixtureQueue(t)
+			directory := filepath.Join(root, "jobs", "7")
+			clock := map[string]any{"max_minutes": 3, "elapsed_ns": 45 * time.Second, "max_hard_exits": 3, "hard_exits": 1}
+			record := map[string]any{"version": 1, "clock": clock}
+			if variant == "running" || variant == "hard-exit-limit" {
+				clock["active_since"] = "2026-01-02T00:00:00Z"
+			}
+			if variant == "active-limit" || variant == "hard-exit-limit" {
+				record["pauses"] = []any{map[string]any{"reason": variant, "at": "2026-01-02T00:00:00Z", "elapsed_ns": 45 * time.Second}}
+			}
+			if variant == "new interval" {
+				clock["elapsed_ns"] = 0
+			}
+			if variant == "damaged" {
+				clock["elapsed_ns"] = -1
+			}
+			if variant == "delivered" {
+				writeJob(t, root, "7", chain.State{Done: true})
+			}
+			raw, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "work-limit.json"), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			s := &server{runDir: root, location: time.UTC}
+			j := s.loadJob("7", time.Now(), true)
+			if variant == "delivered" {
+				_, body := get(t, serve(t, root, fixtureConfig(t), "", ""), "/jobs/7")
+				if j.WorkTime != "" || strings.Contains(body, "Saved active-work cap:") || strings.Contains(body, "Forced exits:") {
+					t.Fatal("completed request kept ongoing limits")
+				}
+				return
+			}
+			if variant == "damaged" {
+				if !j.PauseBroken || j.WorkTime != "" || j.Lane != "attention" {
+					t.Fatalf("damaged clock: %+v", j)
+				}
+				return
+			}
+			want := "45s"
+			if variant == "new interval" {
+				want = "0s"
+			}
+			if strings.Contains(j.Attention, "Saved active-work cap:") || !strings.Contains(j.WorkTime, "Saved active-work cap: 3 min; measured: "+want) || !strings.Contains(translate("ja", j.WorkTime), "確定済み: "+want) {
+				t.Fatalf("metrics missing or treated as attention: %s %s", j.WorkTime, j.Attention)
+			}
+			open := variant == "running" || variant == "hard-exit-limit"
+			if strings.Contains(j.WorkTime, "open interval") != open {
+				t.Fatal("open interval was counted or hidden")
+			}
+			if !strings.Contains(j.WorkTime, "Forced exits: 1; saved limit: 3.") {
+				t.Fatal("forced-exit count or limit missing")
+			}
+			if variant == "hard-exit-limit" && (!strings.Contains(j.Attention, "forced-exit limit") || !strings.Contains(translate("ja", j.Attention), "回数上限")) {
+				t.Fatal("forced-exit limit was not named")
+			}
+			if variant == "running" && j.Lane != "running" {
+				t.Fatal("an open live clock alone became a hold")
+			}
+			response, body := get(t, serve(t, root, fixtureConfig(t), "", ""), "/jobs/7")
+			if response.StatusCode != http.StatusOK || !strings.Contains(body, "Saved active-work cap: 3 min; measured: "+want) {
+				t.Fatalf("metrics not rendered: %d", response.StatusCode)
+			}
+			if strings.Contains(body, `class="attn">Saved active-work`) || !strings.Contains(body, `class="meta">Saved active-work`) {
+				t.Fatal("limit information used the attention presentation")
+			}
+		})
+	}
+}
+
+func TestPausedRequestsShowTheReasonWithoutBecomingDoneOrRunning(t *testing.T) {
+	for _, variant := range []string{"active-limit", "hard-exit-limit", "resume intent", "resume saved", "released", "damaged", "unreadable", "history missing", "stopped", "delivered"} {
+		t.Run(variant, func(t *testing.T) {
+			root := fixtureQueue(t)
+			directory := filepath.Join(root, "jobs", "7")
+			write := func(name string, value any) {
+				t.Helper()
+				raw, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(directory, name), raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			at := time.Date(2026, 1, 2, 0, 20, 0, 0, time.UTC)
+			pause := map[string]any{"reason": "active-limit", "at": at, "notice_id": 900}
+			if variant == "hard-exit-limit" {
+				pause["reason"] = variant
+			}
+			if variant == "damaged" {
+				pause["reason"] = "unknown reason"
+			}
+			s, err := newServer(root, "", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := *s.loadJob("7", at, false).State
+			if strings.HasPrefix(variant, "resume") || variant == "released" || variant == "history missing" {
+				pause["resume"] = map[string]any{"comment": map[string]any{"id": 901, "content": "再開"},
+					"recorded_at": at, "history_index": len(state.History), "applied": variant != "resume intent"}
+				if variant != "resume intent" && variant != "history missing" {
+					state.History = append(state.History, chain.Result{Speaker: "requester", Output: "再開", FinishedAt: at})
+				}
+			}
+			if variant == "delivered" {
+				state.Done = true
+			}
+			write(filepath.Join("run", "history.json"), state)
+			if variant == "unreadable" {
+				if err := os.Mkdir(filepath.Join(directory, "work-limit.json"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				write("work-limit.json", map[string]any{"version": 1, "pauses": []any{pause}})
+			}
+			if variant == "stopped" {
+				write("stop-request.json", map[string]any{"id": 902, "content": "停止"})
+			}
+			if variant == "released" {
+				write("notices.json", map[string]any{"notices": []any{map[string]any{
+					"kind": "work-resume-accepted", "event": "1", "posted_at": at, "comment_id": 903}}})
+			}
+			j := s.loadJob("7", at.Add(time.Minute), false)
+			switch variant {
+			case "active-limit", "hard-exit-limit":
+				if j.Lane != "awaiting" || j.Status != "paused; waiting for an authorized resume instruction" || !strings.Contains(j.Attention, pauseResumeHelp) {
+					t.Fatalf("saved pause shown as something else: %+v", j)
+				}
+				if variant == "hard-exit-limit" && !strings.Contains(j.Attention, "forced-exit limit") {
+					t.Fatal("an unmeasured interval was shown as a reached limit")
+				}
+				if !strings.Contains(translate("ja", j.Attention), "再開") || !strings.Contains(localize("ja", j.Status), "一時停止中") {
+					t.Fatal("the pause is not explained in the viewer's language")
+				}
+			case "resume intent", "resume saved":
+				if j.Lane != "awaiting" || j.Status != "resume recorded; waiting for the controller to finish releasing the pause" || !strings.Contains(j.Attention, "separate answer") {
+					t.Fatalf("partial release was shown as running: %+v", j)
+				}
+			case "damaged", "unreadable", "history missing":
+				if j.Lane != "attention" || j.Status != "held: the saved pause record is unreadable" {
+					t.Fatalf("damaged pause was shown as runnable: %+v", j)
+				}
+			case "stopped":
+				if j.Lane != "stopped" || j.Attention != "" {
+					t.Fatal("the pause obscured the authorized stop")
+				}
+			case "delivered":
+				if j.Lane != "delivered" {
+					t.Fatal("a completed request became paused")
+				}
+			case "released":
+				if j.Lane != "running" || j.WorkPause != "" {
+					t.Fatal("an acknowledged release still looks held")
+				}
+			}
+			if variant != "delivered" && (j.State.Done || j.Stage != "implement" || j.Trail[len(j.Trail)-1].State == "passed") {
+				t.Fatal("a pause advanced or completed a workflow stage")
+			}
+			if variant == "active-limit" {
+				ts := serve(t, root, "", "", "")
+				for _, path := range []string{"/", "/jobs/7"} {
+					_, body := get(t, ts, path)
+					expectAll(t, body, "paused; waiting for an authorized resume instruction", "The configured active-work limit was reached.", "再開", "停止")
+					if strings.Contains(body, "running implement") {
+						t.Fatal("stale live output labelled a held request as running")
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestRequestPageShowsEverythingOnDisk(t *testing.T) {
 	ts := serve(t, fixtureQueue(t), fixtureConfig(t), "", "")
 	response, body := get(t, ts, "/jobs/7")
@@ -721,8 +899,8 @@ func TestAResumeAfterARestartIsRunningNotAttentionAndKeepsItsStart(t *testing.T)
 		Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}}},
 		History: []chain.Result{
 			{Role: "elicit", Speaker: "elicit-process", StartedAt: started, FinishedAt: started.Add(2 * time.Minute)},
-			{Role: "implement", Speaker: "implement-process", Error: "context canceled", StartedAt: started.Add(2 * time.Minute), FinishedAt: started.Add(5 * time.Minute)},
-			{Role: "implement", Speaker: "runtime", Error: "The process stopped while this action was pending. Available reports may be partial.", FinishedAt: started.Add(5 * time.Minute)},
+			{Role: "implement", Speaker: "implement-process", Interrupted: true, Error: "context canceled", StartedAt: started.Add(2 * time.Minute), FinishedAt: started.Add(5 * time.Minute)},
+			{Role: "implement", Speaker: "runtime", Interrupted: true, Error: "The process stopped while this action was pending. Available reports may be partial.", FinishedAt: started.Add(5 * time.Minute)},
 		}}
 	raw, err := json.Marshal(state)
 	if err != nil {
@@ -749,6 +927,18 @@ func TestAResumeAfterARestartIsRunningNotAttentionAndKeepsItsStart(t *testing.T)
 		t.Errorf("the request page must show the first record's start (%s) as the start", want)
 	}
 	expectAll(t, page, `<span class="chip passed">elicit<small>elicit</small></span>`, `<span class="chip current">implement<small>implement</small></span>`)
+	// The same diagnostic without a recorded interruption is an error, not
+	// evidence that the controller interrupted this work.
+	state.History[1].Interrupted, state.History[2].Interrupted = false, false
+	raw, err = json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "history.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, body = get(t, ts, "/")
+	expectAll(t, body, `Needs attention <b>1</b>`, "retrying after a failure; assigned to implement")
 }
 
 func TestTheCardNamesTheStageRunningNowNotTheLastRecorded(t *testing.T) {
@@ -939,6 +1129,13 @@ func TestARequestEndedAtAnOpenPullRequestIsNotShownAsDelivered(t *testing.T) {
 	response.Body.Close()
 	expectAll(t, string(japanese), "PR を開いて完了 <b>1</b>", "完了 (PR は開いたまま。merge は人に任せています)",
 		"PR が閉じられて終了 <b>1</b>", "完了 (PR はマージされずに閉じられたので、何も納品していません)")
+}
+
+func TestAPersonChangedAndMergedBranchIsNotAnOpenPullRequest(t *testing.T) {
+	job := job{Receipt: `{"merge_left_to_person":true,"changed_by_person":true,"merge_sha":"PERSONS-MERGE"}`}
+	if job.endedUnmerged() {
+		t.Fatal("a recorded human merge was displayed as an open pull request")
+	}
 }
 
 // A person merged an earlier round of the request and closed the pull request
@@ -1239,7 +1436,7 @@ func TestLaunchesAreToldApartWithoutAStageNoteAndNotesStandOnTheirOwn(t *testing
 		var records []record
 		for i, result := range results {
 			records = append(records, record{Index: i + 1, Role: result.Role, Speaker: result.Speaker, Model: result.Model, Started: result.StartedAt, Finished: result.FinishedAt,
-				Output: result.Output, Error: result.Error, Diagnostics: result.Diagnostics, Instruction: result.Instruction, Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"})
+				Output: result.Output, Error: result.Error, Interrupted: result.Interrupted, Diagnostics: result.Diagnostics, Instruction: result.Instruction, Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"})
 		}
 		return records
 	}
@@ -1260,11 +1457,16 @@ func TestLaunchesAreToldApartWithoutAStageNoteAndNotesStandOnTheirOwn(t *testing
 	// grey note, and a note without a start has no duration.
 	noted := groupLaunches(entries(
 		chain.Result{Role: "implement", Speaker: "implement-process", Model: "m", Output: "FIRST-RUN", StartedAt: started, FinishedAt: started.Add(time.Minute)},
-		chain.Result{Role: "implement", Speaker: "runtime", Error: "The process stopped while this action was pending. Available reports may be partial.", FinishedAt: started.Add(20 * time.Minute)},
+		chain.Result{Role: "implement", Speaker: "runtime", Interrupted: true, Error: "The process stopped while this action was pending. Available reports may be partial.", FinishedAt: started.Add(20 * time.Minute)},
 		chain.Result{Role: "router", Speaker: "runtime", Error: "routing unavailable: model service returned HTTP 502", FinishedAt: started.Add(21 * time.Minute)},
 	))
 	if len(noted) != 3 || noted[0].Outcome != returned || noted[0].Duration != "1m00s" || noted[1].Outcome != interrupted || noted[1].Duration != "" || noted[2].Outcome != failed || noted[2].Failure != "routing unavailable: model service returned HTTP 502" {
 		t.Fatalf("notes were attached to the launch before them or shown wrongly: %+v", noted)
+	}
+	plain := groupLaunches(entries(chain.Result{Role: "implement", Speaker: "runtime",
+		Error: "The process stopped while this action was pending.", FinishedAt: started}))
+	if len(plain) != 1 || plain[0].Outcome != failed {
+		t.Fatalf("diagnostic wording was treated as a recorded interruption: %+v", plain)
 	}
 	// Two processes of which one could not start: the launch failed, it did
 	// not "not start". Two different failures never fold, and a folded entry

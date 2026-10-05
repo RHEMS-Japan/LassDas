@@ -143,6 +143,9 @@ func acceptTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 		text := acceptedNoticeText(ahead, requestPage(cfg, issue))
 		if creditLow {
 			text = "受け付けました。" + budgetWaitingText
+			if ahead > 0 {
+				text += fmt.Sprintf("\n前に %d 件あり、利用枠が戻ってから順番に処理します。", ahead)
+			}
 			if page := requestPage(cfg, issue); page != "" {
 				text += "\n進み具合はこちらで見られます: " + page
 			}
@@ -321,7 +324,7 @@ func modelsTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 }
 
 // resumeTurn says that the requester's answer was read and the work goes on.
-func resumeTurn(ctx context.Context, cfg config, issue sourceIssue, directory string, creditLow bool, observe func(string)) {
+func resumeTurn(ctx context.Context, cfg config, issue sourceIssue, directory string, answerIndex int, creditLow bool, observe func(string)) {
 	if cfg.Intake == nil || !cfg.Intake.Announce {
 		return
 	}
@@ -330,7 +333,17 @@ func resumeTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 	if creditLow {
 		text = "返答を受け取りました。" + budgetWaitingText
 	}
-	if err := requestNotices(cfg, issue, directory).post(ctx, resumedNotice, text, time.Now().UTC()); err != nil {
+	// Each appended answer has its own history position. Another question's
+	// answer is new information even within the restart-notice interval.
+	event := strconv.Itoa(answerIndex)
+	if err := requestNotices(cfg, issue, directory).say(ctx, resumedNotice, text, "", time.Now().UTC(), func(log noticeLog, _ time.Time) bool {
+		for _, record := range log.Notices {
+			if record.Kind == resumedNotice && record.Event == event {
+				return false
+			}
+		}
+		return true
+	}, event); err != nil {
 		observe("resumption not announced: " + err.Error())
 	}
 }

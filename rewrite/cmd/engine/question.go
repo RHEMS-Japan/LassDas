@@ -15,9 +15,9 @@ import (
 	"ticket-runner/internal/tracker"
 )
 
-// Before the work is handed over, a configured role may put a question to the
-// person who filed the request. Which role that is, is operator configuration
-// naming an existing role; nothing here reads, decodes or grades what any role
+// Where the workflow offers it, a configured role may put a question to the
+// person who filed the request, initially or during recovery. The operator
+// names an existing role; nothing here reads, decodes or grades what any role
 // or requester wrote. The reply is carried into the history exactly as posted.
 func validateQuestionRole(cfg config) error {
 	if cfg.Intake == nil || cfg.Intake.QuestionRole == "" {
@@ -36,8 +36,8 @@ func validateQuestionRole(cfg config) error {
 	return errors.New("intake.question_role must name a configured role with a comment-capable process")
 }
 
-// questionBoundary records the asking role's last successfully stored comment.
-// Later controller notices and requester replies must not advance it.
+// questionBoundary records the asking role's stored comment, or the latest
+// comment at the first waiting read when no submission receipt was saved.
 type questionBoundary struct {
 	After *int64 `json:"after"`
 }
@@ -83,8 +83,8 @@ func questionExecutor(cfg config, issue, runDirectory string, processes chain.Pr
 func (q questionProcesses) Execute(ctx context.Context, assignment chain.Assignment, state chain.State) []chain.Result {
 	processes := q.processes
 	if assignment.Role == q.role {
-		// Keep a receipt across retries of this question. Starting the record
-		// before the child also distinguishes a missing receipt from old runs.
+		// Keep a receipt across retries of this question. The scoped POST
+		// observer fills this record before returning a receipt to the child.
 		_, err := os.Stat(q.path)
 		if errors.Is(err, os.ErrNotExist) {
 			err = writeRuntimeFile(q.path, []byte(`{"after":null}`))
@@ -113,21 +113,26 @@ func latestComment(source tracker.Tracker, rows []json.RawMessage, issue sourceI
 
 func recordQuestion(source tracker.Tracker, directory string, rows []json.RawMessage, issue sourceIssue) error {
 	data, err := os.ReadFile(filepath.Join(directory, "run", "question-post.json"))
-	if errors.Is(err, os.ErrNotExist) {
-		// Older runs did not retain POST receipts. Their existing conservative
-		// boundary cannot be reconstructed from arbitrary comment prose.
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	var boundary questionBoundary
+	if err == nil && json.Unmarshal(data, &boundary) != nil {
+		return errors.New("the question's comment receipt is unreadable")
+	}
+	if boundary.After == nil {
 		highest, readErr := latestComment(source, rows, issue)
 		if readErr != nil {
 			return readErr
 		}
-		data, err = json.Marshal(questionBoundary{After: &highest})
+		boundary.After = &highest
 	}
+	if *boundary.After < 0 {
+		return errors.New("the question's comment receipt is unreadable")
+	}
+	data, err = json.Marshal(boundary)
 	if err != nil {
 		return err
-	}
-	var boundary questionBoundary
-	if err := json.Unmarshal(data, &boundary); err != nil || boundary.After == nil || *boundary.After < 0 {
-		return errors.New("the question's comment receipt is unavailable; keeping the request waiting without discarding later replies")
 	}
 	return writeRuntimeFile(filepath.Join(directory, "question.json"), data)
 }
@@ -204,6 +209,11 @@ func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	for _, record := range log.Notices {
 		notices = append(notices, record.CommentID)
 	}
+	controls, err := pauseReplyIDs(source, directory, issue, cfg.Intake.StopUserIDs, rows)
+	if err != nil {
+		return false, false, err
+	}
+	notices = append(notices, controls...)
 	path := filepath.Join(directory, "question.json")
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {

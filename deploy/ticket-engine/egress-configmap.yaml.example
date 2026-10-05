@@ -18,8 +18,11 @@ data:
   # <dns-cluster-ip>: the cluster DNS Service address, read with
   #   kubectl -n kube-system get service kube-dns -o jsonpath='{.spec.clusterIP}'
   # It has to be the address the Pod's own /etc/resolv.conf names. Compare it
-  # with the nameserver line of any running Pod in the same namespace: a
-  # cluster with a node-local DNS cache can hand Pods a link-local address,
+  # with the nameserver line of a running Pod in the same namespace whose
+  # owner allows this inspection. Reading that file requires exec access to
+  # that Pod, not just a read-only Service GET. Otherwise obtain the observed
+  # address from the runtime operator; do not guess it. A cluster with a
+  # node-local DNS cache can hand Pods a link-local address,
   # which the 169.254.0.0/16 rule below would refuse, and then nothing resolves.
   #
   # The rules are applied when the Pod starts. After editing them, apply this

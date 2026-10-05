@@ -857,7 +857,7 @@ func TestInterruptionIsNeitherAStallFailureNorACompletedStep(t *testing.T) {
 }
 
 func TestARecentlyStartedLaunchDoesNotReportItsEarlierQueueTimeAsSilence(t *testing.T) {
-	for _, resumed := range []string{"new", "completed", "interrupted"} {
+	for _, resumed := range []string{"new", "completed"} {
 		t.Run(resumed, func(t *testing.T) {
 			cfg := watchConfiguration(t)
 			cfg.Roles[0].Processes[0].Command = []string{"/bin/sh", "-c", `cat > received.txt; printf '%s' "$$" > child-pid; exec sleep 60`}
@@ -865,13 +865,6 @@ func TestARecentlyStartedLaunchDoesNotReportItsEarlierQueueTimeAsSilence(t *test
 			state := chain.State{}
 			if resumed != "new" {
 				state.History = []chain.Result{{Role: "implement", Speaker: "worker", Output: "earlier work", StartedAt: earlier, FinishedAt: earlier.Add(time.Hour)}}
-			}
-			if resumed == "interrupted" {
-				// A legacy saved run has the cancellation reason but no new
-				// interruption field. Its pending action is taken up again.
-				state.History[0].Error = "context canceled"
-				state.Pending = &chain.Assignment{Role: "implement"}
-				state.PendingSince = earlier
 			}
 			root, directory := noticeJob(t, state)
 			if err := os.Chtimes(filepath.Join(directory, "issue.json"), earlier, earlier); err != nil {

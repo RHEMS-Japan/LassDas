@@ -1,0 +1,531 @@
+{
+  "router": {
+    "mode": "stages",
+    "llm": {
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "key_env": "MODEL_API_KEY"
+    }
+  },
+  "model_selection": {
+    "judge": {
+      "url": "https://openrouter.ai/api/alpha/decisions",
+      "model": "typesafe/jev-1.13",
+      "key_env": "MODEL_API_KEY"
+    },
+    "authors": [
+      "deepseek",
+      "minimax",
+      "qwen",
+      "z-ai"
+    ]
+  },
+  "github": {
+    "api_url": "https://tracker.example.invalid/api/v3",
+    "repository": "REPLACE_WITH_OWNER/REPLACE_WITH_REPOSITORY",
+    "key_env": "TRACKER_API_KEY",
+    "intake_label": "automation",
+    "labels": {
+      "accepted": "automation-accepted",
+      "processing": "automation-working",
+      "awaiting_requester": "automation-awaiting-requester",
+      "delivered": "automation-delivered",
+      "stopped": "automation-stopped"
+    }
+  },
+  "intake": {
+    "created_since": "REPLACE_WITH_RFC3339_ACCEPTANCE_START",
+    "poll_interval_seconds": 30,
+    "max_running": 1,
+    "stop_report_role": "stop_report",
+    "question_role": "ask_requester"
+  },
+  "instructions": "Operator setup is incomplete: replace this paragraph with the approved project guidance, the delivery target, and what each configured command in this run actually builds, tests, delivers and reads back, before accepting work. Progress in this run is decided by the configured commands, not by anything a role writes: a stage that runs a command is carried on only when that command exits 0, and a stage that runs a model is carried on by the command that follows it. Writing that the work is finished, verified or delivered changes nothing. Keep the original request and its boundaries throughout recovery. Only the configured question role asks the requester anything. A failed verification, review or delivery returns to elicitation: use the actual failure and earlier answers to decide whether the existing roles can repair it within the approved scope. After handoff, ask only about a newly required expansion of authority that the requester alone can approve, supported by the actual failure. An unknown cause returns to work for investigation and the next check within existing permissions; decide other unresolved details and record the reasons. The rule to ask when a requirement is uncertain applies at initial elicitation only. Offer concrete alternatives for the authority decision, including an in-scope alternative when one exists. Never silently expand permissions or weaken the request; an answer does not change filesystem, delivery or credential permissions. Tell the operator what configuration change a wider choice needs before attempting it. Do not ask again about a settled point. Work reports are observations, not permission to expand scope. The runtime adds its own record of what each stage's processes returned; read it rather than assuming an earlier claim was true. A failing command has no ending: it is handed back for repair and run again. Knowledge from requester answers: when a requester answer is needed, settle the approved in-repository write destination during elicitation. The operator supplies it in these instructions; a knowledge reading location alone is not permission to write there. If no write destination is provided, the question role offers repository-appropriate file choices once, together with the necessary question, and keeps the answered choice. This is permission to persist knowledge, not a style question. With no requester answer, do not ask for a destination just to create an empty note. The work role integrates reusable answers with their question context into that agreed file alongside the requested change; preserve existing knowledge, avoid duplicates on retries, and do not record credentials, unnecessary private information or guesses as answers. Keep the original request and write permissions; an answer does not grant wider code changes. The review role checks the written knowledge against the actual question and answer, including omissions or contradictions, as part of reviewing the whole change. Deliver these knowledge changes through the same reviewed pull request, never a separate unreviewed push.",
+  "workflow": {
+    "stages": [
+      {
+        "name": "elicit",
+        "kind": "model"
+      },
+      {
+        "name": "work",
+        "kind": "model"
+      },
+      {
+        "name": "verify",
+        "kind": "command",
+        "on_failure": "elicit"
+      },
+      {
+        "name": "review",
+        "kind": "command",
+        "on_failure": "elicit"
+      },
+      {
+        "name": "deliver",
+        "kind": "command",
+        "on_failure": "elicit"
+      },
+      {
+        "name": "verify_merged",
+        "kind": "command",
+        "on_failure": "elicit"
+      },
+      {
+        "name": "report",
+        "kind": "model"
+      },
+      {
+        "name": "confirm_report",
+        "kind": "command",
+        "on_failure": "report"
+      }
+    ]
+  },
+  "roles": [
+    {
+      "name": "elicit",
+      "purpose": "Settle what the request actually asks for at the entrance, and reconsider the actual failure on a return: answer from the project what can be answered there, and name what only the requester can decide. The standard is: can this request be carried to a delivered, verified result by morning with nobody available to answer? A point is the requester's to decide only when the request, the repository and the operator instructions do not settle it and it changes what the delivered result does, where it goes or what the work may touch: a behaviour the request leaves open without saying you may choose, a target that cannot be told apart, access or a credential that was not given, instructions that contradict each other, or an action that cannot be undone. Wording, naming, language, level of detail and style are never questions: take the reading closest to the request and to what the repository already does, write the choice down with its reason, and leave it to the review of the delivered result; a point once decided is settled and is not listed again as a question. Proceeding with such an open point costs a night's work and asking costs one reply, so proceed only when every point of that kind is absent or already answered and the settled requirements state the completion condition to be held to; at initial elicitation only, ask the requester when you cannot tell whether a point is of that kind. After handoff, ask only about a newly required expansion of authority that the requester alone can approve, supported by the actual failure. An unknown cause returns to work for investigation and the next check within existing permissions; decide other unresolved details and record the reasons. The rule to ask when a requirement is uncertain applies at initial elicitation only.",
+      "processes": [
+        {
+          "name": "requirements",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Read the original request, the prepared checkout and the shared operator instructions, and settle from them whatever the project itself already answers. On a return after a failed stage, read that failure and the previous work first: distinguish a repair within the existing scope from a newly required expansion of authority only the requester can approve. State concrete scope alternatives and any operator configuration change they require; a requester reply does not itself widen permissions. Do not change project files. Return ordinary prose covering four things: the requirements as you will carry them out, naming the target, the behaviour, the delivery and the condition that counts as finished; the points you decided yourself, each with its reason; the points only the requester can decide, each with two to four concrete choices; and any permission or credential this work needs but was not given. A point is the requester's to decide only when the request, the repository and the operator instructions do not settle it and it changes what the delivered result does, where it goes or what the work may touch: a behaviour the request leaves open without saying you may choose, a target that cannot be told apart, access or a credential that was not given, instructions that contradict each other, or an action that cannot be undone. Wording, naming, language, level of detail and style are never questions: take the reading closest to the request and to what the repository already does, write the choice down with its reason, and leave it to the review of the delivered result; a point once decided is settled and is not listed again as a question. Proceeding with such an open point costs a night's work and asking costs one reply, so proceed only when every point of that kind is absent or already answered and the settled requirements state the completion condition to be held to; at initial elicitation only, ask the requester when you cannot tell whether a point is of that kind. After handoff, ask only about a newly required expansion of authority that the requester alone can approve, supported by the actual failure. An unknown cause returns to work for investigation and the next check within existing permissions; decide other unresolved details and record the reasons. The rule to ask when a requirement is uncertain applies at initial elicitation only. Read assigned issue comments, including earlier answers, with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "MODEL_API_KEY"
+          },
+          "tracker_access": "read"
+        }
+      ]
+    },
+    {
+      "name": "ask_requester",
+      "purpose": "Put the points only the requester can decide to them in one comment, with their choices, and read the stored comment back; no workspace writes. A point is the requester's to decide only when the request, the repository and the operator instructions do not settle it and it changes what the delivered result does, where it goes or what the work may touch: a behaviour the request leaves open without saying you may choose, a target that cannot be told apart, access or a credential that was not given, instructions that contradict each other, or an action that cannot be undone. Wording, naming, language, level of detail and style are never questions: take the reading closest to the request and to what the repository already does, write the choice down with its reason, and leave it to the review of the delivered result; a point once decided is settled and is not listed again as a question. Proceeding with such an open point costs a night's work and asking costs one reply, so proceed only when every point of that kind is absent or already answered and the settled requirements state the completion condition to be held to; at initial elicitation only, ask the requester when you cannot tell whether a point is of that kind. After handoff, ask only about a newly required expansion of authority that the requester alone can approve, supported by the actual failure. An unknown cause returns to work for investigation and the next check within existing permissions; decide other unresolved details and record the reasons. The rule to ask when a requirement is uncertain applies at initial elicitation only.",
+      "processes": [
+        {
+          "name": "questioner",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Read the existing comments first with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed. Post exactly one comment, with the same tracker command and post, carrying only the points the requester alone can decide, each with its choices, in ordinary prose the requester can answer in a line. Never ask again a question already stored there: say so in your report instead of posting it twice. Read actual comments first when submission is uncertain, to avoid repeating an already-stored comment. Read back the stored text; never report success from a missing receipt alone. After handoff, ask only about a newly required expansion of authority that the requester alone can approve, supported by the actual failure. An unknown cause returns to work for investigation and the next check within existing permissions; decide other unresolved details and record the reasons. The rule to ask when a requirement is uncertain applies at initial elicitation only.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "MODEL_API_KEY"
+          },
+          "tracker_access": "comment"
+        }
+      ]
+    },
+    {
+      "name": "work",
+      "purpose": "Carry the settled requirements to a working change: investigate, design, implement and run the project's own checks.",
+      "processes": [
+        {
+          "name": "worker",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--write",
+            ".",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Investigate the checkout, design the change, implement it and run the project's own checks yourself before you finish. Change only what the request needs, inside the directories you were given. Report what you did, what you observed and what remains, in ordinary prose. Nothing you write decides whether the work goes on: the configured verification commands run next and their exit status is what carries it. If an earlier command failed, its output is in the record below; repair the cause rather than restating it. Read assigned issue comments, including earlier answers, with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "MODEL_API_KEY"
+          },
+          "tracker_access": "read"
+        }
+      ]
+    },
+    {
+      "name": "verify",
+      "purpose": "Run the operator's own build and test commands against the current change.",
+      "processes": [
+        {
+          "name": "project-build",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/ticket-automation/operator",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/ticket-automation/operator/build"
+          ],
+          "instructions": "Run the operator's build. Its exit status is the observation; it returns no report and no approval.",
+          "env": {
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch"
+          }
+        },
+        {
+          "name": "project-tests",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/ticket-automation/operator",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/ticket-automation/operator/test"
+          ],
+          "instructions": "Run the operator's tests. Its exit status is the observation; it returns no report and no approval.",
+          "env": {
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch"
+          }
+        }
+      ]
+    },
+    {
+      "name": "review",
+      "purpose": "Adversarial review of the change by a model from a different publisher than the worker, run as the operator's own command: its structured verdict decides the exit status, only a real blocking verdict sends the work back, and only that is read.",
+      "processes": [
+        {
+          "name": "adversarial-review",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/ticket-automation/operator",
+            "--network",
+            "inherit",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/adversarial_review.py"
+          ],
+          "instructions": "Review the change as the operator's command. A blocking verdict exits 1 and returns to elicitation before the work stage, as often as a blocking defect is found; a verdict that does not object exits 0. Without a verdict it does neither: trouble with the model service is waited out, asking the models named in REVIEW_MODELS, or REVIEW_MODEL alone, in turn with growing waits, and a setting that keeps the review from running holds this stage, said once and then at intervals, until the operator fixes it and restarts the engine. REVIEW_UNAVAILABLE=pass, not set here, would deliver unreviewed work when no verdict can be obtained, except a checkout with no change at all, which then returns to elicitation. The findings are printed, so they join the history for the worker and the report writer; nothing here reads what any model wrote as prose.",
+          "env": {
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch",
+            "REVIEW_MODEL_URL": "https://openrouter.ai/api/v1/chat/completions",
+            "REVIEW_MODEL": "moonshotai/kimi-k3",
+            "REVIEW_KEY_ENV": "REVIEW_API_KEY",
+            "REVIEW_TEST_COMMANDS": "/opt/ticket-automation/operator/test",
+            "DELIVERY_MERGE_METHOD": "merge"
+          },
+          "secrets": {
+            "REVIEW_API_KEY": "MODEL_API_KEY"
+          }
+        }
+      ]
+    },
+    {
+      "name": "deliver",
+      "purpose": "Carry the reviewed change to the operator-approved repository with the image's fixed delivery process: open a pull request, and merge it only when the configured DELIVERY_MERGE_METHOD permits it.",
+      "processes": [
+        {
+          "name": "delivery",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/ticket-automation/scripts",
+            "--network",
+            "inherit",
+            "--write",
+            ".",
+            "--write",
+            ".git",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/scripts/deliver_git.py"
+          ],
+          "instructions": "Run the image's fixed delivery process. It commits the reviewed change, brings the ticket branch up to date with the integration branch, pushes it, and opens or reuses one pull request. With DELIVERY_MERGE_METHOD=none it leaves that pull request to a person and nothing is merged; otherwise it uses the configured merge method. It writes its own receipt, which the runtime reads back and records. Its exit status is the observation; a refusal says what stopped it. A request that changed no file is refused and returns to elicitation, unless the operator sets DELIVERY_ALLOW_UNCHANGED=1 for it, which this example does not: it is off by default, and with it on such a request ends with nothing delivered once the review before this stage has given a verdict that does not object; the shipped review lets a checkout with no change through on nothing less.",
+          "env": {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch",
+            "DELIVERY_REPOSITORY": "example-owner/example-repository",
+            "DELIVERY_BASE_BRANCH": "example-integration-branch",
+            "DELIVERY_ALLOWED_PATHS": ".",
+            "DELIVERY_MERGE_METHOD": "merge"
+          },
+          "secrets": {
+            "GITHUB_TOKEN": "DELIVERY_GITHUB_TOKEN"
+          },
+          "receipt": ".git/ticket-engine/delivery.json"
+        }
+      ]
+    },
+    {
+      "name": "verify_merged",
+      "purpose": "Check the delivered commit with the image's fixed process: the integration branch after a merge, or the pull request's commit when DELIVERY_MERGE_METHOD=none; not the local working tree.",
+      "processes": [
+        {
+          "name": "merged-check",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/ticket-automation/scripts",
+            "--runtime",
+            "/opt/ticket-automation/operator",
+            "--network",
+            "inherit",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/scripts/verify_merged.py"
+          ],
+          "instructions": "Run the image's fixed post-delivery check. After a merge it fetches the integration branch, confirms the recorded merge is in it, and runs the operator's build and tests against it. With DELIVERY_MERGE_METHOD=none it checks the delivered pull request's head instead and does not claim a merge. The receipt determines the actual ending, including a person's later changes or an ending without a new delivery. Its exit status is the observation.",
+          "env": {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch",
+            "DELIVERY_REPOSITORY": "example-owner/example-repository",
+            "DELIVERY_BASE_BRANCH": "example-integration-branch",
+            "VERIFY_COMMANDS": "/opt/ticket-automation/operator/build\n/opt/ticket-automation/operator/test"
+          },
+          "secrets": {
+            "GITHUB_TOKEN": "DELIVERY_GITHUB_TOKEN"
+          }
+        }
+      ]
+    },
+    {
+      "name": "report",
+      "purpose": "Write the final report from the runtime's own records and post it to the assigned issue.",
+      "processes": [
+        {
+          "name": "reporter",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--create",
+            "report",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Write report/result.md from the original request and the runtime records of what each stage's processes returned, then post exactly that text as one comment with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" post, and read the stored text back. The scoped key value must never be printed. Read existing comments first so an uncertain submission is not stored twice. Claim only what the records show; the next stage compares the stored comment with report/result.md and returns here when they differ.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "MODEL_API_KEY"
+          },
+          "tracker_access": "comment"
+        }
+      ]
+    },
+    {
+      "name": "confirm_report",
+      "purpose": "Read the stored comment back and compare it with the reported text.",
+      "processes": [
+        {
+          "name": "stored-comment-check",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/ticket-automation/operator",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/ticket-automation/operator/confirm-report"
+          ],
+          "instructions": "Read the assigned issue's stored comments and compare them, newest first, with report/result.md. Exit 0 only when one stored comment is exactly that text. Do not require it to be the last comment: the runtime's own notices, such as a declaration of the model a launch chose, a stage's sentence or a restart notice, can follow the report.",
+          "env": {
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch"
+          },
+          "tracker_access": "read"
+        }
+      ]
+    },
+    {
+      "name": "stop_report",
+      "purpose": "Report an authorized stop and actual observations at the assigned issue without resuming the stopped work.",
+      "processes": [
+        {
+          "name": "stopped-reporter",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "The original request has been stopped. Inspect only existing observations and assigned-issue comments; do not clone, implement, deliver, undo effects or change workspace files. Post a truthful account of what happened and what remains uncertain, without claiming original completion. Read existing comments before an uncertain repeat, and read back the stored report. Use /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" with comments or post. Do not print credentials or private raw diagnostics.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "MODEL_API_KEY"
+          },
+          "tracker_access": "comment"
+        }
+      ]
+    }
+  ]
+}

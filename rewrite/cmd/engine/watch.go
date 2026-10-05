@@ -23,14 +23,19 @@ import (
 // Intake settings are operator scope, not a format required of requesters.
 // The explicit timestamp prevents quietly starting every historical issue.
 type intakeConfig struct {
-	ProjectID           int64   `json:"project_id,omitempty"`
-	CreatedSince        string  `json:"created_since"`
-	PollIntervalSeconds int     `json:"poll_interval_seconds,omitempty"`
-	MaxRunning          int     `json:"max_running,omitempty"`
-	StopUserIDs         []int64 `json:"stop_user_ids,omitempty"`
-	StopReportRole      string  `json:"stop_report_role,omitempty"`
-	QuestionRole        string  `json:"question_role,omitempty"`
-	IssueIDs            []int64 `json:"issue_ids,omitempty"`
+	ProjectID                      int64   `json:"project_id,omitempty"`
+	CreatedSince                   string  `json:"created_since"`
+	PollIntervalSeconds            int     `json:"poll_interval_seconds,omitempty"`
+	MaxRunning                     int     `json:"max_running,omitempty"`
+	StopUserIDs                    []int64 `json:"stop_user_ids,omitempty"`
+	StopReportRole                 string  `json:"stop_report_role,omitempty"`
+	StoppedWorkspaceRetentionHours int     `json:"stopped_workspace_retention_hours,omitempty"`
+	QuestionRole                   string  `json:"question_role,omitempty"`
+	IssueIDs                       []int64 `json:"issue_ids,omitempty"`
+	// MaxActiveMinutes limits each delegated interval of newly accepted work.
+	// Zero leaves it unlimited. Stage outcomes never reset the saved clock.
+	MaxActiveMinutes int `json:"max_active_minutes,omitempty"`
+	MaxHardExits     int `json:"max_hard_exits,omitempty"`
 	// CategoryIDs narrows discovery to issues that carry one of these tracker
 	// categories, so a project shared with people's own tickets hands the
 	// runtime only what a requester marked for it. A category added to an
@@ -100,11 +105,20 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 	if err := validateStopReporter(*cfg); err != nil {
 		return fail(err)
 	}
+	if hours := cfg.Intake.StoppedWorkspaceRetentionHours; hours < 0 || uint64(hours) > uint64(time.Duration(1<<63-1)/time.Hour) || hours > 0 && cfg.Intake.StopReportRole == "" {
+		return fail(errors.New("stopped workspace retention requires nonnegative hours and a stop-report role"))
+	}
 	if err := validateQuestionRole(*cfg); err != nil {
 		return fail(err)
 	}
 	if err := validateNotices(*cfg); err != nil {
 		return fail(err)
+	}
+	if !validWorkMinutes(cfg.Intake.MaxActiveMinutes) {
+		return fail(errors.New("intake.max_active_minutes must be zero or a positive duration in minutes"))
+	}
+	if cfg.Intake.MaxHardExits < 0 {
+		return fail(errors.New("intake.max_hard_exits must be zero or positive; zero selects the default of 3"))
 	}
 	if err := prepareStages(cfg); err != nil {
 		return fail(err)
@@ -298,6 +312,22 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	// A finished request whose caches could not be removed is retried each
 	// tick and said once per reason, not once per tick.
 	trimTrouble := map[string]string{}
+	removalTrouble := map[string]string{}
+	trim := func(name, directory string, say func(string)) {
+		if err := trimFinished(directory); err != nil {
+			reason := err.Error()
+			if reason == "" {
+				reason = "(no reason given)"
+			}
+			if trimTrouble[name] != reason {
+				say("finished caches not removed, retried each tick: " + reason)
+				trimTrouble[name] = reason
+			}
+		} else if trimTrouble[name] != "" {
+			say("finished caches removed")
+			delete(trimTrouble, name)
+		}
+	}
 	launch := func(name string, work func() error) {
 		active[name] = true
 		workers.Add(1)
@@ -374,9 +404,26 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				if cfg.Intake.StopReportRole != "" {
 					if done, err := stoppedReportDone(directory); err != nil {
 						observe("reading stopped report: " + err.Error())
+						continue
 					} else if !done {
 						launch(entry.Name(), func() error { return reportStoppedRequest(ctx, cfg, issue, directory, turns, log) })
+						continue
 					}
+				}
+				// The reporter may still need its home to resume. Only after
+				// it finishes (or with none configured) are its caches unused.
+				// Cache cleanup keeps source and evidence; only the separately
+				// opted-in stopped-workspace policy below may discard source.
+				trim(entry.Name(), directory, say)
+				removed, err := reclaimStoppedWorkspace(cfg, issue, directory, time.Now())
+				if err != nil {
+					if removalTrouble[entry.Name()] != err.Error() {
+						say("stopped workspace retained or removal incomplete; will retry: " + err.Error())
+						removalTrouble[entry.Name()] = err.Error()
+					}
+				} else if removed {
+					say("stopped workspace discarded under the configured retention policy; evidence retained")
+					delete(removalTrouble, entry.Name())
 				}
 				continue
 			}
@@ -403,18 +450,12 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 					hoursTurn(ctx, cfg, issue, directory, info.ModTime(), state.History[len(state.History)-1].FinishedAt, say)
 				}
 				modelsTurn(ctx, cfg, issue, directory, state, say)
-				if err := trimFinished(directory); err != nil {
-					reason := err.Error()
-					if reason == "" {
-						reason = "(no reason given)"
-					}
-					if trimTrouble[entry.Name()] != reason {
-						say("finished caches not removed, retried each tick: " + reason)
-						trimTrouble[entry.Name()] = reason
-					}
-				} else if trimTrouble[entry.Name()] != "" {
-					say("finished caches removed")
-					delete(trimTrouble, entry.Name())
+				trim(entry.Name(), directory, say)
+				continue
+			}
+			if held, err := holdPausedRequest(ctx, cfg, issue, directory, request, interval, say); held || err != nil {
+				if err != nil {
+					say("work remains held: " + err.Error())
 				}
 				continue
 			}
@@ -440,7 +481,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				// runtime's hands on its way to stopped.
 				stopping = !answered
 				if answered {
-					resumeTurn(ctx, cfg, issue, directory, creditKnown && creditLow, say)
+					resumeTurn(ctx, cfg, issue, directory, len(state.History), creditKnown && creditLow, say)
 				}
 			}
 			if !stopping {
@@ -595,6 +636,10 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 				}
 				if err := os.MkdirAll(directory, 0700); err != nil {
 					observe("creating request directory: " + err.Error())
+					continue
+				}
+				if err := acceptWorkLimit(directory, cfg.Intake.MaxActiveMinutes, cfg.Intake.MaxHardExits); err != nil {
+					observe("saving accepted work limit: " + err.Error())
 					continue
 				}
 				if err := writeRuntimeFile(path, raw); err != nil {

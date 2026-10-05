@@ -106,6 +106,7 @@ details{margin:.4em 0}details summary{cursor:pointer;color:var(--accent);font-si
 {{if .StageCount}}<div class="bar"><i style="width:{{pct .StageIndex .StageCount}}%"></i></div><div class="line">{{st .Lang .Position}}</div>{{else}}{{if .Position}}<div class="line">{{st .Lang .Position}}</div>{{end}}{{end}}
 {{if .Model}}<div class="line model">{{.Model}}</div>{{end}}
 {{if .Attention}}<div class="attn">{{t .Lang .Attention}}</div>{{end}}
+{{if .WorkTime}}<div class="line">{{t .Lang .WorkTime}}</div>{{end}}
 {{if .Failure}}<div class="fail">{{t .Lang "last failure"}}: {{.Failure}}</div>{{end}}
 <div class="line">{{t .Lang "elapsed"}} {{.Elapsed}} · {{t .Lang "last change"}} {{ago .Lang .Updated}}{{if .Requester}} · {{.Requester}}{{end}}</div></article>{{end}}
 
@@ -138,6 +139,7 @@ details{margin:.4em 0}details summary{cursor:pointer;color:var(--accent);font-si
 <h1><a class="key" href="/jobs/{{.ID}}">{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}}</a> {{.Title}}</h1>
 <div class="strip"><span class="badge {{.Lane}}">{{st $.Lang .Status}}</span>{{if .State}}{{if and .State.Waiting (ne .Lane "awaiting") (not .Stopped)}}<span class="badge awaiting">{{t $.Lang "waiting for the requester"}}</span>{{end}}{{end}}</div>
 {{if .Attention}}<p class="attn">{{t $.Lang .Attention}}</p>{{end}}
+{{if .WorkTime}}<p class="meta">{{t $.Lang .WorkTime}}</p>{{end}}
 {{if .Failure}}<p class="fail">{{t $.Lang "last failure"}}: {{.Failure}}</p>{{end}}
 {{range .Notes}}<p class="err">{{.}}</p>{{end}}
 <div class="panel"><dl class="grid">

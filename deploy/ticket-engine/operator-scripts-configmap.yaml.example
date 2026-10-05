@@ -19,6 +19,10 @@
 # grant the verify process write access to those paths. The image carries Git,
 # Python 3, Go, and Node.js 22 with npm and pnpm (deploy/pod/Dockerfile); a
 # toolchain it lacks is not there for these scripts either.
+# These roles do not inherit the delivery token or your workstation's package
+# credentials. Prepare private dependencies before opening intake; see
+# SETUP.md, "Dependencies and read-only builds". Do not solve a failed fetch by
+# granting a model the delivery token. Build caches belong under $HOME or /tmp.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -27,7 +31,7 @@ metadata:
 data:
   # Until it is replaced this fails on purpose, so an unconfigured build shows
   # up as a failing verify stage on the status page rather than as a pass.
-  # For a Go module the body can be as short as: go build ./...
+  # For a Go module the body can be as short as: go build -o /dev/null ./...
   # A build that installs dependencies into the checkout (node_modules, a
   # virtual environment) needs that path granted to the verify process.
   build: |
@@ -54,7 +58,7 @@ data:
     a restart notice. A check that wants the report last fails on every launch
     once one of them follows it, and the run then never ends.
 
-    Exits 0 when one comment matches and 1 otherwise. What it found is printed
+    Exits 0 when one comment matches a nonempty report and 1 otherwise. What it found is printed
     and joins the run's history. It never posts, edits or deletes anything.
     """
     import json
@@ -90,10 +94,12 @@ data:
         report = Path(os.environ["TASK_WORKSPACE"]) / "report" / "result.md"
         if not report.is_file():
             finish(1, "no report/result.md in the workspace")
+        wanted = report.read_text(encoding="utf-8").strip()
+        if not wanted:
+            finish(1, "report/result.md is empty; write and post the report before confirming it")
         stored = stored_comments()
         if not stored:
             finish(1, "no comment is stored on the issue")
-        wanted = report.read_text(encoding="utf-8").strip()
         # The tracker tool lists comments oldest first; the newest are read first here.
         for later, comment in enumerate(reversed(stored)):
             if (comment.get("content") or "").strip() == wanted:

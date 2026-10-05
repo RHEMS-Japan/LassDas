@@ -19,6 +19,14 @@ import (
 	"ticket-runner/internal/tracker"
 )
 
+// A regression must fail locally, not wait for go test's package timeout.
+func exampleCheckContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func loadExample(t *testing.T, path string) config {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -153,7 +161,7 @@ func exampleBoundaries(t *testing.T, path, workerKey string, gateway bool) {
 	})
 	root := filepath.Join(t.TempDir(), "must-not-be-created")
 	var log bytes.Buffer
-	err := watchRequests(context.Background(), cfg, root, &log)
+	err := watchRequests(exampleCheckContext(t), cfg, root, &log)
 	if err == nil || !strings.Contains(err.Error(), "explicit intake.project_id") {
 		t.Fatalf("unset scope did not stop intake: %v", err)
 	}
@@ -577,7 +585,9 @@ func TestEveryExampleCarriesTheEntranceStandard(t *testing.T) {
 			roles[role.Name] = role
 		}
 		for _, name := range []string{"elicit", "ask_requester"} {
-			for _, sentence := range []string{requesterPointTest, preferencesAreSettled, askWhenInDoubt} {
+			// Every example settles requirements before handoff. The ordered
+			// example separately distinguishes recovery from initial questions.
+			for _, sentence := range []string{requesterPointTest, preferencesAreSettled, strings.Split(askWhenInDoubt, ";")[0]} {
 				if !strings.Contains(routingRoleDescription(roles[name]), sentence) {
 					t.Fatalf("%s: %s does not carry: %s", path, name, sentence)
 				}
@@ -833,12 +843,12 @@ func TestAnExampleLeftPartlyUneditedIsRefused(t *testing.T) {
 		cfg.Backlog.BaseURL = "https://tracker.example.com/api/v2"
 		cfg.Intake.ProjectID, cfg.Intake.CreatedSince = 17, "2026-01-02T00:00:00Z"
 		root := filepath.Join(t.TempDir(), "must-not-be-created")
-		err := watchRequests(context.Background(), cfg, root, io.Discard)
+		err := watchRequests(exampleCheckContext(t), cfg, root, io.Discard)
 		if err == nil || !strings.HasPrefix(err.Error(), "instructions still holds the example's paragraph") {
 			t.Fatalf("%s with the example's instructions: %v", path, err)
 		}
 		cfg.Instructions = "Deliver to the project's repository."
-		err = watchRequests(context.Background(), cfg, root, io.Discard)
+		err = watchRequests(exampleCheckContext(t), cfg, root, io.Discard)
 		if err == nil || !strings.HasSuffix(err.Error(), " still holds the example's placeholder host under example.invalid; a watch needs your own value there") ||
 			!strings.Contains(err.Error()[:strings.Index(err.Error(), " still holds")], ".") {
 			t.Fatalf("%s with the example's hosts: %v", path, err)
