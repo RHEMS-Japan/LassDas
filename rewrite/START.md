@@ -4,6 +4,8 @@
 **バイナリがあること、モデルが完了と言ったこと、本番で依頼が完遂したことは別です。**
 実モデル試験では納品と報告まで進んだ例も、複数モデルが誤記を承認した例もあります。翌朝の完成を保証できる状態ではありません。
 
+Kubernetes に導入する場合は、[設定を写す前の a / b / c の選択](../deploy/ticket-engine/SETUP.md#choose-the-setup-path-before-copying-values)から進めます。課題管理・namespace・納品地点・依存の取得方法を決め、private な依存や読み取り専用の checkout でも検査が動くことを、受付を開ける前に確かめます。配布 bundle だけを持っている場合は、同じ版のソースの `deploy/ticket-engine/SETUP.md` を参照してください。
+
 ## 配布物
 
 - `bin/ticket-engine`: 受付、役割への引き渡し、実行履歴、再開。
