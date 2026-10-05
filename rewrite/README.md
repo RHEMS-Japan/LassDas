@@ -311,13 +311,15 @@ before anyone has read it.
 
 A watch, and so the check, also refuses a configuration that still holds one
 of the shipped examples' placeholders: a URL whose host is under
-`example.invalid`, which cannot exist, or the paragraph the examples'
-`instructions` open with. It names the first one by its place, for example
+`example.invalid`, which cannot exist, a `REPLACE_WITH_` component of
+`github.repository`, or the paragraph the examples' `instructions` open with.
+It also refuses a token prefix (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
+or `github_pat_`) in `github.key_env`: that field names an environment
+variable, not the credential value. It names the first problem by its place, for example
 `roles[0].processes[0].env.TASK_REPOSITORY still holds the example's
 placeholder host under example.invalid; a watch needs your own value there`.
-Only the host of a URL is looked at, so an author's address under that name or
-a sentence that mentions it is yours to write. A GitHub repository component
-still beginning with `REPLACE_WITH_` is also refused. A runtime started on a
+For the URL placeholder check, only the host is looked at, so an author's address under that name or
+a sentence that mentions it is yours to write. A runtime started on a
 configuration with such a host would take up requests and fail each of them
 over and over, launching models every time. The commands an example expects
 the operator to supply are not checked here: a stage whose command is missing
@@ -467,9 +469,13 @@ a person. It must name an existing role with a comment-capable process, which
 is checked before any work is accepted. Without the setting nothing waits.
 
 A successful run of that role holds the request. The run history records that
-it is waiting, and the collector records in `queue/jobs/<id>/question.json` how
-far that issue's comments had gone at the moment of the question. The request
-is then skipped until the issue's creator, or an operator listed in
+it is waiting, and the collector records the asking role's stored comment ID
+in `queue/jobs/<id>/question.json`. Replies arriving before the next poll are
+still read; recorded controller notices are not answers. If no submission
+receipt was saved, the collector instead records the latest comment ID at that
+read and waits for a later reply. It cannot reconstruct an earlier question's
+position without a receipt, but it does not hold the request forever waiting
+for one. The request is then skipped until the issue's creator, or an operator listed in
 `intake.stop_user_ids`, posts a comment with words after that point. A status
 or field change, which the tracker records as a comment without words, is not
 an answer; the collector makes such changes itself while it waits. That
@@ -1250,7 +1256,9 @@ start immediately followed by a pause. An answer received while it is low
 likewise gets one acknowledgement saying it is waiting. Those receipts replace
 the separate pause comment for that episode, including after a restart. The
 recovery comment is sent when execution starts, not merely when credit returns
-while another request still occupies the slot.
+while another request still occupies the slot. It replaces the ordinary start
+announcement rather than adding a second one. A low-allowance receipt also
+states how many requests are ahead when there are any.
 
 An authorized stop does not wait for the balance: recording it launches no
 model. A request held below the floor is still read for a stop on every tick,
