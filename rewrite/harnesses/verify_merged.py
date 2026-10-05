@@ -167,6 +167,13 @@ def verify(arguments):
                        + earlier + ["The configured verification commands were not run."]))
         return 0
     if receipt.get("changed_by_person"):
+        if receipt.get("merge_sha"):
+            print("Not checked: when the delivery last looked, a person had changed branch %s of pull request "
+                  "%s to %s and merged it as commit %s. This process did not verify that merge or run the "
+                  "configured verification commands. The delivery report names local work not included; "
+                  "the pull request and branch were not read again here."
+                  % (receipt.get("branch"), named, receipt.get("branch_head"), receipt["merge_sha"]))
+            return 0
         where = ("The delivery's commit %s is not on that branch, so it is not in the pull request."
                  % receipt["not_pushed"] if receipt.get("not_pushed")
                  else "The delivery's last commit %s is on that branch." % receipt.get("head"))

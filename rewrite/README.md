@@ -311,13 +311,15 @@ before anyone has read it.
 
 A watch, and so the check, also refuses a configuration that still holds one
 of the shipped examples' placeholders: a URL whose host is under
-`example.invalid`, which cannot exist, or the paragraph the examples'
-`instructions` open with. It names the first one by its place, for example
+`example.invalid`, which cannot exist, a `REPLACE_WITH_` component of
+`github.repository`, or the paragraph the examples' `instructions` open with.
+It also refuses a token prefix (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
+or `github_pat_`) in `github.key_env`: that field names an environment
+variable, not the credential value. It names the first problem by its place, for example
 `roles[0].processes[0].env.TASK_REPOSITORY still holds the example's
 placeholder host under example.invalid; a watch needs your own value there`.
-Only the host of a URL is looked at, so an author's address under that name or
-a sentence that mentions it is yours to write. A GitHub repository component
-still beginning with `REPLACE_WITH_` is also refused. A runtime started on a
+For the URL placeholder check, only the host is looked at, so an author's address under that name or
+a sentence that mentions it is yours to write. A runtime started on a
 configuration with such a host would take up requests and fail each of them
 over and over, launching models every time. The commands an example expects
 the operator to supply are not checked here: a stage whose command is missing
@@ -479,9 +481,13 @@ a person. It must name an existing role with a comment-capable process, which
 is checked before any work is accepted. Without the setting nothing waits.
 
 A successful run of that role holds the request. The run history records that
-it is waiting, and the collector records in `queue/jobs/<id>/question.json` how
-far that issue's comments had gone at the moment of the question. The request
-is then skipped until the issue's creator, or an operator listed in
+it is waiting, and the collector records the asking role's stored comment ID
+in `queue/jobs/<id>/question.json`. Replies arriving before the next poll are
+still read; recorded controller notices are not answers. If no submission
+receipt was saved, the collector instead records the latest comment ID at that
+read and waits for a later reply. It cannot reconstruct an earlier question's
+position without a receipt, but it does not hold the request forever waiting
+for one. The request is then skipped until the issue's creator, or an operator listed in
 `intake.stop_user_ids`, posts a comment with words after that point. A status
 or field change, which the tracker records as a comment without words, is not
 an answer; the collector makes such changes itself while it waits. That
@@ -600,9 +606,11 @@ Neither an attribute nor the version a change replaces decides it, though
 either makes Git take a file as binary: text in Shift_JIS is refused under a
 `binary` or `-diff` attribute and in place of a file that held a NUL. Those
 first 8000 bytes are read only for a file the change would otherwise be
-refused for. Where such a name
-or text is printed or recorded, each byte that is not UTF-8 shows as a
-replacement character (U+FFFD). Two limits follow from looking at bytes. An
+refused for. Individual path names in refusals and checks preserve bytes that
+are not UTF-8 as byte escapes, so different names remain distinguishable.
+This includes unresolved conflict markers, merge conflicts and paths changed
+by the integration branch. Raw diagnostic text still uses replacement
+characters (U+FFFD). Two limits follow from looking at bytes. An
 ASCII entry can be found where none was written: the second byte of a
 Shift_JIS character can be an ASCII letter, so `ツode` (bytes 83 63 6F 64 65)
 holds `code`, and such a change is refused although it carries no forbidden
@@ -719,6 +727,12 @@ after it:
   says what was read and when, and that the request ended then. A delivery
   interrupted after opening a pull request but before recording it does not
   know that one, and opens another if a person closed it meanwhile.
+
+A server policy that forbids fetching the reported head does not change just
+because delivery repeats. This command has no run-wide retry limit. Bound
+repeated work with the runtime's active-work limit when using a runtime that
+provides it; without a positive limit, these attempts can continue. A pause
+at that limit is not proof that the requested result was delivered.
 
 Switching to a merge method takes a round from the person it was left to only
 once the delivery's own merge request succeeds, and only that merge is
@@ -980,17 +994,28 @@ the run to its first stage. Other stage transitions use the configured order.
 
 The shipped example sends failed verification, review and delivery commands to
 `elicit`, not straight to `work`. Requirements are reconsidered using the actual
-failure and earlier answers. A repair inside the agreed scope continues to work;
-a new choice only the requester can make can go through the existing question
-role, with concrete alternatives. This also covers a worker reporting that the
+failure and earlier answers. A repair or an unknown failure inside the agreed
+scope continues to work: investigate and check the cause, recording choices.
+After handoff, only evidence that a newly required expansion of authority cannot
+be decided by the roles may lead to the existing question role, with concrete
+alternatives. The entrance rule to ask about an uncertain requirement does not
+apply to recovery. This also covers a worker reporting that the
 allowed paths cannot satisfy the request, followed by a failed check. Nothing
 parses that report to decide progression. A process error in a model stage still
 retries that stage; it is not this command-failure path.
 
 A reply does not widen filesystem, delivery or credential permissions. A wider
 choice needs the operator to update the relevant configuration; an in-scope
-alternative can proceed without that. Do not silently reduce the request. Each
-failed command now costs another requirements launch and routing decision, even
+alternative can proceed without that. Do not silently reduce the request.
+Where active-work limits are available, set a positive `intake.max_active_minutes`
+and `intake.max_hard_exits` to bound retries while an operator changes permissions.
+Reaching the limit pauses the request and posts the existing pause notice; it is
+not completion. The question comment and run record identify the configuration
+change needed. After the operator resolves it, an authorized user can post
+`再開` on its own first line to grant another interval with the same saved cap.
+A requester reply alone never updates permissions. Without a positive
+active-work limit, this recovery path has no bound on repeated attempts.
+Each failed command now costs another requirements launch and routing decision, even
 for a simple repair. Existing configurations retain their selected `on_failure`
 targets until the operator edits them. `confirm_report` still returns to `report`.
 
@@ -1335,7 +1360,9 @@ start immediately followed by a pause. An answer received while it is low
 likewise gets one acknowledgement saying it is waiting. Those receipts replace
 the separate pause comment for that episode, including after a restart. The
 recovery comment is sent when execution starts, not merely when credit returns
-while another request still occupies the slot.
+while another request still occupies the slot. It replaces the ordinary start
+announcement rather than adding a second one. A low-allowance receipt also
+states how many requests are ahead when there are any.
 
 An authorized stop does not wait for the balance: recording it launches no
 model. A request held below the floor is still read for a stop on every tick,
@@ -1791,6 +1818,7 @@ is not a guarantee that every answer will be recorded correctly. The runtime
 places requester comments, unchanged, immediately after the original request,
 before role reports and their diagnostics. These comments are not dropped by
 the ordinary history's 60-record window or repeated in that later section.
+With no requester comments, neither that section nor its heading is added.
 The review command's model context limits still apply; a local process-to-review
 test checks that ordinary diagnostic output does not hide the answer from the
 model request, not that a real model will judge the resulting note correctly.

@@ -236,6 +236,18 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("records no pushed commit and ticket branch to verify", result.stderr)
 
+    def test_a_persons_changed_and_merged_branch_is_not_reported_as_awaiting_merge(self):
+        self.left_to_person_receipt(changed_by_person=True, branch_head=self.unmerged, merge_sha=self.merge,
+                                    not_pushed=None, not_committed=["main.go"], not_committed_count=1)
+        result = self.verify("/bin/sh -c 'touch %s/ran-anyway'" % self.home,
+                             DELIVERY_REMOTE_URL=str(self.root / "unreachable.git"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("merged it as commit " + self.merge, result.stdout)
+        self.assertIn("did not verify that merge", result.stdout)
+        self.assertIn("not read again here", result.stdout)
+        self.assertNotIn("What a person merges from there", result.stdout)
+        self.assertFalse((self.home / "ran-anyway").exists())
+
     def test_endings_a_person_caused_end_the_check_without_running_anything(self):
         # A pull request closed without a merge, or one whose branch a person
         # changed: nothing of this delivery is left to verify, and failing would

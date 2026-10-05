@@ -26,15 +26,25 @@ RECEIPT = Path(".git/ticket-engine/delivery.json")
 
 # Text Git gives that is not UTF-8 (a file in Shift_JIS, a name in its bytes)
 # is kept as surrogate escapes, so that a name goes back to Git as the bytes
-# it was. Printed or recorded, each such byte is a replacement character,
-# given as its UTF-8 bytes: Python's UTF-8 encoder takes only ASCII text back.
+# it was. Unstructured Git diagnostics replace each invalid byte below;
+# individual path labels use readable() to retain the distinct byte values.
 codecs.register_error("replacement-character",
                       lambda error: ("\N{REPLACEMENT CHARACTER}".encode() * (error.end - error.start), error.end))
 
 
 def readable(text):
-    """Text as a person reads it, with no byte that is not UTF-8 left in it."""
-    return text.encode("utf-8", "replacement-character").decode("utf-8")
+    """A path for display only; byte names must not collapse to the same text.
+
+    Normal Unicode names stay readable. Invalid UTF-8 is shown as Python's
+    quoted bytes (b'...\\x82...'), not replacement characters. Quote literal
+    escapes and controls too, so a real backslash is not mistaken for a byte.
+    None of these displayed strings is passed back to Git as a path.
+    """
+    if re.search("[\udc80-\udcff]", text):
+        return repr(text.encode("utf-8", "surrogateescape"))
+    if any(not character.isprintable() or character in "\\\"'" for character in text):
+        return repr(text)
+    return text
 
 
 class DeliveryError(RuntimeError):
@@ -189,7 +199,10 @@ def git(*arguments, url=None):
         if host.scheme == "https":
             helper = "!" + " ".join(shlex.quote(part) for part in
                                     (sys.executable, "-B", str(SUPPORT), "--credential-helper"))
-            os.environ["DELIVERY_CREDENTIAL_HOST"] = host.hostname or ""
+            # Git includes an explicit port in the credential's host field.
+            # Keep that authority exactly, excluding any URL user information;
+            # stripping the port both breaks this target and permits another.
+            os.environ["DELIVERY_CREDENTIAL_HOST"] = host.netloc.rsplit("@", 1)[-1]
             command += ["-c", "credential.helper=", "-c", "credential.helper=" + helper]
     elif workspace_as_reviewed:
         command += WORKSPACE_FILES
