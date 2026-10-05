@@ -1334,6 +1334,43 @@ Each check has an answer you can see. One that cannot be answered is a
 blocker, not something to note and pass. The intake is still closed, so
 nothing here can start a request.
 
+### Inspecting the queue without starting work
+
+From a checkout of this repository, use the source-shipped helper below.
+It needs Python 3 on the workstation and in the selected container, and
+kubectl on the workstation. Keep all three files in `operations/` together;
+they are not part of the host bundle. Set `CONTEXT`, `NS`, `POD`, `CONTAINER`
+and the absolute `QUEUE` path to the intended installation first. No context
+or workload is selected implicitly.
+
+```sh
+sh deploy/ticket-engine/operations/idle-check.sh \
+  --context "$CONTEXT" --namespace "$NS" --pod "$POD" \
+  --container "$CONTAINER" --queue "$QUEUE"
+```
+
+The one JSON line contains counts only: `jobs`, `running`, `waiting`,
+`unfinished`, `stopped`, `stop_report_pending`, `unknown`, and `idle`.
+Exit 0 means no pending work was observed in those local records; exit 1
+means recorded work or uncertainty remains; exit 2 means the check could
+not be performed. A nonempty live directory counts as running, even if it
+might be stale. Waiting requests are not idle for this conservative check.
+Unreadable, missing or conflicting histories and linked paths are unknown,
+not completed work; a missing or unreadable accepted issue record is unknown
+too. An unfinished stop report is not idle either. Without
+a stop-report history, a recorded stop is unknown: this helper does not read
+configuration to assume the reporter was disabled. Inspect that case
+separately if no reporter is configured.
+Use the status page's individual job history to investigate nonzero counts;
+this helper does not dump that history.
+
+This is an observation of local bookkeeping, not a process supervisor or
+the engine's completion/stop-authorization decision. It does not contact the
+tracker, prove delivery, stop a request, or authorize deployment. Records can
+change immediately after the check. It sends no credential value as an
+argument and does not print request text or remote command diagnostics.
+Use `--timeout SECONDS` to bound the remote read (default 300).
+
 ### The configuration, as the engine reads it
 
 First run the check of section 4 inside the Pod, on the configuration the
@@ -1841,6 +1878,11 @@ comment does not resume the request, and there is no resume command. To try
 again, file a new issue. Quoted text, mentions and comments by anyone else
 are not stops.
 
+The [queue inspection helper](#inspecting-the-queue-without-starting-work)
+also distinguishes unfinished stop reporting from a stopped original run.
+An `idle` result does not verify the stop comment's authority or its report's
+content; retain the original stop and both histories for inspection.
+
 ## 10. Upgrading to a new image
 
 ### Where a new image comes from
@@ -1893,13 +1935,35 @@ what it tried to do.
    unstarted, and the engine starts it.
 
    ```sh
-   kubectl -n "$NS" exec "$POD" -c engine -- sh -c 'cd /var/lib/ticket-automation/queue &&
-     find . -type f -not -path "*/workspace/*" -not -path "*/.source-*" -not -path "*/homes/*" \
-       -not -path "*/live/*" -not -name engine.log -not -name runner.lock -print0 | tar --null -T - -cf -' > queue-copy.tar
-   mkdir queue-copy && tar -xf queue-copy.tar -C queue-copy
+   sh deploy/ticket-engine/operations/copy-queue.sh \
+     --context "$CONTEXT" --namespace "$NS" --pod "$POD" \
+     --container "$CONTAINER" --queue "$QUEUE" \
+     --output /absolute/path/to/new-queue-copy
    kubectl -n "$NS" get configmap <consumer>-ticket-engine-operator \
      -o jsonpath='{.data.operator\.json}' > operator-current.json
    ```
+
+   Run from a source checkout as in [section 7](#inspecting-the-queue-without-starting-work).
+   The output directory must not exist, and its parent must already be a real
+   directory. Source and destination paths must be absolute and must not pass
+   through symbolic links. The helper rejects links, special files, archive
+   traversal and duplicate archive paths; it does not remove or overwrite an
+   existing destination. It keeps every regular record regardless of size and
+   preserves file modification times. Excluded working directories are not a
+   backup of undelivered work.
+
+   A remote failure produces no output directory. Local extraction starts only
+   after the remote copy and archive validation succeed. A local write failure
+   returns nonzero and leaves any new partial output for inspection; do not
+   rehearse against it. Success is exit 0, not merely a directory existing.
+   The records are private (directories 0700, files 0600) and can contain task
+   text or configuration. Keep them out of public logs and commits.
+
+   This is not an atomic snapshot or a backup: the controller may change
+   different files during the read. Use your agreed quiescent-copy or storage
+   snapshot procedure when consistency is required. The helper never pauses
+   the controller or changes cluster resources. Use the chosen output path
+   instead of `queue-copy` in the commands below.
 
 2. Build the engine for your workstation from the new commit (Go 1.25 or
    later; the output directory must not exist yet):
