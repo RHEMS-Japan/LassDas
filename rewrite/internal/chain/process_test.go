@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -132,6 +135,96 @@ func TestProcessGetsOriginalAndAssignmentWithoutShellInterpolation(t *testing.T)
 	}
 	if strings.Contains(result.Output, "diagnostic only") || result.Diagnostics != "diagnostic only" {
 		t.Fatal("diagnostic output was mixed with the report")
+	}
+}
+
+// Exercise the runtime's actual prompt and the shipped review command. The
+// local model returns a scripted verdict; this checks transport, not judgment.
+func TestRequesterAnswersReachReviewModelBeyondProcessDiagnostics(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := filepath.Abs("../../harnesses/adversarial_review.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "decision.txt")
+	if err := os.WriteFile(file, []byte("Existing decision.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitEnv := []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_SYSTEM=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0"}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "decision.txt"},
+		{"-c", "user.name=Fixture", "-c", "user.email=fixture", "commit", "-qm", "initial"}} {
+		command := exec.Command("git", args...)
+		command.Dir, command.Env = workspace, gitEnv
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("fixture git: %s %v", output, err)
+		}
+	}
+	if err := os.WriteFile(file, []byte("Use dist/.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sent := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			Messages []struct{ Content string }
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || len(input.Messages) != 2 {
+			t.Errorf("review model input: %+v %v", input, err)
+			http.Error(w, "bad fixture request", http.StatusBadRequest)
+			return
+		}
+		select {
+		case sent <- input.Messages[1].Content:
+		default:
+			t.Error("unexpected extra model request")
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"tool_calls":[{"function":{"name":"verdict","arguments":"{\"blocking\":false,\"findings\":\"fixture verdict\"}"}}]}}]}`)
+	}))
+	defer server.Close()
+	t.Setenv("PROMPT_REVIEW_FIXTURE_KEY", "synthetic-prompt-review-key")
+	process := Process{Name: "reviewer", Command: []string{python, "-B", script}, Directory: workspace, Timeout: 15 * time.Second,
+		Secrets: map[string]string{"REVIEW_API_KEY": "PROMPT_REVIEW_FIXTURE_KEY"},
+		Env: map[string]string{"TASK_WORKSPACE": workspace, "TASK_HOME": t.TempDir(),
+			"REVIEW_MODEL_URL": server.URL, "REVIEW_MODEL": "fixture/reviewer", "REVIEW_TEST_COMMANDS": "",
+			"GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_SYSTEM": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1"}}
+	const answer = "Use release/. Keep exactly three entries."
+	state := State{Request: "Use the requester's chosen destination and retain it with the implementation.", History: []Result{
+		{Role: "elicit", Speaker: "planner", Output: strings.Repeat("requirements ", 250), Diagnostics: strings.Repeat("progress ", 800)},
+		{Role: "ask", Speaker: "questioner", Output: strings.Repeat("context ", 300) + "Which destination?", Diagnostics: strings.Repeat("progress ", 800)},
+		{Role: "ask", Speaker: "requester", Output: answer},
+		{Role: "work", Speaker: "builder", Output: strings.Repeat("work report ", 650), Diagnostics: strings.Repeat("progress ", 800)},
+		{Role: "verify", Speaker: "check", Output: strings.Repeat("checks ", 350), Diagnostics: strings.Repeat("progress ", 800)},
+	}}
+	for _, older := range []int{0, 65} {
+		t.Run(fmt.Sprint(older), func(t *testing.T) {
+			current := state
+			current.History = append([]Result(nil), state.History...)
+			for i := 0; i < older; i++ {
+				current.History = append(current.History, Result{Role: "verify", Speaker: "check", Output: strings.Repeat("later check ", 150)})
+			}
+			role, assignment := Role{Name: "review"}, Assignment{Role: "review"}
+			prompt := processPrompt(role, process, assignment, current)
+			if len(prompt) < 30000 {
+				t.Fatal("fixture does not exercise a long runtime prompt")
+			}
+			result := process.run(context.Background(), role, assignment, current)
+			if result.Error != "" || !strings.Contains(result.Output, "PASSED") {
+				t.Fatalf("review command did not complete: %+v", result)
+			}
+			select {
+			case input := <-sent:
+				if !strings.Contains(input, answer) || !strings.Contains(input, "Use dist/.") {
+					t.Fatalf("review model lost the answer or the contradicting diff: answer=%t diff=%t prompt_bytes=%d", strings.Contains(input, answer), strings.Contains(input, "Use dist/."), len(prompt))
+				}
+				t.Logf("prompt_bytes=%d requester_position=%d later_records=%d answer_in_model=true contradictory_diff_in_model=true", len(prompt), strings.Index(prompt, answer), older)
+			default:
+				t.Fatal("no actual model request was captured")
+			}
+		})
 	}
 }
 
