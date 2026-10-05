@@ -59,8 +59,8 @@ func roleAccess(cfg config, issue string, options ...func(*tracker.IssueScope)) 
 		if process.TrackerAccess == "" {
 			return process, nil, nil
 		}
-		// "comment" leaves one comment per launch: when the launch is over,
-		// the comments it stored before its last one are removed.
+		// "comment" tries to remove this launch's earlier posts after it ends.
+		// Refusal or the cleanup time limit may leave more than its last post.
 		// "every-comment" keeps every post. Anything else cannot post.
 		launchOptions := append([]func(*tracker.IssueScope){}, options...)
 		if process.TrackerAccess == "comment" {

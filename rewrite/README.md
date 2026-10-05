@@ -1832,13 +1832,23 @@ by waiting; reasons remain visible, not reported as a completed request.
 Set a process's `tracker_access` to `read`, `comment` or `every-comment` to give
 it temporary access to the assigned issue without giving it the controller's
 tracker account key. `read` permits the issue and its comments; `comment`
-additionally permits posting ordinary comment content, and leaves one comment
-per launch: when the launch is over, the comments it stored before its last
-one are removed with the controller's account, so a role that posts a trial
-line before its question leaves only the question. Which post is which is
-never read; the one the tracker stored last stays, a removal the tracker
-refuses leaves that comment in place, and a notification the tracker already
-sent for a removed comment is not recalled. `every-comment` keeps every post.
+additionally permits posting ordinary comment content. After the launch ends,
+the controller tries to remove that launch's earlier posts, retaining its last
+one. This is best-effort cleanup, not a guarantee of one remaining comment.
+Cleanup has a separate **20-second limit** after the role's endpoint closes;
+it does not hold up the role's POST responses. GitHub changes are spaced at
+least one second apart, so a launch with more than twenty earlier posts cannot
+normally remove them all within that limit. Slower responses, refusal or a
+rate-limit wait can leave more, even after a smaller number of posts.
+
+The last stored post and other people's comments are never removed by this
+cleanup. Earlier posts left behind are not retried after the launch closes or
+after an engine restart: the per-launch list is not saved. A notification
+already sent for a removed comment is not recalled. Operators should expect
+trial posts to remain when cleanup cannot finish; increasing its time limit
+would delay the next step and still could not guarantee deletion. `every-comment`
+intentionally keeps every post. No post's wording is interpreted to decide
+which one is retained.
 The assignment comes from the operator's
 `--issue`, the accepted watch issue, or explicit `assigned_issue` configuration
 for file-based requests. It is never inferred from model prose. Watch mode
