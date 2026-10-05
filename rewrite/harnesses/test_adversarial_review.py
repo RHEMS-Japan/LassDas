@@ -123,7 +123,8 @@ class AdversarialReviewTests(unittest.TestCase):
         # Waits in fractions of a second, so that waiting out a model service
         # and holding take a test moments rather than minutes.
         environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
-                       "TASK_WORKSPACE": str(self.workspace), "TASK_HOME": str(self.home), "REVIEW_MODEL_URL": service.url,
+                       "TASK_WORKSPACE": str(self.workspace), "TASK_HOME": str(self.home), "TASK_ISSUE": "TICKET-41",
+                       "REVIEW_MODEL_URL": service.url,
                        "REVIEW_MODEL": "fixture/reviewer", "REVIEW_KEY_ENV": "REVIEW_API_KEY", "REVIEW_API_KEY": KEY,
                        "REVIEW_TEST_COMMANDS": sys.executable + " -c \"print('tests ran fine')\"",
                        "REVIEW_DIFF_PATHS": "src tests", "REVIEW_ATTEMPTS": "2",
@@ -135,6 +136,112 @@ class AdversarialReviewTests(unittest.TestCase):
     def run_review(self, service, stdin_text=STDIN, **extra):
         return subprocess.run([sys.executable, "-B", str(SCRIPT)], input=stdin_text, capture_output=True,
                               text=True, env=self.environment(service, **extra), timeout=120)
+
+    def test_selected_latest_role_reports_reach_review_whole_alongside_diff(self):
+        service = ModelStandIn([{"verdict": (False, "checked")}])
+        self.addCleanup(service.close)
+        explanation = "First finding\n" + "設計と実装の説明。\n" * 700 + "Last finding and its verification\n"
+        history = [
+            {"role": "work", "speaker": "writer", "output": "Superseded explanation"},
+            {"role": "review", "speaker": "reviewer", "output": "Earlier objection"},
+            {"role": "work", "speaker": "writer", "output": explanation},
+            {"role": "work", "speaker": "auditor", "output": "Independent work observations"},
+            {"role": "review", "speaker": "runtime", "output": "Not explanation material"},
+        ]
+        path = self.home / "history.json"
+        path.write_text(json.dumps({"request": "Make the requested change", "pending": {"role": "review"},
+                                    "history": history}), encoding="utf-8")
+        result = self.run_review(service, TASK_HISTORY=str(path), PR_DESCRIPTION_ROLE="work")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sent = service.requests[0]["body"]["messages"][1]["content"]
+        selected = sent.split("Proposed pull request explanation", 1)[-1]
+        self.assertIn(explanation + "\n\nIndependent work observations", selected)
+        self.assertNotIn("Superseded explanation", selected)
+        self.assertNotIn("Not explanation material", selected)
+        self.assertIn("+    return 2", sent)
+
+    def test_description_failures_end_or_review_instead_of_waiting_for_unchanging_material(self):
+        path = self.home / "history.json"
+        for case in ("large", "near_limit", "empty", "broken", "missing", "oversized"):
+            with self.subTest(case=case):
+                if case in ("large", "near_limit", "empty"):
+                    path.write_text(json.dumps({"history": [{"role": "work", "speaker": "writer",
+                                                            "output": "x" * {"large": 70_000, "near_limit": 59_900,
+                                                                            "empty": 0}[case]}]}))
+                elif case == "broken":
+                    path.write_text("broken JSON")
+                elif case == "missing":
+                    path.unlink()
+                else:
+                    with path.open("wb") as saved:
+                        saved.truncate((64 << 20) + 1)
+                service = ModelStandIn([{"verdict": (False, "The actual diff was reviewed.")}])
+                self.addCleanup(service.close)
+                process, stdout, stderr = self.start_review(service, TASK_HISTORY=str(path), PR_DESCRIPTION_ROLE="work")
+                try:
+                    try:
+                        status = process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.fail("description held review: " + stderr.read_text()[-500:])
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+                fixable = case in ("large", "near_limit", "empty")
+                self.assertEqual(status, 1 if fixable else 0, stdout.read_text() + stderr.read_text())
+                self.assertEqual(len(service.requests), 0 if fixable else 1)
+                self.assertNotIn("NOT REVIEWED", stdout.read_text())
+                if fixable:
+                    self.assertIn("SENT BACK", stdout.read_text())
+                    self.assertIn("role work", stdout.read_text())
+                    if case == "large":
+                        self.assertIn("70000 bytes", stdout.read_text())
+                    if case == "near_limit":
+                        self.assertIn("59900 bytes", stdout.read_text())
+                else:
+                    sent = service.requests[0]["body"]["messages"][1]["content"]
+                    for words in ("Pull request explanation omitted", "return 2", "tests ran fine"):
+                        self.assertIn(words, sent)
+                    self.assertIn("Pull request explanation omitted", stdout.read_text())
+                print("description: %s exit=%d model_requests=%d" % (case, status, len(service.requests)))
+
+        path.write_text(json.dumps({"history": [{"role": "work", "speaker": "writer",
+                                                "output": "The work was explained."}]}))
+        for setting, options in (
+            ("TASK_HISTORY", {}),
+            ("TASK_HISTORY", {"REVIEW_UNAVAILABLE": "pass"}),
+            ("PR_DESCRIPTION_MAX_BYTES", {"TASK_HISTORY": str(path), "PR_DESCRIPTION_MAX_BYTES": "0"}),
+            ("PR_DESCRIPTION_MAX_BYTES", {"TASK_HISTORY": str(path), "PR_DESCRIPTION_MAX_BYTES": "abc"}),
+            ("PR_DESCRIPTION_MAX_BYTES", {"TASK_HISTORY": str(path), "PR_DESCRIPTION_MAX_BYTES": "1"}),
+            ("PR_DESCRIPTION_MAX_BYTES", {"TASK_HISTORY": str(path.with_name("absent.json")),
+                                          "PR_DESCRIPTION_MAX_BYTES": "200"}),
+            ("PR_DESCRIPTION_ROLE", {"TASK_HISTORY": str(path), "PR_DESCRIPTION_ROLE": "report"}),
+            ("PR_DESCRIPTION_ROLE", {"TASK_HISTORY": str(path), "PR_DESCRIPTION_ROLE": "report",
+                                     "REVIEW_UNAVAILABLE": "pass"}),
+            ("PR_DESCRIPTION_ROLE", {"TASK_HISTORY": str(path), "PR_DESCRIPTION_ROLE": "report",
+                                     "REVIEW_UNAVAILABLE": "pass", "REVIEW_MODEL_URL": ""}),
+        ):
+            with self.subTest(setting=setting, options=options):
+                service = ModelStandIn([{"verdict": (False, "must not be requested")}])
+                self.addCleanup(service.close)
+                process, stdout, stderr = self.start_review(service, **{"PR_DESCRIPTION_ROLE": "work", **options})
+                try:
+                    self.said(stderr, "fix the setting and restart the engine", timeout=3)
+                    self.assertIsNone(process.poll())
+                    self.assertIn(setting, stderr.read_text())
+                    self.assertNotIn("looked at again", stderr.read_text())
+                    self.assertEqual(service.requests, [])
+                    self.assertNotIn("NOT REVIEWED", stdout.read_text())
+                    self.assertNotIn("SENT BACK", stdout.read_text())
+                    if options.get("PR_DESCRIPTION_MAX_BYTES") in {"0", "abc"}:
+                        self.assertIn("PR_DESCRIPTION_MAX_BYTES must be a positive integer", stderr.read_text())
+                        self.assertNotIn("cannot fit the required introduction", stderr.read_text())
+                    if setting == "PR_DESCRIPTION_ROLE":
+                        self.assertIn("report", stderr.read_text())
+                        self.assertIn("role that reports before review, not a process name", stderr.read_text())
+                finally:
+                    process.kill()
+                    process.wait(timeout=5)
 
     def start_review(self, service, **extra):
         """A review running in the background: its runtime text read from a

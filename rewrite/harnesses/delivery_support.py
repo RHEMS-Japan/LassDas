@@ -1,6 +1,6 @@
 """Shared pieces of the fixed delivery processes; never a model tool.
 
-These programs run configured operations only. Every value comes from the
+These programs run configured operations only. Authority comes from the
 operator's environment, not from a role's answer, and the credential never
 reaches a command line, a remote URL or the printed report: Git asks for it
 through the credential helper below, which answers one configured host.
@@ -49,6 +49,90 @@ def readable(text):
 
 class DeliveryError(RuntimeError):
     """A refusal or a failed operation. The process exits non-zero."""
+
+
+class DescriptionSettingError(DeliveryError):
+    """Only the operator can supply or correct this description setting."""
+
+
+def default_pull_request_body(issue, method):
+    return ("Prepared by the configured ticket engine for %s. Only the operator's allowed "
+            "paths are included. Review the change itself; this description is not a result.%s"
+            % (issue, " Merging it is left to a person." if method == "none" else ""))
+
+
+def description_size(text, source="The pull request description"):
+    """One operator limit shared by review and publication, without truncation."""
+    try:
+        limit = int(setting("PR_DESCRIPTION_MAX_BYTES", "60000"))
+        if limit <= 0:
+            raise ValueError()
+    except ValueError as error:
+        raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES must be a positive integer") from error
+    size = len(text.encode("utf-8"))
+    if size > limit:
+        raise DeliveryError("%s is %d bytes and exceeds the configured %d-byte limit; nothing was shortened"
+                            % (source, size, limit))
+
+
+def description_report():
+    """The chosen role's latest reports, from this run's existing checkpoint."""
+    role = os.environ.get("PR_DESCRIPTION_ROLE", "")
+    if not role:
+        return "", ""
+    path = os.environ.get("TASK_HISTORY")
+    if not path:
+        raise DescriptionSettingError("TASK_HISTORY is unset; use a runtime that supplies it to review and delivery")
+    issue = os.environ.get("TASK_ISSUE")
+    if not issue:
+        raise DescriptionSettingError("TASK_ISSUE is unset; use the assigned request in both review and delivery")
+    prefix = default_pull_request_body(issue, setting("DELIVERY_MERGE_METHOD", "merge")) + "\n\n"
+    try:
+        description_size(prefix + "x", "The required introduction and a one-byte report")
+    except DescriptionSettingError:
+        raise
+    except DeliveryError as error:
+        raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES cannot fit the required introduction: " + str(error)) from error
+    try:
+        with Path(path).open("rb") as saved:
+            raw = saved.read(64 * 1024 * 1024 + 1)
+        if len(raw) > 64 * 1024 * 1024:
+            raise ValueError("checkpoint exceeds the local 64 MiB read limit")
+        history = json.loads(raw.decode("utf-8"))["history"]
+        if not isinstance(history, list):
+            raise ValueError("checkpoint history is not a list")
+        selected = []
+        for record in reversed(history):
+            name, speaker = record["role"], record["speaker"]
+            if not isinstance(name, str) or not isinstance(speaker, str):
+                raise ValueError("checkpoint has a malformed report identity")
+            if speaker in {"requester", "runtime"}:
+                continue
+            if name == role:
+                text = record.get("output", "")
+                if not isinstance(text, str):
+                    raise ValueError("checkpoint has a malformed report body")
+                selected.append(text)
+            elif selected:
+                break
+        text = "\n\n".join(reversed(selected))
+        text.encode("utf-8")
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as error:
+        reason = error.strerror if isinstance(error, OSError) else str(error)
+        note = "Pull request explanation omitted: saved history could not be read (%s). The change itself still requires review." % reason
+        try:
+            description_size(prefix + note)
+        except DeliveryError as error:
+            raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES cannot fit the explanation omission notice: " + str(error)) from error
+        return "", note
+    if not selected:
+        raise DescriptionSettingError("PR_DESCRIPTION_ROLE=%r has no recorded report; choose a role that reports "
+                                      "before review, not a process name or a later reporting role" % role)
+    if not text.strip():
+        raise DeliveryError("The latest report of role %s is empty; return to the worker for an explanation" % role)
+    description_size(prefix + text, "The complete description (latest report of role %s: %d bytes)"
+                     % (role, len(text.encode("utf-8"))))
+    return text, ""
 
 
 class TransientError(DeliveryError):

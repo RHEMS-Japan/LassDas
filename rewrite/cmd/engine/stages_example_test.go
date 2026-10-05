@@ -114,6 +114,10 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 	if roles["deliver"].Processes[0].Receipt == "" {
 		t.Fatal("the delivery stage leaves the runtime nothing to read back")
 	}
+	method := roles["review"].Processes[0].Env["DELIVERY_MERGE_METHOD"]
+	if method == "" || method != roles["deliver"].Processes[0].Env["DELIVERY_MERGE_METHOD"] {
+		t.Fatal("review and delivery must size the same pull request introduction")
+	}
 	if _, staged := roles["ask_requester"]; !staged {
 		t.Fatal("the example has no question role")
 	}

@@ -524,9 +524,11 @@ Neither an attribute nor the version a change replaces decides it, though
 either makes Git take a file as binary: text in Shift_JIS is refused under a
 `binary` or `-diff` attribute and in place of a file that held a NUL. Those
 first 8000 bytes are read only for a file the change would otherwise be
-refused for. Where such a name
-or text is printed or recorded, each byte that is not UTF-8 shows as a
-replacement character (U+FFFD). Two limits follow from looking at bytes. An
+refused for. Individual path names in refusals and checks preserve bytes that
+are not UTF-8 as byte escapes, so different names remain distinguishable.
+This includes unresolved conflict markers, merge conflicts and paths changed
+by the integration branch. Raw diagnostic text still uses replacement
+characters (U+FFFD). Two limits follow from looking at bytes. An
 ASCII entry can be found where none was written: the second byte of a
 Shift_JIS character can be an ASCII letter, so `ツode` (bytes 83 63 6F 64 65)
 holds `code`, and such a change is refused although it carries no forbidden
@@ -602,7 +604,7 @@ after it:
   number of them in all, whatever it is. A later delivery does not read the
   pull request or its branch again: it says what was read and when, and names
   the changes the workspace holds uncommitted then.
-- merged by a person: reported as merged by someone else, with the commit the
+- merged by a person without changing this delivery's head: reported as merged by someone else, with the commit the
   service reports for their merge (recorded as `merge_sha`: the merge commit,
   the squashed commit, or for a rebase the commit the integration branch was
   moved to); work after that is a further round with a pull request of its
@@ -617,12 +619,20 @@ after it:
   pull request's own head is what tells the two apart. If a round stopped
   after its commit and before its push, the earlier round's record carries the
   stopped round's commit time as `committed_at`.
-- not handled: a person pushes to the pull request's branch and merges it
-  before any delivery has seen their push, and the next delivery has no new
-  work. That delivery takes their merge for an earlier round and pushes its
-  own older commit again; while their branch exists the push is refused, and
-  the delivery ends 1 saying that nothing was merged, which is not so, so the
-  work goes round again.
+- a person changes the branch and merges it before the next delivery observes
+  either action: the delivery reads the head the service says was merged and
+  compares its Git ancestry with the recorded delivery head. A merged head
+  that precedes this process's genuinely new commit is an earlier round,
+  as above. Otherwise the person's changes take over, as with an open branch
+  they changed: nothing is pushed over them and no replacement pull request
+  is opened. The report names their merge, any delivery commit not included,
+  and work still uncommitted locally. Continuing that leftover work needs a
+  new request. The record retains both `changed_by_person` and `merge_sha`;
+  later reports explicitly describe the last observation, not a new read.
+  This also handles a squash and a deleted branch when the server allows the
+  exact merged head to be fetched. If that head cannot be read, the delivery
+  retains the known merge in its error and retries; it does not claim that
+  nothing was merged. Server availability of that exact head still matters.
 - merged by a person, but the service does not report the merge commit yet: the
   delivery ends 1 saying so, and the next one reads it again.
 - closed without a merge: the request ends. The delivery ends 0 with `Pull
@@ -635,6 +645,12 @@ after it:
   says what was read and when, and that the request ended then. A delivery
   interrupted after opening a pull request but before recording it does not
   know that one, and opens another if a person closed it meanwhile.
+
+A server policy that forbids fetching the reported head does not change just
+because delivery repeats. This command has no run-wide retry limit. Bound
+repeated work with the runtime's active-work limit when using a runtime that
+provides it; without a positive limit, these attempts can continue. A pause
+at that limit is not proof that the requested result was delivered.
 
 Switching to a merge method takes a round from the person it was left to only
 once the delivery's own merge request succeeds, and only that merge is
@@ -653,16 +669,20 @@ and says that this delivery merged nothing, without looking at whether a
 person merged since; it ends 0 only when that commit is there and every
 command passed. That is what a person is asked to merge, including the
 catch-up merge, which the verify stage before the review never saw, so keep
-the stage. Once a delivery has recorded a person's merge, the check verifies
-the integration branch as usual. If the person's merge deletes the branch
+the stage. Once a delivery has recorded a person's merge of its unchanged
+head, the check verifies the integration branch as usual. If the person's merge deletes the branch
 before a delivery has recorded it, the check cannot read the branch and the
 run goes round once more, after which the next delivery records the merge;
 anything the work changed in that extra round goes in a further round's pull
 request. After the two endings a person causes, a closed pull request and a
-branch a person changed, the check runs nothing and ends 0, saying what it did
+branch a person changed (including a later merge of that changed head), the
+check runs nothing and ends 0, saying what it did
 and did not look at: nothing of this delivery is left to verify, and failing
 would only send the work round again. An earlier round of the request that was
-merged is named there and not checked. Where the target's own checks on pull
+merged is named there and not checked. A person's changed-and-merged head is
+reported as `Not checked`, with its actual merge commit: neither the merged
+result nor the configured verification commands were checked by this process.
+Where the target's own checks on pull
 requests are what the person merging relies on, the stage can be left out:
 
 ```json
@@ -730,8 +750,10 @@ stop comment, not by a limit.
 
 No verdict, no pass. The adversarial review is what justifies delivering
 without a person, so by default the command exits 0 only on a verdict that
-does not object and 1 only on one that does; without a verdict it does
-neither. Trouble with the model service (a connection that fails or times
+does not object and 1 on one that does. An empty or oversized report selected
+for the pull request description also returns 1 for the worker to repair,
+explicitly before model review; it is not described as a model's verdict.
+Otherwise, without a verdict it does neither. Trouble with the model service (a connection that fails or times
 out, an HTTP error, a reply without a verdict or with one whose `blocking` is
 not plain), and any unexpected error, is waited out: the models named in
 `REVIEW_MODELS` (newline- or comma-separated, in order of preference; a model
@@ -791,7 +813,9 @@ requests with one model and 300 with three. A longer
 it delivers unreviewed work when no verdict can be obtained: after
 `REVIEW_ATTEMPTS` requests (3), the models in turn, or at once where the review
 would otherwise hold, the command prints `NOT REVIEWED` with the reason and
-exits 0. One rule comes before it: a checkout in which Git lists no changed
+exits 0. Description settings that the worker cannot fix still hold for an
+operator correction and restart. Another rule comes before this opt-in:
+a checkout in which Git lists no changed
 path and no earlier delivery round committed one can end with nothing
 delivered if it is let through, so it is let through only on a verdict, and
 without one the command ends 1 with `NOT REVIEWED` and the reason. The same
@@ -877,6 +901,70 @@ the record, so the input grows with every stage and every repair cycle, and a
 long repair loop will eventually exceed a model's context. No session sharing
 or summarizing is implemented here on purpose: measure it first. Nothing in
 this mode has run with a live model or a real tracker.
+
+### A pull request description from the run's reports
+
+An operator can give the fixed review and delivery commands the same
+`PR_DESCRIPTION_ROLE`, naming a role that reports before review and runs again
+after a review send-back (`work` in the shipped example), not a process name
+or the later reporting role. Its report explains the change to a person
+reviewing the pull request. Tell that existing role to
+write its findings, implementation explanation, settings and verification
+commands in its final ordinary report. No special headings or model answer
+schema are required. With no role selected, the fixed delivery description
+is unchanged.
+
+This uses the runtime's read-only `TASK_HISTORY` reference, not a document in
+the consumer's repository. Configure this option only with a runtime that
+supplies that reference to both commands. The latest contiguous set of reports
+from the selected role is used, with each process's original words. Requester
+and runtime control messages are not substitutes for that role's report. The
+review receives exactly this selected text alongside the diff. It must check
+the explanation too; its presence is not proof that the change is correct.
+
+The delivery adds the selected text to its ordinary introduction and checks
+the whole description for `DELIVERY_FORBIDDEN_TEXT` and its credential before
+any publication. Give review and delivery the same `PR_DESCRIPTION_ROLE`,
+`PR_DESCRIPTION_MAX_BYTES` and `DELIVERY_MERGE_METHOD` (default `merge`). The
+same `TASK_ISSUE` must reach both; `watch` supplies it from the assigned request.
+`PR_DESCRIPTION_MAX_BYTES` is a
+positive UTF-8 byte limit (default 60000); both commands check the complete
+body, including the shared introduction. An oversized or empty selected report
+sends the work back with its reason (exit 1), rather than holding the review
+without asking a model. When the checkpoint is missing, unreadable, malformed
+or over its local read limit, review continues without the explanation, and
+both the model's input and the delivery result state what could not be read.
+The pull request body states that omission too; the remaining diff and test
+output are still reviewed. An unset `TASK_HISTORY` or `TASK_ISSUE`, an invalid size setting,
+or no recorded report from the selected role asks the operator to fix the
+configuration and restart, even with `REVIEW_UNAVAILABLE=pass`. So does a limit
+too small for the required introduction or the reason an explanation was omitted:
+the worker cannot shorten that fixed text. A recorded but
+empty report still goes back to the worker; the refusal identifies the role,
+and an oversized report also states its actual UTF-8 byte count. This limit is not a
+claim about a hosting service's exact limit. The old repository-document option
+`DELIVERY_PR_BODY_FILE` is removed; there is no compatibility path or migration.
+
+The generated body is retained in the delivery process's
+`TASK_HOME/pull-request-description.md`, outside the checkout. The delivery
+record identifies that location and the commit the description accompanies.
+The explanation itself is never committed into the consumer repository.
+Ordinary run retention still applies to this file; it is not permanent storage.
+
+While an open pull request still contains a body previously submitted by the
+automation, later reviewed work can update it. If the service returns a
+different body, keep it as the person's version and continue the configured
+push and merge. The result says it was retained and where the latest generated
+description is kept. CRLF/CR and LF are compared as the same line endings,
+so line-ending normalization alone is not reported as a person's edit.
+Communication failures remain distinct from different text;
+an unknown write result is not a confirmed update.
+
+There is no atomic comparison-and-update. A person's edit between the last
+read and an update can race with that update. Coordinate direct edits with
+automation rather than treating its saved body as a lock. This option does
+not change ticket comments or establish production delivery. The report role
+must still describe what actually reached the requested destination.
 
 ### A read-only status page
 

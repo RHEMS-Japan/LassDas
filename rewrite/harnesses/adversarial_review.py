@@ -13,7 +13,9 @@ The send-back counter and a log stay in the process's own directory
 (TASK_HOME) and only inform: a verdict stands whether or not they were saved.
 
 No verdict, no pass. The command exits 0 only on a verdict that does not
-object and 1 only on one that does; without a verdict it does neither.
+object and 1 on one that does. An empty or oversized selected PR report also
+returns 1 for the worker to repair, explicitly before model review. Otherwise,
+without a verdict it does neither.
 Every call of the verdict tool in a reply is read, and in each every field
 named blocking in any letter case, taken as true or false when its meaning
 is plain: true or false, a number equal to 1 or 0, or "true", "yes", "1",
@@ -53,7 +55,9 @@ stage in the examples), and the review runs again after it.
 REVIEW_UNAVAILABLE=pass is the operator's opt-in for the old behaviour, and
 it delivers unreviewed work when no verdict can be obtained: after
 REVIEW_ATTEMPTS requests, or at once where the review would hold, it prints
-NOT REVIEWED with the reason and exits 0. One exception stands even then:
+NOT REVIEWED with the reason and exits 0. Description settings that the
+worker cannot fix still hold until the operator corrects them and restarts.
+Another exception stands even then:
 when Git lists no changed path at all and no earlier delivery round
 committed one, work let through can end with nothing delivered, so it is let
 through only on a verdict, and without one this exits 1. So it does when
@@ -100,6 +104,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import delivery_support
 
 LIMIT = 20000       # characters of diff shown; a longer diff is cut with a visible marker
 NEW_FILE_LIMIT = 6000
@@ -394,6 +399,14 @@ def held_back(unchanged):
 def prepare():
     """The settings, read before anything is asked, and the workspace and
     TASK_HOME, which a held review looks at again."""
+    # A model outage may be bypassed, but cannot repair a description setting.
+    description, note, description_error = "", "", ""
+    try:
+        description, note = delivery_support.description_report()
+    except delivery_support.DescriptionSettingError:
+        raise
+    except delivery_support.DeliveryError as error:
+        description_error = str(error)
     workspace = Path(setting("TASK_WORKSPACE"))
     url = setting("REVIEW_MODEL_URL")
     parsed = urllib.parse.urlsplit(url)
@@ -432,6 +445,8 @@ def prepare():
         found["state"].mkdir(parents=True, exist_ok=True)
     except OSError as error:
         raise ReviewError("TASK_HOME cannot be used: %s" % error, recheck=True)
+    found.update(description=scrub(description, key), description_note=scrub(note, key),
+                 description_error=scrub(description_error, key))
     return found
 
 
@@ -532,6 +547,12 @@ def ask_once(found, model, prompt, diff, tests, rounds):
                        "\n\n[...]\n\nThe most recent reports:\n%s\n\nDiff of the change:\n%s\n\nTest output:\n%s"
                        % (prompt[:HEAD], prompt[-TAIL:] if len(prompt) > HEAD else "",
                           diff or "(no change)", tests or "(no test command configured)"))}]}
+    if found.get("description_note"):
+        request["messages"][1]["content"] += "\n\n" + found["description_note"]
+    if found.get("description"):
+        request["messages"][1]["content"] += (
+            "\n\nProposed pull request explanation (review these original words with the diff; "
+            "they are not evidence that delivery already happened):\n" + found["description"])
     body = json.dumps(request, ensure_ascii=False).encode()
     headers = {"Authorization": "Bearer " + found["key"], "Content-Type": "application/json"}
     context = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE") or None) if found["secure"] else None
@@ -666,6 +687,11 @@ def reviewed(stdin_text, unchanged, passing, ran):
     commands printed, for a review that starts again."""
     found = prepare()
     key, state = found["key"], found["state"]
+    if found.get("description_error"):
+        reason = "Review: SENT BACK to the worker before model review: " + found["description_error"]
+        print(reason)
+        log(found, reason + "\n\n")
+        return 1
     counter = state / "review-send-backs"
     try:
         sent_back = int(counter.read_text().strip() or "0") if counter.is_file() else 0
@@ -694,6 +720,8 @@ def reviewed(stdin_text, unchanged, passing, ran):
     elif blocking:
         outcome, status = "SENT BACK to the worker", 1
         sent_back += 1
+    if found.get("description_note"):
+        findings = found["description_note"] + "\n" + findings
     findings = scrub(findings, key)
     # What the reviewer wrote without a verdict stays in the record: in the
     # result printed here, and in review.md, where it was logged as written.
@@ -742,9 +770,9 @@ def main():
             # running must not let an unchanged checkout through either.
             unchanged = nothing_changed(os.environ.get("TASK_WORKSPACE", ""))
             return reviewed(stdin_text, unchanged, passing, ran)
-        except ReviewError as error:
+        except (ReviewError, delivery_support.DescriptionSettingError) as error:
             reason = scrub(str(error), credential())
-            if passing:
+            if passing and not isinstance(error, delivery_support.DescriptionSettingError):
                 return without_verdict(named_models(), reason, unchanged,
                                        "The work goes on unreviewed this time; nothing here is a verdict on the change.")
             # No verdict can be obtained, and none is pretended: the review
@@ -753,7 +781,8 @@ def main():
             interval = waits("REVIEW_HOLD_SECONDS", "900")
             if reason != held:
                 say("Review by %s: held, with no verdict: %s. The work is neither let through nor sent back; %s"
-                    % (named_models(), reason, "this is looked at again every %gs." % interval if error.recheck else
+                    % (named_models(), reason, "this is looked at again every %gs." % interval
+                       if isinstance(error, ReviewError) and error.recheck else
                        "fix the setting and restart the engine. The restarted runtime records this review as a"
                        " failure and goes on at the review's on_failure stage, and the review runs again after it."))
                 held = reason
