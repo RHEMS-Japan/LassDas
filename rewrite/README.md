@@ -1209,6 +1209,14 @@ A positive cap is saved at acceptance. Configuration changes do not silently
 change an accepted request's cap. Do not delete or edit runtime records to change
 the policy. No migration or backward-format support is provided.
 
+For these time-limited requests, `intake.max_hard_exits` sets the number of
+forced exits that pauses the request (default 3). Omission and zero both select
+3; negative and fractional values are invalid. A value of 1 pauses after the
+first forced exit. This bound is saved with the time cap. It is not a count of
+ordinary failed commands or model requests. Zero does not mean unlimited
+restarts. For example, `"max_active_minutes": 120, "max_hard_exits": 3` allows
+two automatic recoveries before a third forced exit requires attention.
+
 Time accumulates while the request runtime is active, across successful stages,
 failures and routing retries. Success does not reset it. Waiting for a slot,
 waiting after a question has returned, waiting after a credit hold has stopped
@@ -1227,7 +1235,7 @@ for a hung kernel or processes outside the configured supervisor's ownership.
 After the pause notice, the issue creator or an account in `intake.stop_user_ids`
 can post a new comment whose first nonblank line is exactly `再開`, with further
 instructions on later lines. This grants another interval with the same saved
-cap. The acknowledgment means the resume was recorded, not that work started or
+cap, and resets the forced-exit count to zero. The acknowledgment means the resume was recorded, not that work started or
 finished. Slots and credit may still be unavailable. Answer an outstanding
 question separately; repeated resumes do not become answers or grant more time.
 
@@ -1241,9 +1249,15 @@ delivery destination or authorizes repeating an external operation blindly.
 
 Normal shutdown waits for the child and saves elapsed time; restart uses the
 remaining allowance. A forced exit or failed final save can leave an interval
-whose end is unknown. That request is held with an unconfirmed-time explanation,
-without charging downtime or resetting the total. The status page shows the cap
-and confirmed time; an unfinished interval is not included in that total.
+whose end is unknown. Recovery closes that interval without adding its unknown
+time or downtime, counts one forced exit, and continues using the saved remaining
+allowance. It posts one automatic-recovery notice with the count and saved limit.
+At the forced-exit limit it instead pauses, posts that reason and waits for the
+existing authorized resume. This never marks a request complete.
+
+The status page shows the time cap, confirmed time and forced-exit count/limit
+as ordinary information, not as an attention alert. Completed requests do not
+show those ongoing limits; an open interval is never counted as measured time.
 
 After inspecting prior external effects, use the authorized resume for a readable
 pause. Damaged records need operator inspection and a reviewed repair procedure,

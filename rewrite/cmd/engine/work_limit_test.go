@@ -106,26 +106,26 @@ func TestWorkLimitSettingsAndAcceptanceRemainOwnerScoped(t *testing.T) {
 		}
 	}
 	directory := t.TempDir()
-	if err := acceptWorkLimit(directory, 3); err != nil {
+	if err := acceptWorkLimit(directory, 3, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := acceptWorkLimit(directory, 0); err != nil {
+	if err := acceptWorkLimit(directory, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := acceptWorkLimit(directory, 7); err != nil {
+	if err := acceptWorkLimit(directory, 7, 0); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadWorkLimit(t, directory); got.Clock.MaxMinutes != 3 {
+	if got := loadWorkLimit(t, directory); got.Clock.MaxMinutes != 3 || got.Clock.MaxHardExits != 3 {
 		t.Fatal("a staged acceptance changed its saved cap")
 	}
 	if err := writeRuntimeFile(filepath.Join(directory, workLimitFile), []byte("broken")); err != nil {
 		t.Fatal(err)
 	}
-	if err := acceptWorkLimit(directory, 7); err == nil {
+	if err := acceptWorkLimit(directory, 7, 0); err == nil {
 		t.Fatal("a damaged interrupted acceptance was replaced")
 	}
 	unlimited := t.TempDir()
-	if err := acceptWorkLimit(unlimited, 0); err != nil {
+	if err := acceptWorkLimit(unlimited, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := loadWorkLimit(t, unlimited); got.Clock != nil {
@@ -176,7 +176,7 @@ func TestWorkLimitIntakePublishesTheCapBeforeTheIssue(t *testing.T) {
 
 func TestWorkLimitAccumulatesRunsAndExcludesEveryIdleGap(t *testing.T) {
 	directory := t.TempDir()
-	if err := acceptWorkLimit(directory, 1); err != nil {
+	if err := acceptWorkLimit(directory, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	clock := newWorkTime()
@@ -212,7 +212,7 @@ func TestWorkLimitHardExitIsUnknownAndNormalExitKeepsRemainingTime(t *testing.T)
 	for _, crash := range []bool{false, true} {
 		t.Run(map[bool]string{false: "normal restart", true: "forced exit"}[crash], func(t *testing.T) {
 			directory := t.TempDir()
-			if err := acceptWorkLimit(directory, 2); err != nil {
+			if err := acceptWorkLimit(directory, 2, 0); err != nil {
 				t.Fatal(err)
 			}
 			clock := newWorkTime()
@@ -234,11 +234,8 @@ func TestWorkLimitHardExitIsUnknownAndNormalExitKeepsRemainingTime(t *testing.T)
 			}
 			record := loadWorkLimit(t, directory)
 			if crash {
-				if !record.held() || record.Pauses[0].Reason != unmeasuredPause || record.Clock.Elapsed != 0 || record.Clock.Active == nil {
+				if record.held() || record.Clock.Elapsed != 0 || record.Clock.Active != nil {
 					t.Fatalf("unknown interval invented: %+v", record)
-				}
-				if !strings.Contains(pausedWorkText(record.Pauses[0], record.Clock), "確認したわけではありません") {
-					t.Fatal("unknown was called limit reached")
 				}
 			} else {
 				if record.held() || record.Clock.Elapsed != 30*time.Second || record.Clock.Active != nil {
@@ -265,11 +262,92 @@ func TestWorkLimitHardExitIsUnknownAndNormalExitKeepsRemainingTime(t *testing.T)
 	}
 }
 
-func TestWorkLimitSaveFailureStillCancelsAndNeverClearsUnmeasuredWork(t *testing.T) {
+func TestWorkLimitHardExitRecoveryRunsThenPausesAtSavedCountAndResets(t *testing.T) {
+	for _, configured := range []int{0, 1, 2} {
+		t.Run(fmt.Sprintf("configured=%d", configured), func(t *testing.T) {
+			cfg := watchConfiguration(t)
+			holdingWorker(&cfg)
+			clock := newWorkTime()
+			useWorkTime(t, clock)
+			remote := &noticeTracker{}
+			remote.install(t, alwaysChoose("implement"))
+			root, directory := noticeJob(t, chain.State{})
+			if err := acceptWorkLimit(directory, 2, configured); err != nil {
+				t.Fatal(err)
+			}
+			issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
+			issue.Creator.ID = 55
+			limit := configured
+			if limit == 0 {
+				limit = 3
+			}
+			for count := 1; count <= limit; count++ {
+				record := loadWorkLimit(t, directory)
+				at := clock.source().now().Add(-24 * time.Hour)
+				record.Clock.Active = &at
+				if count == 1 {
+					record.Clock.Elapsed = 30 * time.Second
+				}
+				measured := record.Clock.Elapsed
+				if err := saveWorkLimit(directory, record); err != nil {
+					t.Fatal(err)
+				}
+				for tick := 0; tick < 2; tick++ {
+					held, err := holdPausedRequest(context.Background(), cfg, issue, directory, noticeRequest, time.Second, func(string) {})
+					if err != nil || held != (count == limit) {
+						t.Fatalf("count=%d tick=%d held=%t err=%v", count, tick, held, err)
+					}
+				}
+				recovered := loadWorkLimit(t, directory)
+				if recovered.Clock.HardExits != count || recovered.Clock.MaxHardExits != limit || recovered.Clock.Elapsed != measured || recovered.Clock.Active != nil {
+					t.Fatalf("recovery counted twice, invented time or changed cap: %+v", recovered.Clock)
+				}
+				if count < limit {
+					posts := remote.withPrefix("強制終了から自動で再開")
+					if len(posts) != count || !strings.Contains(posts[count-1], fmt.Sprintf("%d 回目、上限 %d 回", count, limit)) {
+						t.Fatalf("recovery notice: %v", posts)
+					}
+				}
+				if count == 1 && count < limit {
+					finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+					pid := waitTestPID(t, filepath.Join(directory, "workspace", "child-pid"))
+					clock.advance(89 * time.Second)
+					if err := syscall.Kill(pid, 0); err != nil {
+						t.Fatal("recovered child lost remaining time")
+					}
+					finish()
+					if saved := loadWorkLimit(t, directory); saved.held() || saved.Clock.Elapsed != 119*time.Second {
+						t.Fatalf("remaining time not used: %+v", saved.Clock)
+					}
+					t.Logf("forced exit 1: child started without a reply; measured 30s -> 1m59s; limit=%d", limit)
+				}
+			}
+			record := loadWorkLimit(t, directory)
+			if record.Pauses[0].Reason != hardExitPause || loadJobState(t, directory).Done {
+				t.Fatal("count limit became completion")
+			}
+			pauses := remote.withPrefix("この依頼の自動処理")
+			if len(pauses) != 1 || !strings.Contains(pauses[0], fmt.Sprintf("上限の %d 回", limit)) {
+				t.Fatalf("pause did not name its limit: %v", pauses)
+			}
+			remote.mu.Lock()
+			remote.rows = append(remote.rows, issueComment(990, 55, "再開"))
+			remote.mu.Unlock()
+			held, err := holdPausedRequest(context.Background(), cfg, issue, directory, noticeRequest, time.Second, func(string) {})
+			after := loadWorkLimit(t, directory)
+			if err != nil || held || after.Clock.HardExits != 0 || after.Clock.Elapsed != 0 || after.Clock.MaxHardExits != limit {
+				t.Fatalf("resume did not reset just this allowance: held=%t err=%v clock=%+v", held, err, after.Clock)
+			}
+			t.Logf("forced exit %d: paused, not done; authorized resume -> count=0 measured=0 saved limit=%d", limit, limit)
+		})
+	}
+}
+
+func TestWorkLimitSaveFailureStillCancelsAndRetainsRecoveryEvidence(t *testing.T) {
 	for _, retry := range []bool{false, true} {
 		t.Run(map[bool]string{false: "persistent", true: "final save recovers"}[retry], func(t *testing.T) {
 			directory := t.TempDir()
-			if err := acceptWorkLimit(directory, 1); err != nil {
+			if err := acceptWorkLimit(directory, 1, 0); err != nil {
 				t.Fatal(err)
 			}
 			clock := newWorkTime()
@@ -298,11 +376,8 @@ func TestWorkLimitSaveFailureStillCancelsAndNeverClearsUnmeasuredWork(t *testing
 				t.Fatal(err)
 			}
 			after := loadWorkLimit(t, directory)
-			want := unmeasuredPause
-			if retry {
-				want = activeLimitPause
-			}
-			if !after.held() || after.Pauses[0].Reason != want {
+			if retry && (!after.held() || after.Pauses[0].Reason != activeLimitPause) ||
+				!retry && (after.held() || after.Clock.Active != nil || after.Clock.HardExits != 1 || after.Clock.RecoveryNoticeAt == nil) {
 				t.Fatalf("save recovery: %+v", after)
 			}
 		})
@@ -311,7 +386,7 @@ func TestWorkLimitSaveFailureStillCancelsAndNeverClearsUnmeasuredWork(t *testing
 
 func TestWorkLimitCancellationDoesNotWaitForStorage(t *testing.T) {
 	directory := t.TempDir()
-	if err := acceptWorkLimit(directory, 1); err != nil {
+	if err := acceptWorkLimit(directory, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	clock := newWorkTime()
@@ -350,7 +425,7 @@ func TestWorkLimitResumeResetsOnlyItsAppliedTransition(t *testing.T) {
 			state := chain.State{Step: "verify", Recovering: true, Waiting: true, Pending: &chain.Assignment{Role: "verify", Instruction: "inspect prior effects"}}
 			cfg, issue, directory, record := pausedFixture(t, state)
 			at := time.Date(2026, 1, 2, 3, 5, 0, 0, time.UTC)
-			record.Clock = &workClock{MaxMinutes: 2, Elapsed: 2 * time.Minute, Active: &at}
+			record.Clock = &workClock{MaxHardExits: 3, HardExits: 3, MaxMinutes: 2, Elapsed: 2 * time.Minute, Active: &at}
 			record.Pauses[0].Elapsed = 2 * time.Minute
 			raw := issueComment(901, 55, "再開")
 			record.Pauses[0].Resume = &pauseResume{Comment: raw, HistoryIndex: 0, RecordedAt: at}
@@ -365,7 +440,7 @@ func TestWorkLimitResumeResetsOnlyItsAppliedTransition(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := loadWorkLimit(t, directory)
-			if got.Clock.Elapsed != 0 || got.Clock.Active != nil || got.Clock.MaxMinutes != 2 || got.Pauses[0].Elapsed != 2*time.Minute {
+			if got.Clock.Elapsed != 0 || got.Clock.Active != nil || got.Clock.MaxMinutes != 2 || got.Clock.HardExits != 0 || got.Pauses[0].Elapsed != 2*time.Minute {
 				t.Fatalf("new interval: %+v", got)
 			}
 			after := loadJobState(t, directory)
@@ -476,7 +551,7 @@ func TestWorkLimitQueueNormalRestartRetainsTheSavedCapAndRemainingTime(t *testin
 	fixture := &noticeTracker{}
 	fixture.install(t, alwaysChoose("implement"))
 	root, directory := noticeJob(t, chain.State{})
-	if err := acceptWorkLimit(directory, 1); err != nil {
+	if err := acceptWorkLimit(directory, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
@@ -531,7 +606,7 @@ func TestWorkLimitBudgetRecoveryDoesNotResetTheInterval(t *testing.T) {
 	fixture := &noticeTracker{}
 	fixture.install(t, alwaysChoose("implement"))
 	root, directory := noticeJob(t, chain.State{})
-	if err := acceptWorkLimit(directory, 1); err != nil {
+	if err := acceptWorkLimit(directory, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
@@ -579,7 +654,7 @@ func TestWorkLimitSuccessfulAndFailedStagesCannotResetTheClock(t *testing.T) {
 				return alwaysChoose("implement")(r)
 			})
 			root, directory := noticeJob(t, chain.State{})
-			if err := acceptWorkLimit(directory, 1); err != nil {
+			if err := acceptWorkLimit(directory, 1, 0); err != nil {
 				t.Fatal(err)
 			}
 			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
@@ -609,7 +684,7 @@ func TestWorkLimitSuccessfulAndFailedStagesCannotResetTheClock(t *testing.T) {
 func TestWorkLimitQuestionReceiptSurvivesTimeoutAndAnExplicitResume(t *testing.T) {
 	cfg, issue, directory, record := pausedFixture(t, chain.State{})
 	record.Pauses = nil
-	record.Clock = &workClock{MaxMinutes: 1}
+	record.Clock = &workClock{MaxHardExits: 3, MaxMinutes: 1}
 	if err := saveWorkLimit(directory, record); err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +731,7 @@ func TestWorkLimitQuestionReceiptSurvivesTimeoutAndAnExplicitResume(t *testing.T
 
 func TestWorkLimitRealTimerAndStartMarkerPrecedeTheChild(t *testing.T) {
 	directory := t.TempDir()
-	if err := saveWorkLimit(directory, workLimitRecord{Version: 1, Clock: &workClock{MaxMinutes: 1, Elapsed: time.Minute - 25*time.Millisecond}}); err != nil {
+	if err := saveWorkLimit(directory, workLimitRecord{Version: 1, Clock: &workClock{MaxHardExits: 3, MaxMinutes: 1, Elapsed: time.Minute - 25*time.Millisecond}}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -683,7 +758,7 @@ func TestWorkLimitRealTimerAndStartMarkerPrecedeTheChild(t *testing.T) {
 
 func TestWorkLimitLateTimerCannotChargeTimeAfterTheChildEnded(t *testing.T) {
 	directory := t.TempDir()
-	if err := acceptWorkLimit(directory, 1); err != nil {
+	if err := acceptWorkLimit(directory, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	clock := newWorkTime()
@@ -765,7 +840,7 @@ func TestWorkLimitCompletedAndStoppedRequestsRemainTerminal(t *testing.T) {
 			})
 			root, directory := noticeJob(t, chain.State{Done: done})
 			at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-			if err := saveWorkLimit(directory, workLimitRecord{Version: 1, Clock: &workClock{MaxMinutes: 1, Elapsed: time.Minute, Active: &at}}); err != nil {
+			if err := saveWorkLimit(directory, workLimitRecord{Version: 1, Clock: &workClock{MaxHardExits: 3, MaxMinutes: 1, Elapsed: time.Minute, Active: &at}}); err != nil {
 				t.Fatal(err)
 			}
 			var log lockedLog
@@ -793,7 +868,7 @@ func TestWorkLimitStartNoticeRequiresALaunchedChildAndCannotBlockItsTimer(t *tes
 			cfg.Intake.Announce = true
 			holdingWorker(&cfg)
 			_, directory := noticeJob(t, chain.State{})
-			if err := acceptWorkLimit(directory, 1); err != nil {
+			if err := acceptWorkLimit(directory, 1, 0); err != nil {
 				t.Fatal(err)
 			}
 			issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}

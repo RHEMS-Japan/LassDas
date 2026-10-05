@@ -159,16 +159,16 @@ func TestOverviewListsEveryRequestWithItsPosition(t *testing.T) {
 }
 
 func TestWorkLimitStatusSeparatesMeasuredTimeFromAnOpenInterval(t *testing.T) {
-	for _, variant := range []string{"running", "active-limit", "unmeasured-active", "new interval", "damaged"} {
+	for _, variant := range []string{"running", "active-limit", "hard-exit-limit", "new interval", "damaged", "delivered"} {
 		t.Run(variant, func(t *testing.T) {
 			root := fixtureQueue(t)
 			directory := filepath.Join(root, "jobs", "7")
-			clock := map[string]any{"max_minutes": 3, "elapsed_ns": 45 * time.Second}
+			clock := map[string]any{"max_minutes": 3, "elapsed_ns": 45 * time.Second, "max_hard_exits": 3, "hard_exits": 1}
 			record := map[string]any{"version": 1, "clock": clock}
-			if variant == "running" || variant == "unmeasured-active" {
+			if variant == "running" || variant == "hard-exit-limit" {
 				clock["active_since"] = "2026-01-02T00:00:00Z"
 			}
-			if variant == "active-limit" || variant == "unmeasured-active" {
+			if variant == "active-limit" || variant == "hard-exit-limit" {
 				record["pauses"] = []any{map[string]any{"reason": variant, "at": "2026-01-02T00:00:00Z", "elapsed_ns": 45 * time.Second}}
 			}
 			if variant == "new interval" {
@@ -176,6 +176,9 @@ func TestWorkLimitStatusSeparatesMeasuredTimeFromAnOpenInterval(t *testing.T) {
 			}
 			if variant == "damaged" {
 				clock["elapsed_ns"] = -1
+			}
+			if variant == "delivered" {
+				writeJob(t, root, "7", chain.State{Done: true})
 			}
 			raw, err := json.Marshal(record)
 			if err != nil {
@@ -186,6 +189,13 @@ func TestWorkLimitStatusSeparatesMeasuredTimeFromAnOpenInterval(t *testing.T) {
 			}
 			s := &server{runDir: root, location: time.UTC}
 			j := s.loadJob("7", time.Now(), true)
+			if variant == "delivered" {
+				_, body := get(t, serve(t, root, fixtureConfig(t), "", ""), "/jobs/7")
+				if j.WorkTime != "" || strings.Contains(body, "Saved active-work cap:") || strings.Contains(body, "Forced exits:") {
+					t.Fatal("completed request kept ongoing limits")
+				}
+				return
+			}
 			if variant == "damaged" {
 				if !j.PauseBroken || j.WorkTime != "" || j.Lane != "attention" {
 					t.Fatalf("damaged clock: %+v", j)
@@ -196,15 +206,18 @@ func TestWorkLimitStatusSeparatesMeasuredTimeFromAnOpenInterval(t *testing.T) {
 			if variant == "new interval" {
 				want = "0s"
 			}
-			if !strings.Contains(j.Attention, "Saved active-work cap: 3 min; measured: "+want) || !strings.Contains(translate("ja", j.Attention), "確定済み: "+want) {
-				t.Fatalf("metrics missing: %s", j.Attention)
+			if strings.Contains(j.Attention, "Saved active-work cap:") || !strings.Contains(j.WorkTime, "Saved active-work cap: 3 min; measured: "+want) || !strings.Contains(translate("ja", j.WorkTime), "確定済み: "+want) {
+				t.Fatalf("metrics missing or treated as attention: %s %s", j.WorkTime, j.Attention)
 			}
-			open := variant == "running" || variant == "unmeasured-active"
+			open := variant == "running" || variant == "hard-exit-limit"
 			if strings.Contains(j.WorkTime, "open interval") != open {
 				t.Fatal("open interval was counted or hidden")
 			}
-			if variant == "unmeasured-active" && (!strings.Contains(j.Attention, "reaching the limit was not confirmed") || !strings.Contains(translate("ja", j.Attention), "確認したわけではありません")) {
-				t.Fatal("uncertainty became a measured limit")
+			if !strings.Contains(j.WorkTime, "Forced exits: 1; saved limit: 3.") {
+				t.Fatal("forced-exit count or limit missing")
+			}
+			if variant == "hard-exit-limit" && (!strings.Contains(j.Attention, "forced-exit limit") || !strings.Contains(translate("ja", j.Attention), "回数上限")) {
+				t.Fatal("forced-exit limit was not named")
 			}
 			if variant == "running" && j.Lane != "running" {
 				t.Fatal("an open live clock alone became a hold")
@@ -213,12 +226,15 @@ func TestWorkLimitStatusSeparatesMeasuredTimeFromAnOpenInterval(t *testing.T) {
 			if response.StatusCode != http.StatusOK || !strings.Contains(body, "Saved active-work cap: 3 min; measured: "+want) {
 				t.Fatalf("metrics not rendered: %d", response.StatusCode)
 			}
+			if strings.Contains(body, `class="attn">Saved active-work`) || !strings.Contains(body, `class="meta">Saved active-work`) {
+				t.Fatal("limit information used the attention presentation")
+			}
 		})
 	}
 }
 
 func TestPausedRequestsShowTheReasonWithoutBecomingDoneOrRunning(t *testing.T) {
-	for _, variant := range []string{"active-limit", "unmeasured-active", "resume intent", "resume saved", "released", "damaged", "unreadable", "history missing", "stopped", "delivered"} {
+	for _, variant := range []string{"active-limit", "hard-exit-limit", "resume intent", "resume saved", "released", "damaged", "unreadable", "history missing", "stopped", "delivered"} {
 		t.Run(variant, func(t *testing.T) {
 			root := fixtureQueue(t)
 			directory := filepath.Join(root, "jobs", "7")
@@ -234,7 +250,7 @@ func TestPausedRequestsShowTheReasonWithoutBecomingDoneOrRunning(t *testing.T) {
 			}
 			at := time.Date(2026, 1, 2, 0, 20, 0, 0, time.UTC)
 			pause := map[string]any{"reason": "active-limit", "at": at, "notice_id": 900}
-			if variant == "unmeasured-active" {
+			if variant == "hard-exit-limit" {
 				pause["reason"] = variant
 			}
 			if variant == "damaged" {
@@ -272,11 +288,11 @@ func TestPausedRequestsShowTheReasonWithoutBecomingDoneOrRunning(t *testing.T) {
 			}
 			j := s.loadJob("7", at.Add(time.Minute), false)
 			switch variant {
-			case "active-limit", "unmeasured-active":
+			case "active-limit", "hard-exit-limit":
 				if j.Lane != "awaiting" || j.Status != "paused; waiting for an authorized resume instruction" || !strings.Contains(j.Attention, pauseResumeHelp) {
 					t.Fatalf("saved pause shown as something else: %+v", j)
 				}
-				if variant == "unmeasured-active" && !strings.Contains(j.Attention, "reaching the limit was not confirmed") {
+				if variant == "hard-exit-limit" && !strings.Contains(j.Attention, "forced-exit limit") {
 					t.Fatal("an unmeasured interval was shown as a reached limit")
 				}
 				if !strings.Contains(translate("ja", j.Attention), "再開") || !strings.Contains(localize("ja", j.Status), "一時停止中") {

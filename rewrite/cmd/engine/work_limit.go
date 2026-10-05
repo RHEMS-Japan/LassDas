@@ -13,9 +13,12 @@ import (
 // or to any stage's success. Active is a crash marker, never a wall-clock
 // timestamp from which downtime may be charged on restart.
 type workClock struct {
-	MaxMinutes int           `json:"max_minutes"`
-	Elapsed    time.Duration `json:"elapsed_ns"`
-	Active     *time.Time    `json:"active_since,omitempty"`
+	MaxMinutes       int           `json:"max_minutes"`
+	Elapsed          time.Duration `json:"elapsed_ns"`
+	Active           *time.Time    `json:"active_since,omitempty"`
+	MaxHardExits     int           `json:"max_hard_exits"`
+	HardExits        int           `json:"hard_exits"`
+	RecoveryNoticeAt *time.Time    `json:"recovery_notice_at,omitempty"`
 }
 
 func validWorkMinutes(minutes int) bool {
@@ -23,14 +26,18 @@ func validWorkMinutes(minutes int) bool {
 }
 
 func (c *workClock) valid() bool {
-	return c == nil || (c.MaxMinutes > 0 && validWorkMinutes(c.MaxMinutes) && c.Elapsed >= 0 && (c.Active == nil || !c.Active.IsZero()))
+	return c == nil || (c.MaxMinutes > 0 && validWorkMinutes(c.MaxMinutes) && c.Elapsed >= 0 && (c.Active == nil || !c.Active.IsZero()) &&
+		c.MaxHardExits > 0 && c.HardExits >= 0 && c.HardExits <= c.MaxHardExits && (c.RecoveryNoticeAt == nil || !c.RecoveryNoticeAt.IsZero()))
 }
 
 // This runs before publishing issue.json. Retain a valid earlier attempt,
 // including its original cap, if intake was interrupted between the writes.
-func acceptWorkLimit(directory string, minutes int) error {
+func acceptWorkLimit(directory string, minutes, hardExits int) error {
 	if !validWorkMinutes(minutes) {
 		return errors.New("intake.max_active_minutes must be zero or a positive duration in minutes")
+	}
+	if hardExits < 0 {
+		return errors.New("intake.max_hard_exits must be zero or positive; zero selects the default of 3")
 	}
 	if _, err := os.Stat(filepath.Join(directory, workLimitFile)); err == nil {
 		_, err = readWorkLimit(directory)
@@ -41,7 +48,10 @@ func acceptWorkLimit(directory string, minutes int) error {
 	if minutes == 0 {
 		return nil
 	}
-	return saveWorkLimit(directory, workLimitRecord{Version: 1, Clock: &workClock{MaxMinutes: minutes}})
+	if hardExits == 0 {
+		hardExits = 3
+	}
+	return saveWorkLimit(directory, workLimitRecord{Version: 1, Clock: &workClock{MaxMinutes: minutes, MaxHardExits: hardExits}})
 }
 
 // Called only when the collector owns a request with no child. An open
@@ -54,16 +64,28 @@ func recoverWorkClock(directory string) error {
 	if record.held() {
 		return nil
 	}
-	reason := ""
+	now := time.Now().UTC()
+	changed := false
 	if record.Clock.Active != nil {
-		reason = unmeasuredPause
-	} else if record.Clock.Elapsed >= time.Duration(record.Clock.MaxMinutes)*time.Minute {
-		reason = activeLimitPause
+		record.Clock.Active = nil
+		record.Clock.HardExits++
+		changed = true
+		if record.Clock.HardExits >= record.Clock.MaxHardExits {
+			record.Clock.RecoveryNoticeAt = nil
+			record.addPause(hardExitPause, now)
+		} else {
+			record.Clock.RecoveryNoticeAt = &now
+		}
 	}
-	if reason == "" {
-		return nil
+	if record.Clock.Elapsed >= time.Duration(record.Clock.MaxMinutes)*time.Minute {
+		record.addPause(activeLimitPause, now)
+		record.Clock.RecoveryNoticeAt = nil
+		changed = true
 	}
-	return recordWorkPause(directory, reason, time.Now())
+	if changed {
+		return saveWorkLimit(directory, record)
+	}
+	return nil
 }
 
 type workTimer interface{ Stop() bool }

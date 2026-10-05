@@ -28,6 +28,7 @@
     "created_since": "REPLACE_WITH_RFC3339_ACCEPTANCE_START",
     "poll_interval_seconds": 30,
     "max_running": 1,
+    "max_hard_exits": 3,
     "stop_report_role": "stop_report",
     "question_role": "ask_requester"
   },

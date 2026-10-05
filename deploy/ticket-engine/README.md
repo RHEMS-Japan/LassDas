@@ -94,10 +94,12 @@ Proposed, or simply not measured. Check each one before trusting it:
   without limit. A full volume stops progress quietly, because saving
   history is retried rather than abandoned. Record `df` before going live and
   look again after the first real requests.
-- Time. A role's launch has no time limit unless its `timeout_minutes` sets
-  one. A launch that runs long without failing is reported to the requester
-  by the no-progress notice, and the status page shows its output as it
-  arrives.
+- Time. A role's `timeout_minutes` bounds that launch. The optional
+  `intake.max_active_minutes` also bounds an accepted request's total active
+  work. Time-limited requests resume automatically after a forced exit until
+  `intake.max_hard_exits` (default 3) pauses them for an authorized resume.
+  The status page shows confirmed time and restart counts separately from
+  requests that need attention. See the runtime README's active-work limits.
 
 ## Before it accepts work
 

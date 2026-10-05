@@ -129,7 +129,7 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 		"card": func(p page, j *job) cardData {
 			return cardData{Lang: p.Lang, ID: j.ID, Key: j.Key, Title: j.Title, Lane: j.Lane, Status: j.Status,
 				Position: j.Position, StageIndex: j.StageIndex, StageCount: j.StageCount, Model: j.Model, Attention: j.Attention, Failure: j.Failure,
-				Elapsed: j.Elapsed, Updated: j.Updated, Requester: j.Requester}
+				Elapsed: j.Elapsed, Updated: j.Updated, Requester: j.Requester, WorkTime: j.WorkTime}
 		},
 	}).Parse(pageTemplates))
 	return s, nil
@@ -407,9 +407,11 @@ func pauseState(dir string, state *chain.State) (reason, status string, broken b
 	var record struct {
 		Version int `json:"version"`
 		Clock   *struct {
-			MaxMinutes int           `json:"max_minutes"`
-			Elapsed    time.Duration `json:"elapsed_ns"`
-			Active     *time.Time    `json:"active_since"`
+			MaxMinutes   int           `json:"max_minutes"`
+			Elapsed      time.Duration `json:"elapsed_ns"`
+			Active       *time.Time    `json:"active_since"`
+			MaxHardExits int           `json:"max_hard_exits"`
+			HardExits    int           `json:"hard_exits"`
 		} `json:"clock"`
 		Pauses []struct {
 			Reason   string        `json:"reason"`
@@ -427,11 +429,12 @@ func pauseState(dir string, state *chain.State) (reason, status string, broken b
 	if err != nil || json.Unmarshal(raw, &record) != nil || record.Version != 1 {
 		return "", "", true
 	}
-	if c := record.Clock; c != nil && (c.MaxMinutes <= 0 || uint64(c.MaxMinutes) > uint64(time.Duration(1<<63-1)/time.Minute) || c.Elapsed < 0 || (c.Active != nil && c.Active.IsZero())) {
+	if c := record.Clock; c != nil && (c.MaxMinutes <= 0 || uint64(c.MaxMinutes) > uint64(time.Duration(1<<63-1)/time.Minute) || c.Elapsed < 0 || (c.Active != nil && c.Active.IsZero()) ||
+		c.MaxHardExits <= 0 || c.HardExits < 0 || c.HardExits > c.MaxHardExits) {
 		return "", "", true
 	}
 	for i, pause := range record.Pauses {
-		if pause.At.IsZero() || pause.NoticeID < 0 || pause.Elapsed < 0 || (pause.Reason != "active-limit" && pause.Reason != "unmeasured-active") ||
+		if pause.At.IsZero() || pause.NoticeID < 0 || pause.Elapsed < 0 || (pause.Reason != "active-limit" && pause.Reason != "hard-exit-limit") ||
 			(i+1 < len(record.Pauses) && (pause.Resume == nil || !pause.Resume.Applied)) {
 			return "", "", true
 		}
@@ -492,8 +495,8 @@ func pauseState(dir string, state *chain.State) (reason, status string, broken b
 		return "The resume instruction is retained. Work has not been confirmed as started; an outstanding question still needs a separate answer.", "resume recorded; waiting for the controller to finish releasing the pause", false
 	}
 	reason = "The configured active-work limit was reached. " + pauseResumeHelp
-	if pause.Reason == "unmeasured-active" {
-		reason = "Active time could not be established after an interrupted run; reaching the limit was not confirmed. " + pauseResumeHelp
+	if pause.Reason == "hard-exit-limit" {
+		reason = "The configured forced-exit limit was reached. " + pauseResumeHelp
 	}
 	return reason, "paused; waiting for an authorized resume instruction", false
 }
@@ -504,15 +507,18 @@ func workTimeState(dir string) string {
 	raw, err := os.ReadFile(filepath.Join(dir, "work-limit.json"))
 	var record struct {
 		Clock *struct {
-			MaxMinutes int           `json:"max_minutes"`
-			Elapsed    time.Duration `json:"elapsed_ns"`
-			Active     *time.Time    `json:"active_since"`
+			MaxMinutes   int           `json:"max_minutes"`
+			Elapsed      time.Duration `json:"elapsed_ns"`
+			Active       *time.Time    `json:"active_since"`
+			MaxHardExits int           `json:"max_hard_exits"`
+			HardExits    int           `json:"hard_exits"`
 		} `json:"clock"`
 	}
 	if err != nil || json.Unmarshal(raw, &record) != nil || record.Clock == nil {
 		return ""
 	}
 	text := fmt.Sprintf("Saved active-work cap: %d min; measured: %s.", record.Clock.MaxMinutes, record.Clock.Elapsed.Round(time.Second))
+	text += fmt.Sprintf("\nForced exits: %d; saved limit: %d.", record.Clock.HardExits, record.Clock.MaxHardExits)
 	if record.Clock.Active != nil {
 		text += "\nThe open interval is not included in the measured time."
 	}
@@ -1203,8 +1209,8 @@ func (j *job) derive(now time.Time) {
 			j.Status = "stopped by the requester; report posted"
 		}
 	}
-	if j.WorkTime != "" && !j.PauseBroken && !j.Stopped && !j.StopBroken {
-		j.Attention = strings.TrimSpace(j.Attention + "\n" + j.WorkTime)
+	if j.PauseBroken || j.Stopped || j.StopBroken || (j.State != nil && j.State.Done) {
+		j.WorkTime = ""
 	}
 	// The trail of stages on the card: passed, current and ahead; a finished
 	// request has passed them all, a waiting one is still at its stage.
@@ -1795,6 +1801,7 @@ type cardData struct {
 	Elapsed    string
 	Updated    time.Time
 	Requester  string
+	WorkTime   string
 }
 
 type headData struct {
@@ -1842,7 +1849,7 @@ var japanese = map[string]string{
 	"resume recorded; waiting for the controller to finish releasing the pause":                                                          "再開指示を保存済み。一時停止の解除処理を待っています",
 	"The resume instruction is retained. Work has not been confirmed as started; an outstanding question still needs a separate answer.": "再開指示を保存しています。作業を開始したと確認したわけではありません。回答待ちの質問には別のコメントで回答してください。",
 	"The configured active-work limit was reached. " + pauseResumeHelp:                                                                   "設定された実稼働時間の上限に達しました。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
-	"Active time could not be established after an interrupted run; reaching the limit was not confirmed. " + pauseResumeHelp:            "途中終了した区間の実稼働時間を確定できません。上限に達したと確認したわけではありません。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
+	"The configured forced-exit limit was reached. " + pauseResumeHelp:                                                                   "強制終了が設定の回数上限に達しました。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
 	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
 	"Decision and models": "判断とモデル", "Runtime log (tail)": "本体のログ (末尾)", "(nothing yet)": "(まだ何もない)", "the whole log": "ログ全文",
 	"Rendered": "表示時刻", "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.": "この画面は自動で更新され (工程の実行中は 10 秒ごと、それ以外は 30 秒ごと)、ディスク上の queue をそのまま表示します。読み取り専用。",
@@ -1916,6 +1923,12 @@ func translate(lang, text string) string {
 		}
 		if text == "The open interval is not included in the measured time." {
 			return "未終了の区間は、確定済み時間に含まれていません。"
+		}
+		if strings.HasPrefix(text, "Forced exits: ") {
+			var count, limit int
+			if _, err := fmt.Sscanf(text, "Forced exits: %d; saved limit: %d.", &count, &limit); err == nil {
+				return fmt.Sprintf("強制終了: %d 回。保存された上限: %d 回。", count, limit)
+			}
 		}
 		if ja, known := japanese[text]; known {
 			return ja
