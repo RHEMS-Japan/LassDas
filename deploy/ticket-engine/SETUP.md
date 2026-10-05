@@ -1,8 +1,9 @@
 # Setting up the ticket engine for your repository
 
 This guide takes you from nothing to one running instance: a Pod in your
-Kubernetes cluster that watches one Backlog project, takes each new issue
-there as a request, works on a checkout of one GitHub repository, merges the
+Kubernetes cluster that watches one Backlog project or labelled GitHub Issues
+in one repository, takes each matching new issue as a request, works on a
+checkout of one delivery repository, merges the
 result into that repository's integration branch (or opens the pull request
 and leaves the merge to a person, [section 4](#leaving-the-merge-to-a-person)),
 and reports back on the issue. You need this directory, `rewrite/` and
@@ -114,11 +115,15 @@ requester posts a stop ([section 9](#9-stopping-a-request)).
   not a measured working set.
 - **Pulls from ghcr.io**, or a registry mirror of the published image.
 
-### A Backlog project
+### An issue tracker: Backlog or GitHub Issues
 
 The engine's tracker client speaks Backlog's API v2. You need a space, a
 project for the requests, and a separate account for the engine itself
 ([section 2](#2-preparing-the-tracker)). A dedicated project is simplest.
+Alternatively, use GitHub Issues in one repository with a dedicated intake
+label and a separate account's PAT ([GitHub setup](#github-issues)). This
+repository may differ from the repository that receives the work. Selecting
+GitHub Issues does not change the models, workflow or delivery permissions.
 
 ### A GitHub repository to deliver to
 
@@ -156,15 +161,18 @@ configuration lacks ([section 4](#settings-the-requester-will-notice)).
 
 ### Who can make it act, and where the code goes
 
-Anyone who can create an issue in the project can make the engine read the
-repository, change it and merge the change: it takes every new issue in the
-project, whoever filed it, and its roles can reach any public address. So:
+With an unfiltered Backlog project, anyone who can create an issue can make
+the engine read the repository, change it and merge the change. With GitHub,
+anyone who can add the intake label can hand an open issue over, whoever filed
+it, if it meets the creation-time boundary. Its roles can reach public
+addresses. So:
 
 1. Deliver to an integration branch that nothing deploys to production by
    itself.
-2. Keep the tracker project's members to the people who may ask for changes.
-3. Make the engine's tracker account a member of this project only, so that a
-   mistyped project id cannot point it at another one.
+2. Limit tracker membership and the ability to set the intake category or
+   label to the people who may ask for changes.
+3. Limit the engine's tracker account or PAT to the intake project/repository,
+   so a mistyped setting cannot point it at another one.
 4. Give the delivery token no permission over the repository's workflows.
 
 With the shipped configuration, everything goes to OpenRouter and the models
@@ -189,7 +197,10 @@ your configuration before it goes in (section 4) and to try each new image
 
 ## 2. Preparing the tracker
 
-### The engine's own account
+Choose one tracker. The Backlog instructions below are not additional steps
+for GitHub; for GitHub, use [GitHub Issues](#github-issues) instead.
+
+### Backlog: the engine's own account
 
 1. Create an account for the engine and add it to the project as a member,
    and to no other project. In one installation it is an ordinary member, not
@@ -292,6 +303,59 @@ script was syntax-checked but not run against Backlog for this guide.
 | members who may stop or answer any request besides its requester | `intake.stop_user_ids` |
 | one issue, for the first ticket only | `intake.issue_ids` ([section 8](#8-opening-the-intake-and-filing-the-first-ticket)) |
 
+### GitHub Issues
+
+1. Enable Issues on the intake repository. Use a dedicated user account for
+   the engine and a PAT restricted to that repository, supplied through the
+   existing secret-management path as `TRACKER_API_KEY`. `github.key_env` is
+   that variable's name, not the PAT. Keep delivery's `DELIVERY_GITHUB_TOKEN`
+   separate, even if both uses concern one repository.
+2. For a fine-grained PAT, give the selected repository **Issues: read and
+   write**. Listing needs [Issues read](https://docs.github.com/en/rest/issues/issues#list-repository-issues);
+   posting and removing its comments need [Issues write](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment).
+   The controller also reads its own account with
+   [GET /user](https://docs.github.com/en/rest/users/users#get-the-authenticated-user),
+   which adds no fine-grained permission. Organization approval, account
+   access and the chosen server's policies still apply. These are documented
+   permissions, not evidence that your token was tested. Do not grant code or
+   workflow write access merely to use issue intake.
+3. Create a dedicated intake label, plus the stage labels you configure.
+   Check the repository's current labels and issues before choosing
+   `automation`: if it already means something else, choose another name.
+   Reusing a label can immediately hand over every open issue carrying it
+   within the date window. No model assesses who added it. The requester
+   remains the person who filed the issue.
+4. Create optional stage labels such as `automation-accepted`,
+   `automation-working`, `automation-awaiting-requester`,
+   `automation-delivered` and `automation-stopped`. A stage label must differ
+   from the intake label. Omit a stage setting to leave that turn unchanged.
+   The engine changes these labels, not issue open/closed state; it does not
+   record actual hours. `intake.assign` still controls assignee changes.
+5. For github.com, **omit `github.api_url`** (default `https://api.github.com`).
+   For Enterprise Server set its HTTPS API base, for example
+   `https://tracker.example/api/v3`; see the
+   [Enterprise API guide](https://docs.github.com/en/enterprise-server@3.21/rest/using-the-rest-api/getting-started-with-the-rest-api).
+   Do not change only the hostname of the Enterprise example: github.com
+   does not use `/api/v3`. Authentication, trust and reachability of your
+   server must be checked separately. The shipped egress policy refuses
+   private addresses; check that boundary first if an internal Enterprise
+   server fails the read check.
+
+Only open issues with the intake label and created at or after
+`intake.created_since` are discovered. PRs are excluded. `intake.issue_ids`
+means issue numbers here, not database IDs. A label added later does not
+override the creation-time boundary. A new tracker or repository needs a
+new queue; normal restarts of that same instance reuse its queue.
+
+Use the human requester's account to file requests. Their account ID, or one
+in `intake.stop_user_ids`, authorizes answers and the first-nonempty-line
+`停止` comment. Closing the issue or removing its label does not stop an
+already accepted request. GitHub rate-limit waits suppress requests until
+the recorded wait ends (at most an hour). Three consecutive unsuccessful
+stop reads pause the role process; when reads succeed again, the same queued
+request is launched again. This does not preserve a running model call or
+guarantee exactly-once external writes.
+
 ## 3. Preparing the delivery repository
 
 ### The token
@@ -381,7 +445,11 @@ the operator scripts of section 6, and every checkout comes from the Pod's
 mirror once you name it in place of the example's placeholder URL. Every value
 you must change is one distinct string in it.
 
-### Make your copy with one command
+Use one of the two copy procedures below. Both keep the ordered stages. The
+separate `rewrite/examples/operator-github.json` ships the model-routed
+workflow, so do not substitute that whole file for the ordered configuration.
+
+### Backlog: make your copy with one command
 
 Run this from the repository's root, with your values in place of the
 `<...>` parts (none of them may contain `#` or `&`). `CONFIG` is where your
@@ -408,6 +476,65 @@ before the fifth replaces what is left of `example-owner/example-repository`.
 | `intake.created_since` | `2100-01-01T00:00:00Z` on purpose: the engine accepts nothing until section 8 opens the intake. The engine starts with this value; issues are taken only when they were created at or after it. |
 | `<owner>/<repository-name>` | the mirror's path in every `TASK_REPOSITORY` (`/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git`, the same as `MIRROR_PATH` in the StatefulSet), in place of the example's placeholder URL under `example.invalid`; and the delivery repository (`DELIVERY_REPOSITORY`) |
 | `<integration-branch>` | the branch every checkout starts from (`TASK_BRANCH`) and the delivery merges into (`DELIVERY_BASE_BRANCH`) |
+
+### GitHub: make the ordered copy
+
+Run from the repository root, replacing the arguments below. The first repo
+receives requests; the second receives delivered code. This changes the
+tracker, source path and delivery values but preserves the stages and roles.
+The intake remains closed. `CONFIG` must be a new file outside any repository.
+The repository's setup test executes this conversion and the configuration
+check together; it does not test access to a live server.
+
+```sh
+CONFIG='<absolute path outside the repository>/operator.json'
+python3 - "$CONFIG" '<intake-owner>/<intake-repository>' '<delivery-owner>/<delivery-repository>' '<integration-branch>' <<'PY'
+import json, sys
+from pathlib import Path
+target, intake_repo, delivery_repo, branch = sys.argv[1:]
+cfg = json.loads(Path('rewrite/examples/operator-stages.json').read_text())
+replacements = [
+    ('https://repository.example.invalid/example-owner/example-repository.git',
+     '/var/lib/ticket-automation/mirror/' + delivery_repo + '.git'),
+    ('example-owner/example-repository', delivery_repo),
+    ('example-integration-branch', branch),
+]
+def replace(value):
+    if isinstance(value, str):
+        for old, new in replacements:
+            value = value.replace(old, new)
+        return value
+    if isinstance(value, list):
+        return [replace(item) for item in value]
+    if isinstance(value, dict):
+        return {key: replace(item) for key, item in value.items()}
+    return value
+cfg = replace(cfg)
+cfg.pop('backlog')
+cfg['github'] = {
+    'repository': intake_repo, 'key_env': 'TRACKER_API_KEY',
+    'intake_label': 'automation',
+    'labels': {'accepted': 'automation-accepted', 'processing': 'automation-working',
+               'awaiting_requester': 'automation-awaiting-requester',
+               'delivered': 'automation-delivered', 'stopped': 'automation-stopped'},
+}
+for name in ('project_id', 'category_ids', 'category_on_accept', 'statuses'):
+    cfg['intake'].pop(name, None)
+cfg['intake']['created_since'] = '2100-01-01T00:00:00Z'
+with Path(target).open('x') as output:
+    json.dump(cfg, output, ensure_ascii=False, indent=2)
+    output.write('\n')
+PY
+```
+
+Change `github.intake_label` and `github.labels` if section 2 selected other
+names. For Enterprise, add `github.api_url` as described there. Do not retain
+`backlog`, `intake.project_id`, `category_ids`, `category_on_accept` or
+`statuses`, even as zero, null or empty; they are refused with GitHub.
+`intake.issue_ids`, if used, contains GitHub issue numbers. The mirror's
+`MIRROR_PATH` must use the delivery repo, not the intake repo.
+
+### Finish the project guidance (either tracker)
 
 Then open your copy and replace the first sentence of `instructions`
 ("Operator setup is incomplete: ...") with your project's guidance: where the
@@ -440,6 +567,8 @@ It must end with `the configuration is accepted; nothing was started`, after
 the line that says which issues the engine would take up. With the intake
 still closed that line reads
 `intake: project <project-id>, issues created at or after 2100-01-01T00:00:00Z; every such issue is accepted`.
+For GitHub it names the repository and intake label instead, says that PRs
+are excluded, and lists any configured issue numbers. Check all of these.
 A refusal names the place instead, for example
 `roles[0].processes[0].env.TASK_REPOSITORY still holds the example's placeholder host under example.invalid; a watch needs your own value there`.
 
@@ -449,7 +578,7 @@ Find them with:
 
 ```sh
 python3 -m json.tool "$CONFIG" > /dev/null && echo "valid JSON"
-grep -n -E 'example-owner|example-repository|example-integration-branch|<[a-z-]+>' "$CONFIG" \
+grep -n -E 'REPLACE_WITH_|example[.]invalid|example-owner|example-repository|example-integration-branch|<[a-z-]+>' "$CONFIG" \
   && echo "the lines above still carry example values" || echo "no example value left"
 ```
 
@@ -512,6 +641,10 @@ model id into its `env` instead: the engine refuses to start
 None of these is required. Each changes what appears on the issue
 ([section 8](#what-the-requester-sees-comment-by-comment) shows the result):
 
+The following block is for Backlog. With GitHub, leave out `statuses` and
+`category_on_accept`; use `github.labels` from section 2 instead. The other
+settings are common, and user IDs mean numeric GitHub account IDs.
+
 ```json
 "intake": {
   "announce": true,
@@ -540,8 +673,8 @@ A `<...>` left in place is found by the check at the end of
   to the request's own page.
 - `assign`: hands the issue to the requester while a question or the
   delivered result waits for them, back to the engine's account while it
-  works, and records the hours from acceptance to the report.
-- `category_ids`: the engine takes only issues carrying one of these
+  works, and, on Backlog only, records hours from acceptance to the report.
+- `category_ids` (Backlog only): the engine takes only issues carrying one of these
   categories, for a project people also use for their own tickets (section 2).
   The requester then sets that category on the issue. It is set when the
   intake opens (section 8), and the intake line names it:
@@ -755,7 +888,7 @@ from:
 | Secret | Key | Value |
 | --- | --- | --- |
 | `<consumer>-ticket-engine` | `MODEL_API_KEY` | the model provider's key (OpenRouter with the shipped configuration) |
-| | `TRACKER_API_KEY` | the engine account's Backlog API key (section 2) |
+| | `TRACKER_API_KEY` | the engine account's Backlog API key or GitHub intake PAT (section 2); not the delivery token |
 | | `DELIVERY_GITHUB_TOKEN` | the delivery token (section 3) |
 | | `GATEWAY_API_KEY` | only with a gateway |
 | `<consumer>-ticket-engine-status` | `STATUS_USER`, `STATUS_PASSWORD` | basic authentication for the status page; choose them yourself |
@@ -887,10 +1020,11 @@ kubectl -n "$NS" exec "$POD" -c engine -- \
   /opt/ticket-automation/bundle/bin/ticket-engine --config /etc/ticket-automation/operator.json --check
 ```
 
-It must print `intake: project <project-id>, issues created at or after 2100-01-01T00:00:00Z; every such issue is accepted`
-and `the configuration is accepted; nothing was started`. Read the intake line
-as a statement of what the engine will take up: the project, the moment, and
-any narrowing by issue id or category. If the engine container keeps
+It must print the intended intake scope and
+`the configuration is accepted; nothing was started`. With Backlog the scope
+names the project and any category filter. With GitHub it names the repository,
+intake label, date and any issue numbers, and excludes PRs. In either case the
+date must still be `2100-01-01T00:00:00Z`. If the engine container keeps
 restarting instead, it refused the configuration when it started
 ([section 11](#the-engine-container-restarts-right-after-it-starts)).
 
@@ -1057,6 +1191,10 @@ All `set`. Never `printenv`, `echo` a variable or print a Secret.
 
 **Connections, with no work to do:**
 
+The `ticket-tracker ... --project-id ... issues` command below is Backlog-only.
+For GitHub, skip that command and use the read-only check following this block.
+The model catalogue and mirror checks are common to both trackers.
+
 ```sh
 kubectl -n "$NS" exec "$POD" -c engine -- /opt/ticket-automation/bundle/bin/ticket-engine --list-models \
   | python3 -c 'import json, sys; c = json.load(sys.stdin); print(c["fetched_at"], len(c["data"]), "models")'
@@ -1066,6 +1204,46 @@ kubectl -n "$NS" exec "$POD" -c engine -- /opt/ticket-automation/bundle/bin/tick
 kubectl -n "$NS" exec "$POD" -c engine -- \
   git --git-dir=/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git log -1 --format='%H %ci' <integration-branch>
 ```
+
+For GitHub, this reads the configured account and the first page of matching
+issues, without posting, changing a label or starting a role. It prints no
+credential or response body on failure. The page count is not a total; it
+checks read access, not write permissions or the configured date boundary.
+
+```sh
+kubectl -n "$NS" exec "$POD" -c engine -- python3 -B -c '
+import json, os, sys, urllib.error, urllib.parse, urllib.request
+g = json.load(open("/etc/ticket-automation/operator.json"))["github"]
+base = g.get("api_url") or "https://api.github.com"
+token = os.environ.get(g["key_env"], "")
+if not token:
+    sys.exit("tracker credential is unavailable")
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+client = urllib.request.build_opener(NoRedirect)
+def get(path):
+    req = urllib.request.Request(base.rstrip("/") + path, headers={
+        "Authorization": "Bearer " + token, "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"})
+    try:
+        with client.open(req, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        sys.exit("GitHub read check returned HTTP %d" % error.code)
+    except (urllib.error.URLError, ValueError):
+        sys.exit("GitHub read check failed; inspect connectivity and configuration")
+me = get("/user")
+query = urllib.parse.urlencode({"state":"open", "labels":g["intake_label"], "per_page":100})
+rows = get("/repos/" + g["repository"] + "/issues?" + query)
+print("account", me["id"], me["login"])
+print("matching issues on this page", sum("pull_request" not in row for row in rows))'
+```
+
+The account must be the engine's dedicated account. This procedure has been
+checked with local fixtures, not your live token. Confirm permission to post
+comments, change the configured labels and assign the intended accounts before
+opening intake; the read check alone cannot establish those permissions.
 
 **The delivery and the merged check, in check mode.** Both end with exit
 status 3 on purpose: `--dry-run` commits, pushes, opens and merges nothing.
@@ -1167,11 +1345,16 @@ request stays in the queue and runs.
 
 In your copy (`$CONFIG`), in the same edit:
 
-1. Narrow what is taken, if the project is not the engine's alone: in a
-   project people also use for their own tickets, set `intake.category_ids` to
-   the category of section 2. For a single first ticket you can instead file
-   it first, look up its id and creation time, and set `intake.issue_ids` to
-   `[<that id>]`. The `ticket-tracker ... issues` command in section 7 prints
+1. Narrow what is taken. With GitHub, use the dedicated intake label from
+   section 2, confirm it does not already mark unintended open issues, and
+   optionally set `intake.issue_ids` to the first test issue's **number**.
+   Do not use `category_ids` or the Backlog command below. Its creation time
+   and author are visible through GitHub's issue page/API; use the original
+   creation time, not the time the label was added.
+   With Backlog in a shared project, set `intake.category_ids` to the category
+   of section 2. For a single first ticket you can instead file it first,
+   look up its id and creation time, and set `intake.issue_ids` to
+   `[<that id>]`. The Backlog `ticket-tracker ... issues` command in section 7 prints
    both for the three newest issues; this prints them for one issue key,
    however many issues came after it:
 
@@ -1189,12 +1372,14 @@ In your copy (`$CONFIG`), in the same edit:
    moment you open the intake, for example `2026-10-05T09:00:00Z`, or, for a
    ticket you filed in advance and listed in `issue_ids`, its own creation
    time or any moment before it. An issue created before `created_since` is
-   never taken, whatever `issue_ids` or `category_ids` say: the engine looks
+   never taken, whatever the issue allowlist, category or GitHub label says: the engine looks
    at the creation time first and skips such an issue without a line in its
    log.
 3. Run `--check` on the copy (section 4) and read the intake line. It must say
    what you meant, for example
    `intake: project <project-id>, issues created at or after 2026-10-05T09:00:00Z; only issues carrying one of the categories [<id>]`.
+   For GitHub, check the named repository, intake label, creation boundary and
+   optional issue numbers instead; PRs must be excluded.
    Without Go, read the same line as the first line of the engine's log after
    the restart below.
 
@@ -1207,7 +1392,7 @@ kubectl -n "$NS" wait --for=condition=Ready "pod/$POD" --timeout=10m
 kubectl -n "$NS" logs "$POD" -c engine | head -n 1
 ```
 
-If anything else already takes issues from this project, make sure it cannot
+If anything else already takes issues from this project or repository, make sure it cannot
 take the same ticket.
 
 ### What the requester sees, comment by comment
@@ -1218,6 +1403,12 @@ No format is required. With the settings from section 4 (`announce`,
 sentences for `work` and `deliver`), the issue shows the following. Status,
 category and assignee changes appear in Backlog as change entries without
 text. Model ids are examples.
+
+For GitHub, substitute the configured stage labels for statuses and omit
+categories and actual hours. The same question/answer comments and assignee
+changes apply, but delivery does not close the issue. If the model allowance
+is already low, acceptance and answer acknowledgements say they are waiting
+instead of saying work began; recovery is announced when execution starts.
 
 | # | On the issue | When |
 | --- | --- | --- |

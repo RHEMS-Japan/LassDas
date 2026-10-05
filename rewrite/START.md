@@ -11,6 +11,9 @@
 - `bin/ticket-status`: queue をそのまま見せる読み取り専用の画面 (どこにいて、何を渡され、何が返り、今なにが走っているか)。
 - `harnesses/`: Git準備、既存Hermes SDKへの接続、Linuxの役割隔離。
 - `examples/operator.json`: 実装、独立2者レビュー、納品、検証、報告の設定例。
+- `examples/operator-github.json`: 同じ役・進み方で、受付と報告先を GitHub Issues にした例。
+- `examples/operator-stages.json`: 順番を決めた工程の例。Kubernetes への導入はこちらから始めます。
+- `examples/operator-gateway.json`: モデルの接続を gateway 経由にした例。
 - `RUNTIME.md`: SDK、隔離、ネットワーク、監督機能の前提と未検証事項。
 - `README.md`: 設定詳細と実験記録。
 
@@ -43,15 +46,19 @@ SDKやコンテナimageはダウンロード・同梱しません。macOS用バ�
 | `/etc/ticket-automation/operator.json` | 実設定。役割には公開しない |
 | `/var/lib/ticket-automation/queue` | 再起動後にも残る履歴と作業場所。親ディレクトリを役割に公開しない |
 
-`examples/operator.json` から実設定を作り、次を変更します。未編集の例は `project_id=0` と未設定の受付開始日時で受付を開始できません。
+課題管理を Backlog にするなら `examples/operator.json`、GitHub Issues にするなら `examples/operator-github.json` から実設定を作ります。これは課題管理の選択で、納品先や作業の工程を変える操作ではありません。Kubernetes の順次工程は `operator-stages.json` を使い、課題管理だけを [SETUP.md の GitHub 手順](../deploy/ticket-engine/SETUP.md#github-issues) で切り替えます。GitHub の例をそのまま順次工程の例と入れ替えないでください。未編集の例は受付を開始できません。
 
-1. `backlog.base_url`: 接続先のAPI base URL。
-2. `intake.project_id / created_since`: 任せるプロジェクトと受付開始日時（RFC3339、境界を含む）。既存チケットを不用意に取り込まない値にします。
+1. Backlog は `backlog.base_url`、GitHub は `github.repository` (owner/repository) と `github.intake_label`。github.com では `github.api_url` を削除します (既定 `https://api.github.com`)。Enterprise Server では HTTPS の API base (`https://tracker.example/api/v3` の形) に置換します。github.com に `/api/v3` を付けないでください。
+2. `intake.created_since`: 受付開始日時（RFC3339、境界を含む）。最初は遠い将来にして閉じ、設定確認後に開きます。Backlog だけは `intake.project_id` も必要です。GitHub の例では project_id / category_ids / category_on_accept / statuses を足さず、backlog も同居させません。
 3. `intake.min_model_credit`: 共有しているモデル鍵の残り (米ドル) が、これを下回ったら作業を止める値。未設定か `0` なら残りを問い合わせません。`0` 以外にすると、`router.decision.key_env` の鍵の残りを、依頼の開始前と実行中の毎回確認します。問い合わせ先は `intake.model_credit_url` (既定は OpenRouter の鍵照会 URL、HTTPS のみ)。gateway を指すこともできます。
 4. `intake.stall_notice_minutes`: 実行中の依頼で工程が 1 つも完了しない時間がこれを超えたら、依頼者へ 1 回知らせる分数。未設定は 90 分、`0` で知らせません。
 5. 各processの `TASK_REPOSITORY`: 承認済みのソース。私有repoの認証は実行環境で準備します。再開時は既存の作業を上書きcloneしません。
 6. `instructions`: プロジェクト知識の在り処、変更範囲、納品先、許可された納品コマンド、実物の検証方法、完了条件。設定例は納品権限やCIを用意しません。
 7. 各processの `--write`: 書込を許可する既存のパス。どのファイルが変わるかは作ってみるまで分からないので、例は実装に `.` (作業場所全体)、納品に `release`、報告作成に `report` を許可しています。
+
+GitHub は受付ラベルと工程ラベルを先に作り、`automation` が既存の用途に使われていないか確認します。重なるなら別名を選びます。そのラベルを付けられる人は、日時条件内の open issue を本体へ渡せます。PR は対象外です。`intake.issue_ids` で絞る場合は issue の番号を指定します。
+課題管理用の PAT は専用アカウント・受付 repo 限定で Issues の read/write を持たせます。設定の `github.key_env` は `TRACKER_API_KEY` のような**変数名だけ**です。納品用の資格情報とは別です。権限の根拠と未確認事項は [SETUP.md](../deploy/ticket-engine/SETUP.md#github-issues) にあります。
+`REPLACE_WITH_`・`example.invalid`・`<...>` をすべて置換し、`bin/ticket-engine --config <実設定> --check` で受付範囲を読みます。これは通信も queue 作成もせず、PAT の権限や外部コマンドの動作までは確認しません。トラッカーや受付 repo を替える場合は新しい queue を使います。
 
 `--write .` は作業場所全体の書込許可ですが、checkout 自身の管理情報 `.git` は `.git` を名指しで許可しない限り読み取り専用のまま残ります (役が hook や設定を仕込み、鍵を持つ納品プロセスに実行させる経路を塞ぐため。納品プロセスだけが `.git` を名指しで受け取ります)。
 レビュー・投稿・最終読返には書込許可を付けていません。project testを独立processとして加えるなら `model_env` を付けず、必要な権限だけ与えます。
@@ -97,6 +104,9 @@ exec /opt/ticket-automation/bundle/bin/ticket-engine \
 `examples/operator-stages.json` は同じ納品を別の形で書いたものです。 工程には敵対レビュー (`review`) が入っています: 運用者のコマンド `harnesses/adversarial_review.py` が、作業役とは別の会社のモデルに依頼・確定した要件・差分・テスト結果を渡し、「差し戻す / 通す」の構造化した判定だけを終了コードにします (差し戻しに上限は無く、回数は判定の出力に出る。収束しない依頼は依頼者の「停止」コメントで止める。判定が取れないまま通すことはしない: モデル側の不調 (接続できない、時間切れ、HTTP エラー、判定の無い返事) や想定外のエラーのときは、運用者が `REVIEW_MODELS` に並べたモデルに順に聞き直し、間隔を数秒から数分まで延ばしながら判定が取れるまで続け、判定を出したモデルの名前を結果に書く。聞き直しでは直らない事情 (設定ミス、https でない、資格情報が無い、テストコマンドの指定が読めない) のときは、理由を 1 度だけ出して工程をその場で止めたまま待つ (作業場所と TASK_HOME は一定の間隔ごとに見直し、使えるようになれば続ける)。設定を直して本体を再起動すると、止まったレビューは失敗として記録され、レビューの `on_failure` の工程 (例では作業工程) から進み、その後の工程とともにレビューがもう一度走る (依頼者には、再起動後に同じ依頼を続けている旨の通知が届く)。対象パスが変更に一致しないときは、変更全体をレビューに渡す。以前のように判定なしで通したい運用者は `REVIEW_UNAVAILABLE=pass` を設定する (判定が取れないと、レビューされないまま納品される)。ただしファイルが 1 つも変わっていないときは、この設定があっても、通してよいという本物の判定が取れない限り exit 1 で作業へ戻す。指摘は出力として履歴に残り作業役と報告役が読む。差分やテスト出力が長ければ切り、切った所に元の長さを書く)。本体はその文章を読みません。`router.mode` を `stages` にすると、次に何をするかはモデルではなく、運用者が並べた工程と、その工程のコマンドが 0 で終わったかどうかで決まります。モデルが「できました」と書いても進みません。質問できるのは入口の 1 回だけで、最後の工程もコマンドです。納品と、納品後の統合ブランチの検証は、`deploy/ticket-engine` の実行用イメージに入っている固定のプログラム (`/opt/ticket-automation/scripts` の `deliver_git.py` と `verify_merged.py`。この配布物には含まれません) を使います。ビルド・テスト・報告の照合のコマンドは運用者が用意します (`deploy/ticket-engine` に例があります)。checkout の取得元 (`TASK_REPOSITORY`) は `example.invalid` 配下の仮置きの URL で、実行用イメージの mirror のパスに置き換えるまで本体は起動を拒否します。納品先のリポジトリとブランチは、例の中の `example-owner/example-repository` と `example-integration-branch` をそれぞれ 1 回置き換えれば全工程に入ります (この 2 つは URL ではないので本体は例の値と見分けません。置き換え忘れは `deploy/ticket-engine/SETUP.md` の確認コマンドで見つけます)。導入の手順は `deploy/ticket-engine/SETUP.md` にあります。
 
 ## 4. 再開と停止
+
+以下の category / statuses / 実績時間の設定は Backlog 専用です。GitHub では `github.labels` で工程を示し、担当者の切替は行いますが実績時間は送りません。GitHub issue を閉じたり受付ラベルを外したりしても、受付済みの依頼は止まりません。停止は同じ `停止` コメントです。
+GitHub が待ち時間を返している間は要求を送りません。停止確認の読み取りが 3 回続けて失敗すると、動いている役のプロセスも止め、読めるようになってから同じ依頼を起動し直します。プロセスを動かしたまま待つ仕組みではありません。
 
 - 通常の再起動では同じ設定と**同じqueue**を使います。新しいqueueに替えると重複受付になり得ます。
 - 中断した外部操作は「既に反映されたかもしれない」と次へ渡します。外部操作の厳密な1回実行を保証するものではありません。
