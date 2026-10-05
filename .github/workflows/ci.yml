@@ -41,7 +41,7 @@ jobs:
         with:
           go-version: ${{ steps.image-go.outputs.version }}
           check-latest: true # The newest release of it, not one the runner has cached.
-          cache: false # This module currently uses only the standard library.
+          cache: false # Fetch the module's checksum-pinned dependencies.
       - name: Say which Go the role-chain steps use
         run: go version
       - name: Build the role-chain commands

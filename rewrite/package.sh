@@ -22,6 +22,7 @@ done
 for guide in START RUNTIME README OPERATING; do
   cp "$source_dir/$guide.md" "$output_dir/$guide.md"
 done
+cp "$source_dir/THIRD-PARTY-NOTICES.txt" "$output_dir/THIRD-PARTY-NOTICES.txt"
 for example in operator operator-gateway operator-stages operator-github operator-github-stages; do
   cp "$source_dir/examples/$example.json" "$output_dir/examples/$example.json"
 done
