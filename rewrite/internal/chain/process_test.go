@@ -136,6 +136,9 @@ func TestProcessGetsOriginalAndAssignmentWithoutShellInterpolation(t *testing.T)
 	if strings.Contains(result.Output, "diagnostic only") || result.Diagnostics != "diagnostic only" {
 		t.Fatal("diagnostic output was mixed with the report")
 	}
+	if strings.Contains(result.Output, "Requester comments (original words;") {
+		t.Fatal("a run without requester comments received an empty comments section")
+	}
 }
 
 // Exercise the runtime's actual prompt and the shipped review command. The
