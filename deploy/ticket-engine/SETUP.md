@@ -203,10 +203,9 @@ Item 4 protects GitHub Actions workflow changes only. Other CI systems may run
 configuration taken from a pushed branch with their own credentials. Inspect
 all CI triggers and which branches receive secrets, including ticket branches,
 before granting push access. For example, CircleCI's configuration is not
-protected by a GitHub token lacking Workflows permission. Keep such paths out
-of `DELIVERY_ALLOWED_PATHS` when they must not change, or have the owner isolate
-that CI's credentials and approve the intended access. An instruction to a
-model not to edit a path is not a permission boundary.
+protected by a GitHub token lacking Workflows permission. Have that CI's owner
+isolate its credentials from ticket-branch builds and approve the intended
+access. An instruction to a model not to edit a path is not a permission boundary.
 
 With the shipped configuration, everything goes to OpenRouter and the models
 it serves: the working models, chosen for each launch among the publishers
