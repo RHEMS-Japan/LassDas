@@ -1208,8 +1208,9 @@ credential value removed.
 **When nothing has completed for a long time.** `intake.stall_notice_minutes`
 is how long a running request may go without a completed step before the
 requester hears about it. Absent means 90 minutes and zero switches it off. The
-window is measured from the last history entry that finished without an error,
-so any successful role output inside it keeps the request quiet. Past the
+window is measured only from records within the current launch, or from the
+launch's start when it has no record yet. Successful output inside that window
+keeps the request quiet. Past the
 window, a request whose steps keep failing is told:
 
 > 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません（直近の失敗: <直近の失敗の1行目>）。
@@ -1222,8 +1223,9 @@ whose work is running, with no failure recorded, is told once nothing has been
 recorded for that long. The time counts only within the current launch: from
 its last record or, when there is none yet, from the moment the launch began,
 so a wait before it (for its turn, for the budget, for a stopped engine) does
-not count; a stop that cut a step short is recorded as a failure and counted
-in the form above. No time limit ends a launch, so this is the requester's
+not count; a stop that cut a step short is recorded as an interruption, not a
+failure. Interruption is read from the runtime's recorded field, not inferred
+from the wording of its diagnostic. No time limit ends a launch, so this is the requester's
 only word about a long one:
 
 > 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません。この間に工程の失敗は記録されていません。
@@ -1234,9 +1236,8 @@ steps did, and from there a launch that is working and one that waits for its
 operator look the same: a step held for a setting only the operator can
 correct has not failed and has not finished. A failure that repeats may need a
 person. A balance may come back by itself or only when someone adds to it. The
-failing form is also said while the engine itself holds the work for the
-budget; the failure it quotes then is the engine's own cancellation of the
-step it stopped, and nothing is being tried. None of the three says that no
+engine does not count its own cancellation during a budget hold as a failure.
+Only failures within the current launch can be quoted. None of the three says that no
 answer is awaited, because a question to the requester may be standing right
 above it. The stall notice repeats at most once per six hours per request. It
 is a notice and nothing else: routing, recovery and the request's goal are
