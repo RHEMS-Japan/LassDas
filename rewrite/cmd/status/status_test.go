@@ -898,6 +898,13 @@ func TestARequestEndedAtAnOpenPullRequestIsNotShownAsDelivered(t *testing.T) {
 		"PR が閉じられて終了 <b>1</b>", "完了 (PR はマージされずに閉じられたので、何も納品していません)")
 }
 
+func TestAPersonChangedAndMergedBranchIsNotAnOpenPullRequest(t *testing.T) {
+	job := job{Receipt: `{"merge_left_to_person":true,"changed_by_person":true,"merge_sha":"PERSONS-MERGE"}`}
+	if job.endedUnmerged() {
+		t.Fatal("a recorded human merge was displayed as an open pull request")
+	}
+}
+
 // A person merged an earlier round of the request and closed the pull request
 // of a later one: something was delivered, and the page does not say otherwise.
 func TestAClosedPullRequestAfterAMergedRoundIsNotShownAsNothingDelivered(t *testing.T) {
