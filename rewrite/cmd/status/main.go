@@ -277,6 +277,9 @@ type job struct {
 	Stopped     bool
 	Reported    bool
 	StopBroken  bool
+	WorkPause   string
+	PauseStatus string
+	PauseBroken bool
 	NoRecord    bool
 	StageIndex  int
 	StageCount  int
@@ -388,6 +391,101 @@ func stopState(dir string) (stopped, reported, broken bool) {
 		Done bool `json:"done"`
 	}
 	return true, json.Unmarshal(raw, &report) == nil && report.Done, false
+}
+
+const pauseResumeHelp = "The requester or a configured operator can post 再開 as the first nonblank line to continue, leave it held, or post 停止 to end the request."
+
+// pauseState reads controller facts only. It does not interpret a role's
+// output or turn a pause into a stop. Partial local release writes stay
+// visible until both the history and the reply receipt are retained.
+func pauseState(dir string, state *chain.State) (reason, status string, broken bool) {
+	raw, err := os.ReadFile(filepath.Join(dir, "work-limit.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", "", false
+	}
+	var record struct {
+		Version int `json:"version"`
+		Pauses  []struct {
+			Reason   string    `json:"reason"`
+			At       time.Time `json:"at"`
+			NoticeID int64     `json:"notice_id"`
+			Resume   *struct {
+				Comment      json.RawMessage `json:"comment"`
+				HistoryIndex int             `json:"history_index"`
+				RecordedAt   time.Time       `json:"recorded_at"`
+				Applied      bool            `json:"applied"`
+			} `json:"resume"`
+		} `json:"pauses"`
+	}
+	if err != nil || json.Unmarshal(raw, &record) != nil || record.Version != 1 {
+		return "", "", true
+	}
+	for i, pause := range record.Pauses {
+		if pause.At.IsZero() || pause.NoticeID < 0 || (pause.Reason != "active-limit" && pause.Reason != "unmeasured-active") ||
+			(i+1 < len(record.Pauses) && (pause.Resume == nil || !pause.Resume.Applied)) {
+			return "", "", true
+		}
+		if resume := pause.Resume; resume != nil {
+			if pause.NoticeID <= 0 || resume.RecordedAt.IsZero() || resume.HistoryIndex < 0 || !json.Valid(resume.Comment) {
+				return "", "", true
+			}
+			var comment struct {
+				ID      int64   `json:"id"`
+				Content *string `json:"content"`
+				Body    *string `json:"body"`
+			}
+			if json.Unmarshal(resume.Comment, &comment) != nil || comment.ID <= pause.NoticeID || (comment.Content == nil && comment.Body == nil) {
+				return "", "", true
+			}
+			body := comment.Body
+			if comment.Content != nil {
+				body = comment.Content
+			}
+			if firstLine(*body) != "再開" {
+				return "", "", true
+			}
+			if resume.Applied {
+				if state == nil || resume.HistoryIndex >= len(state.History) {
+					return "", "", true
+				}
+				words := state.History[resume.HistoryIndex]
+				if words.Role != "" || words.Speaker != "requester" || words.Output != *body || !words.FinishedAt.Equal(resume.RecordedAt) {
+					return "", "", true
+				}
+			}
+		}
+	}
+	if len(record.Pauses) == 0 {
+		return "", "", false
+	}
+	pause := record.Pauses[len(record.Pauses)-1]
+	if pause.Resume != nil {
+		if pause.Resume.Applied {
+			raw, err := os.ReadFile(filepath.Join(dir, "notices.json"))
+			var log struct {
+				Notices []struct {
+					Kind      string     `json:"kind"`
+					Event     string     `json:"event"`
+					PostedAt  *time.Time `json:"posted_at"`
+					CommentID int64      `json:"comment_id"`
+					Predates  bool       `json:"predates"`
+				} `json:"notices"`
+			}
+			if err == nil && json.Unmarshal(raw, &log) == nil {
+				for _, notice := range log.Notices {
+					if notice.Kind == "work-resume-accepted" && notice.Event == strconv.Itoa(len(record.Pauses)) && notice.PostedAt != nil && notice.CommentID > 0 && !notice.Predates {
+						return "", "", false
+					}
+				}
+			}
+		}
+		return "The resume instruction is retained. Work has not been confirmed as started; an outstanding question still needs a separate answer.", "resume recorded; waiting for the controller to finish releasing the pause", false
+	}
+	reason = "The configured active-work limit was reached. " + pauseResumeHelp
+	if pause.Reason == "unmeasured-active" {
+		reason = "Active time could not be established after an interrupted run; reaching the limit was not confirmed. " + pauseResumeHelp
+	}
+	return reason, "paused; waiting for an authorized resume instruction", false
 }
 
 // cssClass turns an outcome's words into one class name.
@@ -593,6 +691,8 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 		touch(historyPath)
 	}
 	j.Stopped, j.Reported, j.StopBroken = stopState(dir)
+	j.WorkPause, j.PauseStatus, j.PauseBroken = pauseState(dir, j.State)
+	touch(filepath.Join(dir, "work-limit.json"))
 	if !detail {
 		if raw, err := os.ReadFile(filepath.Join(dir, "notices.json")); err == nil {
 			var log struct {
@@ -1024,6 +1124,16 @@ func (j *job) derive(now time.Time) {
 			j.Lane, j.Attention = "attention", pause
 		} else if stall != "" {
 			j.Lane, j.Attention = "attention", stall
+		}
+	}
+	// A controller pause remains unfinished, including while release writes
+	// are being recovered. Old live files do not make it a running request.
+	if j.State == nil || !j.State.Done {
+		if j.PauseBroken {
+			j.Lane, j.Attention = "attention", "the saved pause record is unreadable; work remains held until the operator repairs it"
+			j.Status = "held: the saved pause record is unreadable"
+		} else if j.WorkPause != "" {
+			j.Lane, j.Attention, j.Status = "awaiting", j.WorkPause, j.PauseStatus
 		}
 	}
 	// A request the requester stopped is over: nothing runs, nothing needs a
@@ -1645,8 +1755,15 @@ var japanese = map[string]string{
 	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "Stopped": "停止", "Queued": "順番待ち", "none": "なし",
 	"queued: waiting for a free execution slot": "順番待ち (実行枠が空くのを待っています)", "starting: choosing the first stage": "開始中 (最初の工程を決めています)", "starting: choosing the first role": "開始中 (最初の担当を決めています)",
 	"stopped by the requester; report posted": "依頼者が停止。報告済み", "stopped by the requester; report pending": "依頼者が停止。報告を準備中",
-	"the saved stop instruction is unreadable; the work is held": "保存された停止指示が読めないため、作業を保留中です",
-	"held: the saved stop instruction is unreadable":             "保留中: 保存された停止指示が読めません",
+	"the saved stop instruction is unreadable; the work is held":                                                                         "保存された停止指示が読めないため、作業を保留中です",
+	"held: the saved stop instruction is unreadable":                                                                                     "保留中: 保存された停止指示が読めません",
+	"held: the saved pause record is unreadable":                                                                                         "保留中: 保存された一時停止の記録が読めません",
+	"the saved pause record is unreadable; work remains held until the operator repairs it":                                              "保存された一時停止の記録が読めません。運用者が記録を修復するまで、作業は保留されます",
+	"paused; waiting for an authorized resume instruction":                                                                               "一時停止中。権限のある人の再開指示を待っています",
+	"resume recorded; waiting for the controller to finish releasing the pause":                                                          "再開指示を保存済み。一時停止の解除処理を待っています",
+	"The resume instruction is retained. Work has not been confirmed as started; an outstanding question still needs a separate answer.": "再開指示を保存しています。作業を開始したと確認したわけではありません。回答待ちの質問には別のコメントで回答してください。",
+	"The configured active-work limit was reached. " + pauseResumeHelp:                                                                   "設定された実稼働時間の上限に達しました。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
+	"Active time could not be established after an interrupted run; reaching the limit was not confirmed. " + pauseResumeHelp:            "途中終了した区間の実稼働時間を確定できません。上限に達したと確認したわけではありません。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
 	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
 	"Decision and models": "判断とモデル", "Runtime log (tail)": "本体のログ (末尾)", "(nothing yet)": "(まだ何もない)", "the whole log": "ログ全文",
 	"Rendered": "表示時刻", "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.": "この画面は自動で更新され (工程の実行中は 10 秒ごと、それ以外は 30 秒ごと)、ディスク上の queue をそのまま表示します。読み取り専用。",

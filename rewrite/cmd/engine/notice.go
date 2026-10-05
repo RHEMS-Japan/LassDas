@@ -95,6 +95,9 @@ type noticeRecord struct {
 	PostedAt  *time.Time `json:"posted_at,omitempty"`
 	Predates  bool       `json:"predates,omitempty"`
 	Models    string     `json:"models,omitempty"`
+	// Event is an optional controller occurrence, separate from a notice's
+	// kind. Notices without one keep their existing interval and once rules.
+	Event string `json:"event,omitempty"`
 	// CommentID is the tracker's id of the comment the notice was confirmed
 	// as, so a later notice of the same kind in the same words is not taken
 	// for this one.
@@ -366,7 +369,11 @@ func (n notices) declare(ctx context.Context, role, text, models string, at time
 // say is the work of post and declare: due decides, on the record as it
 // stands once an earlier unconfirmed notice is settled, whether this one
 // speaks at all.
-func (n notices) say(ctx context.Context, kind, text, models string, at time.Time, due func(noticeLog, time.Time) bool) error {
+func (n notices) say(ctx context.Context, kind, text, models string, at time.Time, due func(noticeLog, time.Time) bool, events ...string) error {
+	event := ""
+	if len(events) > 0 {
+		event = events[0]
+	}
 	log, err := n.load()
 	if err != nil {
 		return err
@@ -375,7 +382,7 @@ func (n notices) say(ctx context.Context, kind, text, models string, at time.Tim
 		if err := n.settle(ctx, &log, i, false); err != nil {
 			return err
 		}
-		if log.Notices[i].Kind == kind {
+		if log.Notices[i].Kind == kind && log.Notices[i].Event == event {
 			return nil
 		}
 	}
@@ -401,7 +408,7 @@ func (n notices) say(ctx context.Context, kind, text, models string, at time.Tim
 		log.Notices = append(log.Notices, noticeRecord{Kind: kind, WrittenAt: now, Predates: true, Models: models})
 		return n.save(log)
 	}
-	log.Notices = append(log.Notices, noticeRecord{Kind: kind, Text: text, WrittenAt: now, Models: models})
+	log.Notices = append(log.Notices, noticeRecord{Kind: kind, Text: text, WrittenAt: now, Models: models, Event: event})
 	if err := n.save(log); err != nil {
 		return err
 	}

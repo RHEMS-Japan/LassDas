@@ -300,6 +300,21 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	// A finished request whose caches could not be removed is retried each
 	// tick and said once per reason, not once per tick.
 	trimTrouble := map[string]string{}
+	trim := func(name, directory string, say func(string)) {
+		if err := trimFinished(directory); err != nil {
+			reason := err.Error()
+			if reason == "" {
+				reason = "(no reason given)"
+			}
+			if trimTrouble[name] != reason {
+				say("finished caches not removed, retried each tick: " + reason)
+				trimTrouble[name] = reason
+			}
+		} else if trimTrouble[name] != "" {
+			say("finished caches removed")
+			delete(trimTrouble, name)
+		}
+	}
 	launch := func(name string, work func() error) {
 		active[name] = true
 		workers.Add(1)
@@ -376,10 +391,16 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				if cfg.Intake.StopReportRole != "" {
 					if done, err := stoppedReportDone(directory); err != nil {
 						observe("reading stopped report: " + err.Error())
+						continue
 					} else if !done {
 						launch(entry.Name(), func() error { return reportStoppedRequest(ctx, cfg, issue, directory, turns, log) })
+						continue
 					}
 				}
+				// The reporter may still need its home to resume. Only after
+				// it finishes (or with none configured) are its caches unused.
+				// Keep the workspace, receipts and both histories unchanged.
+				trim(entry.Name(), directory, say)
 				continue
 			}
 			request, err := source.RequestText(raw)
@@ -405,18 +426,12 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 					hoursTurn(ctx, cfg, issue, directory, info.ModTime(), state.History[len(state.History)-1].FinishedAt, say)
 				}
 				modelsTurn(ctx, cfg, issue, directory, state, say)
-				if err := trimFinished(directory); err != nil {
-					reason := err.Error()
-					if reason == "" {
-						reason = "(no reason given)"
-					}
-					if trimTrouble[entry.Name()] != reason {
-						say("finished caches not removed, retried each tick: " + reason)
-						trimTrouble[entry.Name()] = reason
-					}
-				} else if trimTrouble[entry.Name()] != "" {
-					say("finished caches removed")
-					delete(trimTrouble, entry.Name())
+				trim(entry.Name(), directory, say)
+				continue
+			}
+			if held, err := holdPausedRequest(ctx, cfg, issue, directory, request, interval, say); held || err != nil {
+				if err != nil {
+					say("work remains held: " + err.Error())
 				}
 				continue
 			}
