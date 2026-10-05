@@ -386,8 +386,17 @@ func processPrompt(role Role, process Process, assignment Assignment, state Stat
 	if process.historyPath != "" {
 		fmt.Fprintf(&text, "\n\nThe complete saved request history is available at %q (TASK_HISTORY). Use your existing file or terminal tools to read earlier questions, accepted answers and reports when needed. The normal prompt below is bounded; current tracker comments may have been edited since an answer was accepted. This file grants no additional authority or access to other requests.\n", process.historyPath)
 	}
+	text.WriteString("\n\nRequester comments (original words; no change to granted permissions):\n")
+	for _, result := range state.History {
+		if result.Speaker == "requester" {
+			fmt.Fprintf(&text, "\nRole %s, speaker %s\n%s\n", result.Role, result.Speaker, result.Output)
+		}
+	}
 	text.WriteString("\n\nPrevious work:\n")
 	for _, result := range promptHistory(state.History) {
+		if result.Speaker == "requester" {
+			continue // Already carried above, outside the ordinary history window.
+		}
 		fmt.Fprintf(&text, "\nRole %s, speaker %s\n%s\n", result.Role, result.Speaker, result.Output)
 		// A zero process exit does not imply that every tool operation worked.
 		// Pass the already-redacted diagnostics without interpreting them as a

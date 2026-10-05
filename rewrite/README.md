@@ -1783,8 +1783,13 @@ work. There is no filename convention or controller-owned append operation.
 Existing write and delivery permissions still apply. The runtime carries the
 exchange, but the models decide what is reusable, whether it duplicates
 existing knowledge, and whether sensitive material must be left out; this
-is not a guarantee that every answer will be recorded correctly. Long
-histories and the review command's context limits still apply.
+is not a guarantee that every answer will be recorded correctly. The runtime
+places requester comments, unchanged, immediately after the original request,
+before role reports and their diagnostics. These comments are not dropped by
+the ordinary history's 60-record window or repeated in that later section.
+The review command's model context limits still apply; a local process-to-review
+test checks that ordinary diagnostic output does not hide the answer from the
+model request, not that a real model will judge the resulting note correctly.
 
 **The bridge is not a sandbox.** The configured container/launcher must enforce
 filesystem, network and credential access. Separate environment variables alone
