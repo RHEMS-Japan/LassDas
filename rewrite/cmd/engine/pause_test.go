@@ -155,7 +155,7 @@ func TestPauseResumeFinishesBothInterruptedLocalWritesExactlyOnce(t *testing.T) 
 	for _, historyWritten := range []bool{false, true} {
 		t.Run(map[bool]string{false: "before history", true: "after history"}[historyWritten], func(t *testing.T) {
 			cfg, issue, directory, record := pausedFixture(t, chain.State{Step: "work"})
-			raw := issueComment(901, 55, "再開\nunchanged words")
+			raw := issueComment(901, 77, "再開\nunchanged words")
 			at := time.Date(2026, 1, 2, 3, 5, 0, 0, time.UTC)
 			record.Pauses[0].Resume = &pauseResume{Comment: raw, RecordedAt: at, HistoryIndex: 0}
 			if err := saveWorkLimit(directory, record); err != nil {
@@ -168,6 +168,9 @@ func TestPauseResumeFinishesBothInterruptedLocalWritesExactlyOnce(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
+			// The operation was accepted before the restart and before this
+			// operator left. Finish its writes without accepting a new command.
+			cfg.Intake.StopUserIDs = nil
 			if err := applyPauseResume(context.Background(), cfg, issue, directory, noticeRequest, &loaded, nil); err != nil {
 				t.Fatal(err)
 			}
@@ -262,13 +265,22 @@ func TestPauseUsesTheActualPostedNoticeAndKeepsALaterResume(t *testing.T) {
 	if err := saveWorkLimit(directory, record); err != nil {
 		t.Fatal(err)
 	}
-	remote.rows = append(remote.rows, issueComment(902, 55, "再開\nnew words"), issueComment(903, 88, "unrelated later comment"))
+	remote.rows = append(remote.rows, issueComment(902, 77, "再開\nnew words"), issueComment(903, 88, "unrelated later comment"))
 	if held, err := hold(); err != nil || held {
 		t.Fatalf("later authorized resume lost: held=%t error=%v", held, err)
 	}
+	cfg.Intake.StopUserIDs = nil
 	if held, err := hold(); err != nil || held {
-		t.Fatalf("restarted release failed: held=%t error=%v", held, err)
+		t.Fatalf("removing an operator revoked an accepted resume: held=%t error=%v", held, err)
 	}
+	ids, err := pauseReplyIDs(cfg.source(), directory, issue, nil, remote.rows)
+	if err != nil || !reflect.DeepEqual(ids, []int64{902}) {
+		t.Fatalf("accepted resume lost its answer exclusion: ids=%v error=%v", ids, err)
+	}
+	if raw, err := resumeInstruction(cfg.source(), []json.RawMessage{issueComment(905, 77, "再開")}, issue, nil, 904, nil); err != nil || raw != nil {
+		t.Fatalf("the removed operator could resume a new pause: %s %v", raw, err)
+	}
+	t.Logf("after operator removal: held=false control_comment_ids=%v new_resume=false", ids)
 	state := loadJobState(t, directory)
 	if len(state.History) != 1 || state.History[0].Output != "再開\nnew words" || state.Pending == nil || state.Done {
 		t.Fatalf("release changed the pending action or repeated its words: %+v", state)
@@ -307,6 +319,36 @@ func TestPauseNoticesDistinguishOccurrencesWithoutChangingOlderDedup(t *testing.
 	log, err := n.load()
 	if err != nil || len(log.Notices) != 3 || log.Notices[0].CommentID != 900 || log.Notices[2].Event != "" {
 		t.Fatalf("old and new receipts changed: %+v %v", log, err)
+	}
+}
+
+func TestFirstPauseControlNoticeSurvivesSlowReadback(t *testing.T) {
+	for _, kind := range []string{workPauseNotice, workResumeNotice} {
+		t.Run(kind, func(t *testing.T) {
+			cfg, issue, directory, _ := pausedFixture(t, chain.State{})
+			remote := &noticeTracker{rows: []json.RawMessage{issueComment(900, 99, "earlier pending notice")}}
+			pauseTransport(t, remote)
+			transport := http.DefaultTransport
+			delayed := false
+			useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodGet && !delayed {
+					delayed = true
+					// Ensure the pending notice read crosses a whole-second
+					// boundary, without adding a clock seam to production.
+					time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)))
+				}
+				return transport.RoundTrip(r)
+			})
+			n := requestNotices(cfg, issue, directory)
+			if err := n.save(noticeLog{Notices: []noticeRecord{{Kind: workPauseNotice, Event: "earlier", Text: "earlier pending notice", WrittenAt: time.Now().UTC()}}}); err != nil {
+				t.Fatal(err)
+			}
+			id, err := n.sayPauseEvent(context.Background(), kind, "current", "current control notice")
+			if err != nil || id != 901 || remote.count("current control notice") != 1 {
+				t.Fatalf("first notice was deferred: id=%d error=%v posts=%v", id, err, remote.all())
+			}
+			t.Logf("first call: kind=%s comment=%d posts=1 after slow readback", kind, id)
+		})
 	}
 }
 
@@ -371,10 +413,11 @@ func TestPauseCannotReleaseFromAnUnreadableOrConflictingReceipt(t *testing.T) {
 
 func TestPauseResumeIsNotConsumedAgainAsAQuestionAnswer(t *testing.T) {
 	cfg, issue, directory, record := pausedFixture(t, chain.State{Step: "ask_requester", Waiting: true})
-	raw := issueComment(901, 55, "再開\nthese are control words, not the outstanding answer")
+	raw := issueComment(901, 77, "再開\nthese are control words, not the outstanding answer")
 	if err := applyPauseResume(context.Background(), cfg, issue, directory, noticeRequest, &record, raw); err != nil {
 		t.Fatal(err)
 	}
+	cfg.Intake.StopUserIDs = nil
 	if err := writeRuntimeFile(filepath.Join(directory, "question.json"), []byte(`{"after":800}`)); err != nil {
 		t.Fatal(err)
 	}
