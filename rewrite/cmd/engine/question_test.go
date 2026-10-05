@@ -47,9 +47,14 @@ func questionConfiguration(t *testing.T) config {
 	t.Helper()
 	cfg := watchConfiguration(t)
 	cfg.Intake.QuestionRole = "ask_requester"
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg.Roles = []chain.Role{{Name: "ask_requester", Purpose: "Ask the requester the points only they can decide.",
 		Processes: []chain.Process{{Name: "questioner", TrackerAccess: "comment",
-			Command: []string{"/bin/sh", "-c", `cat > received.txt; printf 'asked\n' >> asked.txt; printf 'Posted one question and read it back.\n'`}}}}}
+			Command: []string{binary, "-test.run=^TestQuestionPostWorker$"},
+			Env:     map[string]string{"QUESTION_POST_WORKER": "1", "QUESTION_TEST_FILES": "1"}}}}}
 	return cfg
 }
 
@@ -92,6 +97,10 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 		defer mu.Unlock()
 		if r.URL.Host == "watch-tracker.example" {
 			if strings.HasSuffix(r.URL.Path, "/comments") {
+				if r.Method == http.MethodPost {
+					comments = append(comments, issueComment(702, 900, postedQuestion))
+					return selectionReply(r, 201, comments[len(comments)-1]), nil
+				}
 				return selectionReply(r, 200, append([]json.RawMessage{}, comments...)), nil
 			}
 			return selectionReply(r, 200, []any{watchedIssue(51, "Original conditions", "2026-01-03T00:00:00Z")}), nil
@@ -116,7 +125,7 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 		_, recorded := questionBoundaryAt(t, root)
 		return err == nil && state.Waiting && recorded
 	})
-	if after, ok := questionBoundaryAt(t, root); !ok || after != 701 {
+	if after, ok := questionBoundaryAt(t, root); !ok || after != 702 {
 		t.Fatalf("recorded question boundary=%d present=%t", after, ok)
 	}
 	held := func(reason string) {
@@ -128,7 +137,7 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 		if err != nil || !state.Waiting || state.Done {
 			t.Fatalf("%s: state=%+v err=%v", reason, state, err)
 		}
-		if after, ok := questionBoundaryAt(t, root); !ok || after != 701 {
+		if after, ok := questionBoundaryAt(t, root); !ok || after != 702 {
 			t.Fatalf("%s: the question was recorded again at %d (present=%t)", reason, after, ok)
 		}
 		if starts, asked := log.starts(), askedTimes(t, root); starts != 1 || asked != 1 {
@@ -137,11 +146,11 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 	}
 	held("a comment below the boundary and another user's comment")
 	mu.Lock()
-	comments = append(comments, issueComment(702, 88, "別の人が上に書いた返事"))
+	comments = append(comments, issueComment(703, 88, "別の人が上に書いた返事"))
 	mu.Unlock()
 	held("another user's comment above the boundary")
 	mu.Lock()
-	comments = append(comments, issueComment(703, 55, ""))
+	comments = append(comments, issueComment(704, 55, ""))
 	mu.Unlock()
 	held("a status change by the requester, which the tracker records as a comment without words")
 	finish()
@@ -149,7 +158,7 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 	defer restarted()
 	held("a collector restart while waiting")
 	mu.Lock()
-	comments = append(comments, issueComment(704, 55, requesterAnswer))
+	comments = append(comments, issueComment(705, 55, requesterAnswer))
 	mu.Unlock()
 	waitFor(t, func() bool { state, err := loadWatchState(root, 51); return err == nil && state.Done })
 	restarted()
@@ -167,7 +176,7 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 	if _, ok := questionBoundaryAt(t, root); ok {
 		t.Fatal("the answered question is still open")
 	}
-	if _, err := os.Stat(filepath.Join(root, "jobs", "51", "answer-704.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "jobs", "51", "answer-705.json")); err != nil {
 		t.Fatal("the answered question was not kept", err)
 	}
 	mu.Lock()
@@ -189,6 +198,10 @@ func TestAStopDuringAQuestionIsNotAnAnswer(t *testing.T) {
 		defer mu.Unlock()
 		if r.URL.Host == "watch-tracker.example" {
 			if strings.HasSuffix(r.URL.Path, "/comments") {
+				if r.Method == http.MethodPost {
+					comments = append(comments, issueComment(702, 900, postedQuestion))
+					return selectionReply(r, 201, comments[len(comments)-1]), nil
+				}
 				return selectionReply(r, 200, append([]json.RawMessage{}, comments...)), nil
 			}
 			return selectionReply(r, 200, []any{watchedIssue(51, "Original conditions", "2026-01-03T00:00:00Z")}), nil
@@ -204,7 +217,7 @@ func TestAStopDuringAQuestionIsNotAnAnswer(t *testing.T) {
 		return err == nil && state.Waiting && recorded
 	})
 	mu.Lock()
-	comments = append(comments, issueComment(702, 55, "停止\nもう決めなくていい"))
+	comments = append(comments, issueComment(703, 55, "停止\nもう決めなくていい"))
 	mu.Unlock()
 	waitFor(t, func() bool {
 		_, err := os.Stat(filepath.Join(root, "jobs", "51", "stop-request.json"))
@@ -342,7 +355,7 @@ func stopWhileWaiting(t *testing.T, shortBudget bool) {
 	time.Sleep(100 * time.Millisecond) // several more ticks
 	finish()
 	mu.Lock()
-	if got := strings.Join(posted, " | "); got != "受け付けました。すぐに自動処理を始めます。" {
+	if got := strings.Join(posted, " | "); got != acceptedNoticeText(0, "")+" | "+postedQuestion {
 		t.Fatalf("the requester was told: %s", got)
 	}
 	if got := strings.Join(moves, ","); got != "status:1001,assignee:900,status:1002,assignee:55,status:1" {

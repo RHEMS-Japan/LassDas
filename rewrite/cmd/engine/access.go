@@ -12,7 +12,7 @@ import (
 var trackerEnvironment = []string{"TASK_TRACKER_URL", "TASK_TRACKER_KEY", "TASK_TRACKER_CERT", "TASK_TRACKER_ISSUE"}
 
 // Validate operator configuration, never the wording of a model report.
-func roleAccess(cfg config, issue string) (func(context.Context, chain.Process) (chain.Process, func(), error), error) {
+func roleAccess(cfg config, issue string, options ...func(*tracker.IssueScope)) (func(context.Context, chain.Process) (chain.Process, func(), error), error) {
 	if err := validateGitHubConfig(cfg, nil); err != nil {
 		return nil, err
 	}
@@ -62,12 +62,12 @@ func roleAccess(cfg config, issue string) (func(context.Context, chain.Process) 
 		// "comment" leaves one comment per launch: when the launch is over,
 		// the comments it stored before its last one are removed.
 		// "every-comment" keeps every post. Anything else cannot post.
-		var options []func(*tracker.IssueScope)
+		launchOptions := append([]func(*tracker.IssueScope){}, options...)
 		if process.TrackerAccess == "comment" {
-			options = append(options, tracker.KeepLatestPost)
+			launchOptions = append(launchOptions, tracker.KeepLatestPost)
 		}
 		mayPost := process.TrackerAccess == "comment" || process.TrackerAccess == "every-comment"
-		access, err := tracker.ServeIssue(ctx, source, issue, mayPost, options...)
+		access, err := tracker.ServeIssue(ctx, source, issue, mayPost, launchOptions...)
 		if err != nil {
 			return process, nil, err
 		}

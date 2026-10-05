@@ -894,8 +894,12 @@ func TestTheLaunchARunEndsOrWaitsOnIsSaidWhenItReturns(t *testing.T) {
 		cfg.Intake.DeclareModels = true
 		cfg.Intake.QuestionRole = "ask_requester"
 		cfg.ModelSelection = &selectionConfig{Fixed: "maker/configured"}
+		binary, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
 		cfg.Roles = []chain.Role{{Name: "ask_requester", Purpose: "ask the requester what is unclear", Processes: []chain.Process{
-			{Name: "questioner", TrackerAccess: "comment", ModelEnv: "MODEL", Command: []string{"/bin/sh", "-c", "exit 0"}},
+			{Name: "questioner", TrackerAccess: "comment", ModelEnv: "MODEL", Command: []string{binary, "-test.run=^TestQuestionPostWorker$"}, Env: map[string]string{"QUESTION_POST_WORKER": "1"}},
 		}}}
 		fixture := &noticeTracker{}
 		fixture.install(t, alwaysChoose("ask_requester"))
@@ -911,7 +915,7 @@ func TestTheLaunchARunEndsOrWaitsOnIsSaidWhenItReturns(t *testing.T) {
 		}()
 		startStopQueue(t, cfg, root, time.Minute, &queueLog)
 		waitFor(t, func() bool { _, err := os.Stat(filepath.Join(directory, "question.json")); return err == nil })
-		if got := fixture.all(); len(got) != 1 || got[0] != "依頼者への質問を始めます。選定モデル: maker/configured" {
+		if got := fixture.all(); len(got) != 2 || got[0] != postedQuestion || got[1] != "依頼者への質問を始めます。選定モデル: maker/configured" {
 			t.Fatalf("the question's launch was told as %q", got)
 		}
 		if !loadJobState(t, directory).Waiting {

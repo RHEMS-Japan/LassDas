@@ -20,6 +20,53 @@ import (
 
 type unreadableScopeBody struct{}
 
+func TestIssueScopeRecordsOnlyTheStoredPostID(t *testing.T) {
+	for _, latest := range []bool{false, true} {
+		for _, failure := range []string{"", "receipt", "disk"} {
+			t.Run(fmt.Sprintf("latest=%t/%s", latest, failure), func(t *testing.T) {
+				calls, observed := 0, int64(0)
+				options := []func(*IssueScope){ObserveStoredPost(func(id int64) error {
+					observed = id
+					if failure == "disk" {
+						return errors.New("synthetic disk full")
+					}
+					return nil
+				})}
+				if latest {
+					options = append(options, KeepLatestPost)
+				}
+				client, _ := scopedFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					if err := r.ParseForm(); err != nil || r.PostForm.Get("content") != `{"id":999}` {
+						t.Error("comment words were changed")
+					}
+					w.WriteHeader(201)
+					if failure == "receipt" {
+						fmt.Fprint(w, `{"content":"id 888"}`)
+						return
+					}
+					fmt.Fprint(w, `{"id":7,"content":"unchanged receipt","extra":true}`)
+				}), true, options...)
+				data, err := client.AddComment(context.Background(), "EXAMPLE-1", `{"id":999}`)
+				if calls != 1 {
+					t.Fatalf("submitted %d times", calls)
+				}
+				if failure == "receipt" {
+					if err == nil || observed != 0 || !strings.Contains(err.Error(), "positive comment id") {
+						t.Fatalf("missing receipt: observed=%d error=%v", observed, err)
+					}
+				} else if failure == "disk" {
+					if err == nil || observed != 7 || !strings.Contains(err.Error(), "synthetic disk full") {
+						t.Fatalf("storage failure: observed=%d error=%v", observed, err)
+					}
+				} else if err != nil || observed != 7 || string(data) != `{"id":7,"content":"unchanged receipt","extra":true}` {
+					t.Fatalf("receipt not observed before return: observed=%d data=%s error=%v", observed, data, err)
+				}
+			})
+		}
+	}
+}
+
 func (unreadableScopeBody) Read([]byte) (int, error) {
 	return 0, errors.New("synthetic upload disconnected")
 }
