@@ -39,6 +39,7 @@ type worker struct {
 	Output      string
 	Error       string
 	Diagnostics string
+	Interrupted bool
 }
 
 const (
@@ -80,7 +81,7 @@ func groupLaunches(records []record) []launch {
 		case entry.Runtime:
 			note := launch{Role: entry.Role, Started: entry.Started, Finished: entry.Finished, Outcome: noted, Instruction: entry.Instruction, Records: []int{entry.Index}, Gap: entry.Gap, RuntimeFailure: true}
 			switch {
-			case strings.HasPrefix(entry.Error, "The process stopped while this action was pending"):
+			case entry.Interrupted:
 				note.Outcome, note.Failure, note.Notes = interrupted, firstLine(entry.Error), []string{entry.Error}
 			case entry.Error != "":
 				note.Outcome, note.Failure, note.Notes = failed, firstLine(entry.Error), []string{entry.Error}
@@ -98,7 +99,7 @@ func groupLaunches(records []record) []launch {
 			}
 			current := &launches[open]
 			current.Records = append(current.Records, entry.Index)
-			current.Workers = append(current.Workers, worker{Speaker: entry.Speaker, Model: entry.Model, Output: entry.Output, Error: entry.Error, Diagnostics: entry.Diagnostics})
+			current.Workers = append(current.Workers, worker{Speaker: entry.Speaker, Model: entry.Model, Output: entry.Output, Error: entry.Error, Diagnostics: entry.Diagnostics, Interrupted: entry.Interrupted})
 			if current.Started.IsZero() || (!entry.Started.IsZero() && entry.Started.Before(current.Started)) {
 				current.Started = entry.Started
 			}
@@ -112,9 +113,14 @@ func groupLaunches(records []record) []launch {
 		current.Index, current.Last, current.Count = i+1, i+1, 1
 		if len(current.Workers) > 0 && current.Outcome == returned {
 			var errors []string
+			var interruption string
+			wasInterrupted := false
 			started := 0
 			for _, w := range current.Workers {
-				if w.Error != "" {
+				if w.Interrupted {
+					wasInterrupted = true
+					interruption = firstLine(w.Error)
+				} else if w.Error != "" {
 					errors = append(errors, w.Error)
 				}
 				if w.Output != "" || !startFailure(w.Error) {
@@ -126,6 +132,8 @@ func groupLaunches(records []record) []launch {
 				if started == 0 {
 					current.Outcome = couldNotStart
 				}
+			} else if wasInterrupted {
+				current.Outcome, current.Failure = interrupted, interruption
 			}
 			current.signature = current.Role + "\x00" + current.Outcome + "\x00" + strings.Join(errors, "\x00")
 		}

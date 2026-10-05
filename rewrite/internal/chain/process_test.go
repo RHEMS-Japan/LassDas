@@ -326,7 +326,7 @@ func TestProcessTimeoutReturnsAnObservationAndStopIsPrompt(t *testing.T) {
 	process := Process{Name: "worker", Command: []string{"/bin/sh", "-c", "sleep 60"}, Timeout: 30 * time.Millisecond}
 	started := time.Now()
 	result := process.run(context.Background(), Role{Name: "implement"}, Assignment{Role: "implement"}, State{Request: "original"})
-	if !strings.Contains(result.Error, "deadline exceeded") || result.FinishedAt.IsZero() {
+	if !strings.Contains(result.Error, "deadline exceeded") || result.FinishedAt.IsZero() || result.Interrupted {
 		t.Fatalf("result=%#v", result)
 	}
 	if time.Since(started) > time.Second {
@@ -356,6 +356,62 @@ func TestProcessCancellationLetsHarnessCleanUpBeforeReturning(t *testing.T) {
 	}
 	if got.Output != "partial work" || !strings.Contains(got.Error, "context canceled") {
 		t.Fatalf("cancellation erased partial work or looked successful: %#v", got)
+	}
+	encoded, err := json.Marshal(got)
+	var fields map[string]any
+	if err != nil || json.Unmarshal(encoded, &fields) != nil || fields["interrupted"] != true {
+		t.Fatalf("controller cancellation was not distinguished from process failure: %s %v", encoded, err)
+	}
+}
+
+func TestControllerInterruptionDuringSelectionAndPreparationIsRecorded(t *testing.T) {
+	for _, phase := range []string{"selection", "preparation"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			process := Process{Name: "worker", Command: []string{"/bin/sh", "-c", "exit 7"}}
+			p := Processes{}
+			if phase == "selection" {
+				process.ModelEnv = "MODEL"
+				p.SelectModel = func(context.Context, Role, Process, State, []string) (string, error) {
+					cancel()
+					return "", ctx.Err()
+				}
+			} else {
+				p.Prepare = func(context.Context, Process) (Process, func(), error) {
+					cancel()
+					return process, nil, ctx.Err()
+				}
+			}
+			p.Roles = map[string]Role{"work": {Name: "work", Processes: []Process{process}}}
+			results := p.Execute(ctx, Assignment{Role: "work"}, State{})
+			if len(results) != 1 || !results[0].Interrupted || !strings.Contains(results[0].Error, "context canceled") {
+				t.Fatalf("lost interruption reason: %+v", results)
+			}
+		})
+	}
+	result := (Process{Name: "worker", Command: []string{"/bin/sh", "-c", "exit 7"}}).run(context.Background(), Role{Name: "work"}, Assignment{Role: "work"}, State{})
+	if result.Interrupted || result.Error != "exit status 7" {
+		t.Fatalf("a genuine failure was relabelled: %+v", result)
+	}
+}
+
+func TestRestartRetainsAnInterruptedPendingActionWithoutCompletingIt(t *testing.T) {
+	store := &memoryStore{state: State{Request: "original", Pending: &Assignment{Role: "work"}, PendingSince: time.Now().Add(-time.Hour)}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := Chain{Store: store, Router: testRouter(func(ctx context.Context, state State) (Assignment, error) {
+		if len(state.History) != 1 || !state.History[0].Interrupted || !strings.Contains(state.History[0].Error, "may have taken effect") || !state.Recovering {
+			t.Fatalf("restart lost the interruption or its uncertainty: %+v", state)
+		}
+		cancel()
+		return Assignment{}, ctx.Err()
+	}), Executor: testExecutor(func(context.Context, Assignment, State) []Result {
+		t.Fatal("cancelled router started work")
+		return nil
+	})}
+	if err := c.Run(ctx); !errors.Is(err, context.Canceled) || store.state.Done {
+		t.Fatalf("restart was completion: %v %+v", err, store.state)
 	}
 }
 
