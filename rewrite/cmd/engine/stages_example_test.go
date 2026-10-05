@@ -40,6 +40,15 @@ func TestOrderedExampleReconsidersFailuresWithoutGrantingWiderAccess(t *testing.
 		}
 	}
 	for _, role := range cfg.Roles {
+		if role.Name == "elicit" || role.Name == "ask_requester" {
+			for _, text := range []string{role.Purpose, role.Processes[0].Instructions} {
+				for _, phrase := range []string{"newly required expansion of authority", "unknown cause", "initial elicitation only"} {
+					if !strings.Contains(text, phrase) {
+						t.Errorf("%s recovery guidance omits %q", role.Name, phrase)
+					}
+				}
+			}
+		}
 		if role.Name == "elicit" {
 			if !strings.Contains(role.Processes[0].Instructions, "On a return after a failed stage, read that failure and the previous work first") {
 				t.Fatal("requirements role was not told to reconsider the actual failure")
@@ -154,6 +163,10 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 	}
 	if roles["deliver"].Processes[0].Receipt == "" {
 		t.Fatal("the delivery stage leaves the runtime nothing to read back")
+	}
+	method := roles["review"].Processes[0].Env["DELIVERY_MERGE_METHOD"]
+	if method == "" || method != roles["deliver"].Processes[0].Env["DELIVERY_MERGE_METHOD"] {
+		t.Fatal("review and delivery must size the same pull request introduction")
 	}
 	if _, staged := roles["ask_requester"]; !staged {
 		t.Fatal("the example has no question role")
@@ -674,7 +687,7 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 				t.Fatalf("knowledge did not survive the repair and delivery: %q %v", knowledge, knowledgeErr)
 			}
 			if (!asked || repairQuestion) && !os.IsNotExist(knowledgeErr) {
-				t.Fatal("a request with no answer generated knowledge anyway", knowledgeErr)
+				t.Fatal("a fixture without knowledge writeback produced a knowledge file", knowledgeErr)
 			}
 			launches, records, failures, workingModels, answers := map[string]int{}, 0, 0, 0, 0
 			receipts := 0

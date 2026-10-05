@@ -1,6 +1,6 @@
 """Shared pieces of the fixed delivery processes; never a model tool.
 
-These programs run configured operations only. Every value comes from the
+These programs run configured operations only. Authority comes from the
 operator's environment, not from a role's answer, and the credential never
 reaches a command line, a remote URL or the printed report: Git asks for it
 through the credential helper below, which answers one configured host.
@@ -26,19 +26,113 @@ RECEIPT = Path(".git/ticket-engine/delivery.json")
 
 # Text Git gives that is not UTF-8 (a file in Shift_JIS, a name in its bytes)
 # is kept as surrogate escapes, so that a name goes back to Git as the bytes
-# it was. Printed or recorded, each such byte is a replacement character,
-# given as its UTF-8 bytes: Python's UTF-8 encoder takes only ASCII text back.
+# it was. Unstructured Git diagnostics replace each invalid byte below;
+# individual path labels use readable() to retain the distinct byte values.
 codecs.register_error("replacement-character",
                       lambda error: ("\N{REPLACEMENT CHARACTER}".encode() * (error.end - error.start), error.end))
 
 
 def readable(text):
-    """Text as a person reads it, with no byte that is not UTF-8 left in it."""
-    return text.encode("utf-8", "replacement-character").decode("utf-8")
+    """A path for display only; byte names must not collapse to the same text.
+
+    Normal Unicode names stay readable. Invalid UTF-8 is shown as Python's
+    quoted bytes (b'...\\x82...'), not replacement characters. Quote literal
+    escapes and controls too, so a real backslash is not mistaken for a byte.
+    None of these displayed strings is passed back to Git as a path.
+    """
+    if re.search("[\udc80-\udcff]", text):
+        return repr(text.encode("utf-8", "surrogateescape"))
+    if any(not character.isprintable() or character in "\\\"'" for character in text):
+        return repr(text)
+    return text
 
 
 class DeliveryError(RuntimeError):
     """A refusal or a failed operation. The process exits non-zero."""
+
+
+class DescriptionSettingError(DeliveryError):
+    """Only the operator can supply or correct this description setting."""
+
+
+def default_pull_request_body(issue, method):
+    return ("Prepared by the configured ticket engine for %s. Only the operator's allowed "
+            "paths are included. Review the change itself; this description is not a result.%s"
+            % (issue, " Merging it is left to a person." if method == "none" else ""))
+
+
+def description_size(text, source="The pull request description"):
+    """One operator limit shared by review and publication, without truncation."""
+    try:
+        limit = int(setting("PR_DESCRIPTION_MAX_BYTES", "60000"))
+        if limit <= 0:
+            raise ValueError()
+    except ValueError as error:
+        raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES must be a positive integer") from error
+    size = len(text.encode("utf-8"))
+    if size > limit:
+        raise DeliveryError("%s is %d bytes and exceeds the configured %d-byte limit; nothing was shortened"
+                            % (source, size, limit))
+
+
+def description_report():
+    """The chosen role's latest reports, from this run's existing checkpoint."""
+    role = os.environ.get("PR_DESCRIPTION_ROLE", "")
+    if not role:
+        return "", ""
+    path = os.environ.get("TASK_HISTORY")
+    if not path:
+        raise DescriptionSettingError("TASK_HISTORY is unset; use a runtime that supplies it to review and delivery")
+    issue = os.environ.get("TASK_ISSUE")
+    if not issue:
+        raise DescriptionSettingError("TASK_ISSUE is unset; use the assigned request in both review and delivery")
+    prefix = default_pull_request_body(issue, setting("DELIVERY_MERGE_METHOD", "merge")) + "\n\n"
+    try:
+        description_size(prefix + "x", "The required introduction and a one-byte report")
+    except DescriptionSettingError:
+        raise
+    except DeliveryError as error:
+        raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES cannot fit the required introduction: " + str(error)) from error
+    try:
+        with Path(path).open("rb") as saved:
+            raw = saved.read(64 * 1024 * 1024 + 1)
+        if len(raw) > 64 * 1024 * 1024:
+            raise ValueError("checkpoint exceeds the local 64 MiB read limit")
+        history = json.loads(raw.decode("utf-8"))["history"]
+        if not isinstance(history, list):
+            raise ValueError("checkpoint history is not a list")
+        selected = []
+        for record in reversed(history):
+            name, speaker = record["role"], record["speaker"]
+            if not isinstance(name, str) or not isinstance(speaker, str):
+                raise ValueError("checkpoint has a malformed report identity")
+            if speaker in {"requester", "runtime"}:
+                continue
+            if name == role:
+                text = record.get("output", "")
+                if not isinstance(text, str):
+                    raise ValueError("checkpoint has a malformed report body")
+                selected.append(text)
+            elif selected:
+                break
+        text = "\n\n".join(reversed(selected))
+        text.encode("utf-8")
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as error:
+        reason = error.strerror if isinstance(error, OSError) else str(error)
+        note = "Pull request explanation omitted: saved history could not be read (%s). The change itself still requires review." % reason
+        try:
+            description_size(prefix + note)
+        except DeliveryError as error:
+            raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES cannot fit the explanation omission notice: " + str(error)) from error
+        return "", note
+    if not selected:
+        raise DescriptionSettingError("PR_DESCRIPTION_ROLE=%r has no recorded report; choose a role that reports "
+                                      "before review, not a process name or a later reporting role" % role)
+    if not text.strip():
+        raise DeliveryError("The latest report of role %s is empty; return to the worker for an explanation" % role)
+    description_size(prefix + text, "The complete description (latest report of role %s: %d bytes)"
+                     % (role, len(text.encode("utf-8"))))
+    return text, ""
 
 
 class TransientError(DeliveryError):
@@ -189,7 +283,10 @@ def git(*arguments, url=None):
         if host.scheme == "https":
             helper = "!" + " ".join(shlex.quote(part) for part in
                                     (sys.executable, "-B", str(SUPPORT), "--credential-helper"))
-            os.environ["DELIVERY_CREDENTIAL_HOST"] = host.hostname or ""
+            # Git includes an explicit port in the credential's host field.
+            # Keep that authority exactly, excluding any URL user information;
+            # stripping the port both breaks this target and permits another.
+            os.environ["DELIVERY_CREDENTIAL_HOST"] = host.netloc.rsplit("@", 1)[-1]
             command += ["-c", "credential.helper=", "-c", "credential.helper=" + helper]
     elif workspace_as_reviewed:
         command += WORKSPACE_FILES

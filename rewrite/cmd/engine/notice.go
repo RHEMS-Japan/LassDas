@@ -185,12 +185,18 @@ func noticeDue(log noticeLog, kind string, now time.Time) bool {
 		}
 		return kind == pausedNotice
 	}
+	if kind == startedNotice && noticeDue(log, restoredNotice, now) {
+		return false
+	}
 	interval := resumeNoticeInterval
 	if kind == stallNotice {
 		interval = stallNoticeInterval
 	}
 	once := onceNotice(kind)
 	for i := len(log.Notices) - 1; i >= 0; i-- {
+		if kind == startedNotice && log.Notices[i].Kind == restoredNotice {
+			return false
+		}
 		if log.Notices[i].Kind == kind {
 			return !once && now.Sub(log.Notices[i].WrittenAt) >= interval
 		}

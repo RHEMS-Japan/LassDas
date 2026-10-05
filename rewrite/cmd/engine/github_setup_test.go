@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -69,5 +71,70 @@ func TestGitHubSetupCheckLeavesGuidanceAndEnvironmentNamesAlone(t *testing.T) {
 	cfg.Instructions = "The project's guide explains why the example uses REPLACE_WITH_OWNER/REPLACE_WITH_REPOSITORY."
 	if _, _, _, _, err := watchSettings(&cfg, filepath.Join(t.TempDir(), "queue")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGitHubOrderedSetupScriptProducesACheckableConfiguration(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("requires Python for the documented setup command")
+	}
+	root, err := filepath.Abs("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := os.ReadFile(filepath.Join(root, "deploy", "ticket-engine", "SETUP.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, section, found := strings.Cut(string(doc), "### GitHub: make the ordered copy")
+	if !found {
+		t.Fatal("documented conversion is missing")
+	}
+	_, script, found := strings.Cut(section, "<<'PY'\n")
+	if !found {
+		t.Fatal("documented Python conversion is missing")
+	}
+	script, _, found = strings.Cut(script, "\nPY\n")
+	if !found {
+		t.Fatal("documented conversion has no closing delimiter")
+	}
+	configPath := filepath.Join(t.TempDir(), "operator.json")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, python, "-B", "-", configPath, "example/requests", "example/project", "master")
+	command.Dir = root
+	command.Stdin = strings.NewReader(script)
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "PYTHONDONTWRITEBYTECODE=1"}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("documented conversion failed: %v: %s", err, output)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	// The next documented step supplies project guidance, not tracker fields.
+	fields["instructions"] = json.RawMessage(`"Read the project's CONTRIBUTING.md before changing its source."`)
+	raw, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		t.Errorf("the local setup check attempted a request: %s", r.URL)
+		return nil, http.ErrNotSupported
+	})
+	var output, log bytes.Buffer
+	if err := run(ctx, []string{"--config", configPath, "--check"}, &output, &log); err != nil {
+		t.Fatalf("converted configuration was refused: %v: %s", err, log.String())
+	}
+	if !strings.Contains(output.String(), "example/requests") || !strings.Contains(output.String(), "nothing was started") {
+		t.Fatalf("check did not report the selected intake: %s", output.String())
 	}
 }
