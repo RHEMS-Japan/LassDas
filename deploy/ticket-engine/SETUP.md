@@ -1982,30 +1982,99 @@ what it tried to do.
    ```
 
    It must end with `the configuration is accepted; nothing was started`.
-   Then run it over the copy with an empty environment, so it holds no
-   credential, for two or three poll intervals, and stop it with Ctrl-C:
+   The source-shipped offline helper observes the candidate without executing
+   configured role commands, including queues with waiting or unfinished work:
 
    ```sh
-   env -i PATH=/usr/bin:/bin /absolute/path/to/new-bundle/bin/ticket-engine \
-     --config operator-current.json --watch --run-dir queue-copy 2>&1 | tee rehearsal.log
+   python3 -B deploy/ticket-engine/operations/rehearse.py \
+     --source /absolute/path/to/clean-candidate-checkout \
+     --commit FULL_COMMIT_ID --queue /absolute/path/to/queue-copy \
+     --config /absolute/path/to/operator-current.json \
+     --reads /absolute/path/to/offline-reads.json \
+     --output /absolute/path/to/new-rehearsal-output --seconds 2
    ```
 
-   Without a credential every tracker call fails before it leaves your
-   machine, and the engine logs each write it could not make. Lines with
-   `not set`, `not announced`, `not declared`, `not recorded`, `not handed`
-   or `not confirmed` name a request and a change the new image would make
-   on the issue. The `intake: ...` line opens every start. `issue discovery unavailable`,
-   `stop instructions could not be read`,
-   `work paused while stop instructions are unavailable` and
-   `the runtime's own tracker account is unknown` are only the missing
-   credential speaking; the last one also means hand-overs of the assignee
-   are not tried in this run.
+   The source must already be a clean checkout of that full commit, including
+   no untracked or ignored files, and ship its own `rehearsal_test.go` support. The helper
+   does not fetch, switch commits, create/remove worktrees or inject a test
+   from a different version. Keep it beside `queue_helper.py`. It needs Python
+   3, Git and an already installed Go toolchain meeting the candidate's module
+   requirement. Toolchain/module downloads are disabled. The output must be
+   new, outside the checkout and input queue, with a real existing parent.
+   Input paths must be absolute without symbolic links.
 
-This procedure was checked against a small queue made for the purpose (one
-request delivered before its queue's notice kinds began, one after, never
-announced): the log named a status change for both and the model list for the
-second only, and the copy recorded the first one's list as predating its kind.
-It has not been run as written against a real queue.
+   Supply the GET responses you intend to assume in `offline-reads.json`.
+   This helper does not collect them, contact the tracker or treat the old
+   accepted `issue.json` as the tracker's current state. For example, this
+   synthetic Backlog entry assumes no newly discoverable issues in one project:
+
+   ```json
+   {
+     "reads": [
+       {
+         "url": "https://tracker.example/api/v2/issues?count=100&offset=0&order=asc&projectId%5B%5D=7&sort=created",
+         "body": [],
+         "min_reads": 2
+       }
+     ]
+   }
+   ```
+
+   Use the actual configured endpoint and explicit query values for your
+   offline assumptions, not the example project or endpoint. Each entry is
+   an HTTPS GET URL, a native JSON response body and a positive `min_reads`.
+   All entries are required to be observed at least that often. Query ordering
+   is normalized; omit `apiKey` and every credential value. An optional `link`
+   contains the pagination Link header; supply every requested page separately.
+   Replies are HTTP 200 only. Account, issue, comment, model-budget or other
+   reads needed by the configuration must also be supplied. Unknown GETs,
+   incomplete coverage and unreadable replies fail, rather than receiving
+   invented empty responses. This applies to the configured tracker using its
+   native response shapes; it does not translate a Backlog snapshot to GitHub.
+
+   Normally readable done, waiting and unfinished records are admitted, as are
+   authorized saved stops. Missing/conflicting histories and unreadable saved
+   stop reports fail. Empty queues are not rehearsal coverage. The helper
+   copies the input again into a private temporary directory, retains file
+   times and leaves the input unchanged. Links, hardlinks and special files
+   are rejected. Every configured role command is independently removed from
+   the in-memory configuration and checked before observation. Every non-GET
+   attempt is blocked and fails the rehearsal, including comments, status and
+   assignment changes. A required read count, the requested observation time,
+   normal cancellation and unchanged terminal records are separate checks.
+   Unfinished work can record failed or interrupted attempts because its role
+   commands are deliberately absent; this does not test the roles' execution.
+   A stopped request with a required but unfinished report is observed too.
+   Every HTTP write attempt still fails the rehearsal, even if it would be an
+   expected next action of unfinished work; inspect the details before deciding
+   whether it is a regression. A copied live record is not a live process here.
+
+   Exit 0 means no write was observed under the supplied offline assumptions;
+   a failure is nonzero. The JSON summary contains counts and elapsed time,
+   not request text, hosts or diagnostics. `full_tick_coverage` is always false:
+   neither elapsed time nor read counts prove every job completed every tick.
+   This is not deployment approval, a check of live tracker consistency, role
+   results, or a sandbox for arbitrary candidate source, package initialization
+   or toolchain code. Execute only a candidate/toolchain you trust, or use your
+   separately enforced sandbox. No operator credentials are inherited by the
+   Go check; configuration-named API credentials use synthetic values.
+
+   The new output retains private configuration/read copies, a result on
+   success, a log and toolchain scratch data. After observation, including a
+   failed one, `observations.json` names every blocked request's method and URL
+   without credentials, distinguishing writes from missing GET responses and
+   listing unmet read counts. `collector.log` retains the controller's own
+   diagnostics. An unconfirmed notification is retried every 25 ms tick here,
+   so one restart notice can appear as dozens of POST attempts; the log
+   distinguishes its initial "restart notice" from retries of an "earlier notice".
+   Request bodies and headers are not recorded. These private
+   files identify the affected issue; do not paste them into public logs.
+   Keep all output out of public logs and
+   commits. The observation's temporary queue is removed by the test; the
+   original input and any new partial output are never deleted by the helper.
+   A failed run must not be treated as a successful queue-copy or deployment
+   check merely because its output directory exists. These helpers have been
+   checked with synthetic fixtures, not a real installation.
 
 ### Rolling it out
 
