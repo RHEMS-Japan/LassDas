@@ -80,6 +80,10 @@ Environment (all from the operator, never from a role):
 With --dry-run it checks the settings, the changed paths and the reachability
 of the target, commits nothing and pushes nothing, and always ends non-zero:
 an operator check must never be mistaken for a delivery that happened.
+
+With --branch-only it publishes and reads back the ticket branch without
+opening a pull request or merging. Explicit merge-method or PR-description
+settings cannot be combined with this mode. See the branch-only guide in README.md.
 """
 import os
 from pathlib import Path, PurePosixPath
@@ -736,6 +740,13 @@ def closed_summary(receipt, again=False):
 def changed_summary(receipt, again=False):
     """again: a later run, which reads neither the pull request nor its branch
     again; only the work still not committed is looked at anew."""
+    if receipt.get("branch_only"):
+        return ("A person changed or deleted branch %s; it was %s when delivery last looked%s.\n"
+                "This process handed it over: nothing was committed or pushed by this attempt. "
+                "The branch is not read again or recreated on later attempts.\n"
+                "The workspace still holds %d uncommitted paths. Nothing was merged or deployment-checked."
+                % (receipt["branch"], receipt["branch_head"] or "absent", read_then(receipt),
+                   receipt.get("not_committed_count", 0)))
     address = receipt.get("pull_request_url") or "(the service gave no address)"
     if receipt.get("merge_sha"):
         lines = ["When a delivery read it%s, a person had changed branch %s to %s and merged pull request %d "
@@ -783,13 +794,14 @@ def unchanged_summary(receipt):
         "does not judge it."])
 
 
-def check_only(workspace, owner, name, base, branch, method, url, allowed, unchanged):
+def check_only(workspace, owner, name, base, branch, method, url, allowed, unchanged, branch_only=False):
     """An operator check: local settings plus read-only calls to the target."""
     paths = changed_paths(workspace)
     exempt = integration_paths(workspace)
     refuse_paths_outside_grant(paths, allowed, exempt)
     lines = ["Checked the delivery settings; nothing was committed, pushed, opened or merged.",
              "Target %s/%s, integration branch %s, ticket branch %s." % (owner, name, base, branch),
+             "A delivery publishes only its ticket branch, with no pull request or merge." if branch_only else
              "A delivery ends at the open pull request and leaves the merge to a person (DELIVERY_MERGE_METHOD "
              "is none)." if method == "none" else "A delivery merges its pull request with method %s." % method,
              "Changed paths inside the operator's grant: %s."
@@ -801,11 +813,12 @@ def check_only(workspace, owner, name, base, branch, method, url, allowed, uncha
     if exempt:
         lines.append("Paths the integration branch changed, which need no grant: %s."
                      % ", ".join(support.readable(path) for path in sorted(exempt)))
-    status, payload = support.api("GET", "/repos/%s/%s" % (owner, name))  # no retry: this is a check
-    lines.append("Reading the repository answered status %d%s." %
-                 (status, "" if status != 200 else "; its default branch is %s" % payload.get("default_branch", "?")))
-    status, _ = support.api("GET", "/repos/%s/%s/branches/%s" % (owner, name, base))
-    lines.append("Reading the integration branch answered status %d." % status)
+    if not branch_only:
+        status, payload = support.api("GET", "/repos/%s/%s" % (owner, name))  # no retry: this is a check
+        lines.append("Reading the repository answered status %d%s." %
+                     (status, "" if status != 200 else "; its default branch is %s" % payload.get("default_branch", "?")))
+        status, _ = support.api("GET", "/repos/%s/%s/branches/%s" % (owner, name, base))
+        lines.append("Reading the integration branch answered status %d." % status)
     code, listing, diagnostics = support.run(
         support.git("ls-remote", "--heads", url, "refs/heads/" + base, url=url),
         check=False, timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600),
@@ -838,9 +851,11 @@ def refusal(issue, owner, name, base, branch, error):
 
 
 def deliver(arguments):
-    dry = arguments == ["--dry-run"]
-    if arguments and not dry:
-        raise DeliveryError("This delivery process takes no arguments except --dry-run")
+    if len(arguments) != len(set(arguments)) or any(arg not in ("--dry-run", "--branch-only") for arg in arguments):
+        raise DeliveryError("This delivery process accepts only --dry-run and --branch-only")
+    dry, branch_only = "--dry-run" in arguments, "--branch-only" in arguments
+    if branch_only and os.environ.get("DELIVERY_MERGE_METHOD"):
+        raise DeliveryError("--branch-only cannot be combined with DELIVERY_MERGE_METHOD")
     support.discard_prompt()
     # Read and write the workspace as the review reads it (delivery_support).
     support.workspace_as_reviewed = True
@@ -856,11 +871,18 @@ def deliver(arguments):
     unchanged = allow_unchanged()
     url = support.remote_url(owner, name)
     if dry:
-        return check_only(workspace, owner, name, base, branch, method, url, allowed, unchanged)
+        return check_only(workspace, owner, name, base, branch, method, url, allowed, unchanged, branch_only)
     try:
+        if branch_only:
+            return publish_only(workspace, issue, owner, name, base, branch, url, allowed, unchanged)
         return carry_out(workspace, issue, owner, name, base, branch, method, url, allowed, unchanged)
     except DeliveryError as error:
-        print(refusal(issue, owner, name, base, branch, error), flush=True)
+        if branch_only:
+            print("Branch-only delivery for %s did not complete: %s\n"
+                  "Earlier commits or pushes have not been undone. Check the record and remote branch before retrying."
+                  % (issue, error), flush=True)
+        else:
+            print(refusal(issue, owner, name, base, branch, error), flush=True)
         raise
 
 
@@ -921,7 +943,8 @@ def end_changed(workspace, path, receipt, previous, tip):
     more is pushed there, and what is not in the pull request is named: a
     commit of this delivery, and changes the workspace holds uncommitted."""
     recorded = receipt.get("head")
-    unpushed = recorded if recorded and not is_ancestor(workspace, recorded, tip) else None
+    unpushed = (recorded if not receipt.get("branch_only") and recorded
+                and not is_ancestor(workspace, recorded, tip) else None)
     receipt.update(changed_by_person=True, branch_head=tip, not_pushed=unpushed, ended_at=support.timestamp(),
                    **uncommitted(workspace))
     receipt["previous"] = previous
@@ -930,9 +953,116 @@ def end_changed(workspace, path, receipt, previous, tip):
     return 0
 
 
+def branch_head(workspace, url, branch):
+    listing = support.run_git(support.git("-C", str(workspace), "ls-remote", "--heads", url,
+                                          "refs/heads/" + branch, url=url),
+                              describe="read the published branch",
+                              timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600))
+    return listing.split("\t")[0].strip() if listing.strip() else ""
+
+
+def branch_summary(receipt):
+    return ("Published branch %s of %s for %s at commit %s; the remote head was read back at %s.\n"
+            "No pull request was opened and nothing was merged by this delivery. Environment deployment was not checked."
+            % (receipt["branch"], receipt["repository"], receipt["issue"], receipt["published_head"],
+               receipt["branch_confirmed_at"]))
+
+
+def publish_only(workspace, issue, owner, name, base, branch, url, allowed, unchanged):
+    """Use the same reviewed-tree checks, then stop at a confirmed branch.
+    A lease compares the last observed ref; an ancestry check independently
+    forbids rewriting history. A lost push response is reconciled by reading
+    the branch, never by forcing a retry over another writer."""
+    path = support.receipt_path(workspace)
+    receipt = support.read_receipt(path)
+    identity = dict(issue=issue, repository=owner + "/" + name, base_branch=base)
+    if receipt:
+        if any(receipt.get(key) != value for key, value in identity.items()):
+            raise DeliveryError("The prior delivery record belongs to a different request or target")
+        if not receipt.get("unchanged") and (receipt.get("branch_only") is not True or receipt.get("branch") != branch
+                or any(receipt.get(key) for key in ("pull_request", "merge_sha", "merge_left_to_person", "previous",
+                                                   "closed_unmerged"))):
+            raise DeliveryError("A prior pull-request delivery cannot become a branch-only delivery")
+        if receipt.get("branch_only"):
+            commits = [receipt.get(key) for key in ("head", "published_head", "publishing_head")]
+            if (receipt.get("unchanged") or not receipt.get("head")
+                    or any(value is not None and not re.fullmatch(r"[0-9a-f]{40}", str(value)) for value in commits)
+                    or (receipt.get("publishing_head") and receipt["publishing_head"] != receipt["head"])):
+                raise DeliveryError("The branch-only record does not identify its saved publication attempt")
+            if receipt.get("changed_by_person"):
+                if not receipt.get("ended_at") or "branch_head" not in receipt:
+                    raise DeliveryError("The branch-only record does not identify the person's handoff")
+                receipt.update(**uncommitted(workspace))
+                support.write_receipt(path, receipt)
+                print(changed_summary(receipt, again=True))
+                return 0
+    if receipt.get("unchanged"):
+        receipt = {}
+    observed = branch_head(workspace, url, branch)
+    expected = receipt.get("published_head", "")
+    pending = receipt.get("publishing_head")
+    if pending and observed == pending:
+        # The service stored a prior push, even if its response or local
+        # confirmation was lost. Record this before considering new work.
+        receipt.update(published_head=observed, branch_confirmed_at=support.timestamp())
+        receipt.pop("publishing_head", None)
+        support.write_receipt(path, receipt)
+        expected = observed
+    if observed != expected:
+        if receipt.get("branch_only"):
+            receipt.pop("publishing_head", None)
+            return end_changed(workspace, path, receipt, [], observed)
+        raise DeliveryError("The ticket branch was created, changed or deleted outside this recorded publication; "
+                            "it was not overwritten or recreated")
+    # The prior unconfirmed attempt is not on the remote. Before recording
+    # a new local head, retire its intent; a failed catch-up must not leave
+    # an old publishing_head paired with a different head forever.
+    receipt.pop("publishing_head", None)
+    if expected and receipt.get("head") == expected == head(workspace) and not changed_paths(workspace) and not merge_in_progress(workspace):
+        receipt["branch_confirmed_at"] = support.timestamp()
+        support.write_receipt(path, receipt)
+        print(branch_summary(receipt))
+        return 0
+    if unchanged and not receipt and not changed_paths(workspace) and not merge_in_progress(workspace):
+        return finish_unchanged(workspace, issue, owner, name, base, url, path)
+    receipt.update(identity, branch=branch, branch_only=True)
+    commit, committed = stage_and_commit(workspace, issue, allowed, receipt)
+    receipt["head"] = commit
+    if committed:
+        receipt["committed_at"] = support.timestamp()
+    support.write_receipt(path, receipt)
+    if catch_up(workspace, url, base, issue, "none"):
+        commit = head(workspace)
+        receipt.update(head=commit, committed_at=support.timestamp())
+        support.write_receipt(path, receipt)
+    if expected and not is_ancestor(workspace, expected, commit):
+        raise DeliveryError("The new commit does not continue the published branch; history was not rewritten")
+    receipt["publishing_head"] = commit
+    support.write_receipt(path, receipt)
+    if observed != commit:
+        try:
+            support.run_git(support.git("-C", str(workspace), "push",
+                                         "--force-with-lease=refs/heads/" + branch + ":" + expected,
+                                         url, commit + ":refs/heads/" + branch, url=url),
+                            describe="publish the reviewed branch without replacing another writer",
+                            timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600))
+        except DeliveryError:
+            if branch_head(workspace, url, branch) != commit:
+                raise
+    if branch_head(workspace, url, branch) != commit:
+        raise DeliveryError("The branch did not read back at the published commit; publication remains unconfirmed")
+    receipt.update(published_head=commit, branch_confirmed_at=support.timestamp())
+    receipt.pop("publishing_head", None)
+    support.write_receipt(path, receipt)
+    print(branch_summary(receipt))
+    return 0
+
+
 def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed, unchanged):
     path = support.receipt_path(workspace)
     receipt = support.read_receipt(path)
+    if receipt.get("branch_only"):
+        raise DeliveryError("A recorded branch-only publication cannot be changed into a pull-request delivery")
     if receipt.get("unchanged"):
         # A round that ended without a delivery committed, pushed and opened
         # nothing, so there is nothing of it to continue: the workspace as it
