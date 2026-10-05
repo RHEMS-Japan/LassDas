@@ -239,6 +239,8 @@ const stagesReceipt = "delivered release/greeting.txt\n"
 const stagesReport = "できるようになったこと\n試験用の納品先からHello 日本語を読み戻せます。これは本番ではありません。\n"
 const stagesQuestion = "依頼者にしか決められない点があります。納品先は (a) release/ か (b) dist/ のどちらにしますか。\n"
 const stagesAnswer = "(a) release/ でお願いします。\n"
+const stagesKnowledgePath = "project/answers.md"
+const stagesKnowledge = "## Delivery target\n\nQuestion: release/ or dist/?\nAnswer: release/.\n"
 
 // Every model stage in the fixture claims the whole request is finished. In an
 // ordered run that claim is never read, so it must move nothing at all.
@@ -292,6 +294,21 @@ func TestStagesRoleHelper(t *testing.T) {
 		}
 	case "work":
 		write("src/greeting.txt", stagesArtifact)
+		if os.Getenv("EXAMPLE_KNOWLEDGE") == "answered" {
+			if !bytes.Contains(prompt, []byte(stagesAnswer)) || !bytes.Contains(prompt, []byte(stagesKnowledgePath)) {
+				t.Fatal("work lost the answer or the configured knowledge destination")
+			}
+			comments := storedComments()
+			if !slices.Contains(comments, stagesQuestion) || !slices.Contains(comments, stagesAnswer) {
+				t.Fatal("the work role cannot read the actual exchange through its assigned scope")
+			}
+			if _, err := os.Stat(stagesKnowledgePath); os.IsNotExist(err) {
+				write(stagesKnowledgePath, stagesKnowledge)
+			} else {
+				read(stagesKnowledgePath, stagesKnowledge)
+			}
+			fmt.Print("Recorded the actual question and answer without a duplicate: " + stagesKnowledge)
+		}
 	case "verify":
 		read("src/greeting.txt", stagesArtifact)
 		// One configured check fails the first time it runs, so the repair
@@ -306,6 +323,12 @@ func TestStagesRoleHelper(t *testing.T) {
 		}
 	case "review":
 		read("src/greeting.txt", stagesArtifact)
+		if os.Getenv("EXAMPLE_KNOWLEDGE") == "answered" {
+			read(stagesKnowledgePath, stagesKnowledge)
+			if !bytes.Contains(prompt, []byte(stagesAnswer)) || !bytes.Contains(prompt, []byte(stagesKnowledge)) {
+				t.Fatal("review lost the answer or the worker's knowledge report")
+			}
+		}
 		// The adversarial review objects once, so the work stage runs again
 		// on its objection and the review is observed a second time.
 		marker, err := os.OpenFile(".fixture-review", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -318,6 +341,10 @@ func TestStagesRoleHelper(t *testing.T) {
 	case "deliver":
 		read("src/greeting.txt", stagesArtifact)
 		write("release/greeting.txt", stagesArtifact)
+		if os.Getenv("EXAMPLE_KNOWLEDGE") == "answered" {
+			read(stagesKnowledgePath, stagesKnowledge)
+			write("release/answers.md", stagesKnowledge)
+		}
 		// The receipt goes where the example's delivery process names it, so
 		// the runtime's read-back of that setting is what is exercised.
 		write(os.Getenv("EXAMPLE_STAGE_RECEIPT"), stagesReceipt)
@@ -456,6 +483,14 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 	for _, asked := range []bool{false, true} {
 		t.Run(fmt.Sprintf("asked=%v", asked), func(t *testing.T) {
 			cfg := stagesFixtureConfig(t)
+			cfg.Instructions += "\nApproved knowledge write destination: " + stagesKnowledgePath + "."
+			if asked {
+				for i := range cfg.Roles {
+					for j := range cfg.Roles[i].Processes {
+						cfg.Roles[i].Processes[j].Env["EXAMPLE_KNOWLEDGE"] = "answered"
+					}
+				}
+			}
 			issue := 61
 			if asked {
 				issue = 62
@@ -566,6 +601,13 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			actual, err := os.ReadFile(filepath.Join(root, "jobs", fmt.Sprint(issue), "workspace", "release", "greeting.txt"))
 			if err != nil || string(actual) != stagesArtifact {
 				t.Fatal("actual delivery missing", err)
+			}
+			knowledge, knowledgeErr := os.ReadFile(filepath.Join(root, "jobs", fmt.Sprint(issue), "workspace", "release", "answers.md"))
+			if asked && (knowledgeErr != nil || string(knowledge) != stagesKnowledge) {
+				t.Fatalf("knowledge did not survive the repair and delivery: %q %v", knowledge, knowledgeErr)
+			}
+			if !asked && !os.IsNotExist(knowledgeErr) {
+				t.Fatal("a request with no answer generated knowledge anyway", knowledgeErr)
 			}
 			launches, records, failures, workingModels, answers := map[string]int{}, 0, 0, 0, 0
 			receipts := 0

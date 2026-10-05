@@ -1699,6 +1699,26 @@ actual role permissions in the configured instructions; the agent may read
 them within its sandbox. It enables the native terminal/file tools. A custom
 native home/config must not silently point those tools at an unrelated host.
 
+The shipped ordered example also asks those roles to retain reusable
+requester answers in the repository. Name the approved **write** destination
+in the shared instructions, separately from locations that may only be read.
+When an answer is necessary and no destination was given, the entrance
+question offers suitable file choices once. The work role integrates the
+answer and its context, the review checks it against the actual exchange,
+and the ordinary delivery PR carries the knowledge change with the requested
+work. There is no filename convention or controller-owned append operation.
+Existing write and delivery permissions still apply. The runtime carries the
+exchange, but the models decide what is reusable, whether it duplicates
+existing knowledge, and whether sensitive material must be left out; this
+is not a guarantee that every answer will be recorded correctly. The runtime
+places requester comments, unchanged, immediately after the original request,
+before role reports and their diagnostics. These comments are not dropped by
+the ordinary history's 60-record window or repeated in that later section.
+With no requester comments, neither that section nor its heading is added.
+The review command's model context limits still apply; a local process-to-review
+test checks that ordinary diagnostic output does not hide the answer from the
+model request, not that a real model will judge the resulting note correctly.
+
 **The bridge is not a sandbox.** The configured container/launcher must enforce
 filesystem, network and credential access. Separate environment variables alone
 do not make a host execution safe. The local experiments enforce these limits
