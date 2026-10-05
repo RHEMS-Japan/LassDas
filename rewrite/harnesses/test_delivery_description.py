@@ -50,12 +50,15 @@ class DescriptionTests(unittest.TestCase):
         self.explain("First explanation\n")
         self.assertEqual(self.deliver().returncode, 0)
         text = "Second round: " + "日本語の確認結果\n" * 300 + "Last required verification example\n"
+        self.fixture.state["pulls"][0]["body"] = self.fixture.state["pulls"][0]["body"].replace("\n", "\r\n")
+        self.fixture.state["description_line_endings"] = True
         self.explain(text)
         result = self.deliver()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(self.fixture.state["pulls"]), 1)
-        self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith(text))
-        self.assertEqual(self.fixture.receipt()["pull_request_body"], self.fixture.state["pulls"][0]["body"])
+        self.assertTrue(self.fixture.state["pulls"][0]["body"].replace("\r\n", "\n").endswith(text))
+        self.assertEqual(self.fixture.receipt()["pull_request_body"], self.fixture.state["pulls"][0]["body"].replace("\r\n", "\n"))
+        self.assertNotIn("description_retained", self.fixture.receipt())
         self.assertEqual(sum(method == "PATCH" for method, _ in self.fixture.state["requests"]), 1)
 
     def test_uncertain_update_and_another_work_round_keep_the_full_explanation(self):
@@ -84,7 +87,7 @@ class DescriptionTests(unittest.TestCase):
         self.fixture.change("main.go", "package main\n// next reviewed change\n")
         result = self.deliver(DELIVERY_MERGE_METHOD="merge")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("it was not replaced", result.stdout)
+        self.assertIn("was retained without another replacement", result.stdout)
         self.assertEqual(self.fixture.state["pulls"][0]["body"], "A person's explanation; do not replace it.")
         self.assertFalse(any(method == "PATCH" for method, _ in self.fixture.state["requests"]))
         self.assertTrue(self.fixture.state["pulls"][0]["merged"])
@@ -164,7 +167,7 @@ class DescriptionTests(unittest.TestCase):
                     self.assertFalse(self.fixture.state["pulls"][0]["merged"])
                 else:
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertIn("it was not replaced", result.stdout)
+                    self.assertIn("was retained without another replacement", result.stdout)
                     self.assertTrue(self.fixture.state["pulls"][0]["merged"])
                     self.assertFalse(self.fixture.state["pulls"][0]["body"].endswith("Next explanation for " + failure + "\n"))
                 self.fixture.state[failure] = False
@@ -194,8 +197,8 @@ class DescriptionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith(text))
 
-    def test_missing_unreadable_or_failed_report_does_not_publish(self):
-        for history in (b"not JSON", b'{"history":[]}\xff', b'{"history":[]}',
+    def test_empty_or_failed_report_goes_back_without_publishing(self):
+        for history in (b'{"history":[]}',
                         json.dumps({"history": [{"role": "work", "speaker": "writer",
                                                 "output": "", "error": "process failed"}]}).encode()):
             with self.subTest(history=history):
@@ -205,6 +208,16 @@ class DescriptionTests(unittest.TestCase):
                 self.assertEqual(self.fixture.state["pulls"], [])
                 self.assertNotIn("refs/heads/ticket/TICKET-41", self.fixture.remote_branches())
 
+    def test_unreadable_history_delivers_with_an_explicit_omission(self):
+        for content in (b"not JSON", b'{"history":[]}\xff'):
+            with self.subTest(content=content):
+                self.history.write_bytes(content)
+                result = self.deliver()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Pull request explanation omitted", result.stdout)
+                self.assertIn("Pull request explanation omitted", self.fixture.state["pulls"][0]["body"])
+                self.assertNotIn(str(self.history), self.fixture.state["pulls"][0]["body"])
+
     def test_saved_report_is_still_checked_for_forbidden_text(self):
         self.explain("approved document with a forbidden-label\n")
         first = self.deliver()
@@ -212,6 +225,8 @@ class DescriptionTests(unittest.TestCase):
         result = self.deliver(DELIVERY_FORBIDDEN_TEXT="forbidden-label")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("configured forbidden text", result.stderr)
+        self.assertIn("pull request description", result.stderr)
+        self.assertNotIn("staged change", result.stderr)
         self.assertNotIn("forbidden-label", result.stderr)
         self.assertNotIn("Nothing was delivered", result.stdout)
 

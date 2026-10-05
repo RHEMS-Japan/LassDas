@@ -51,6 +51,10 @@ class DeliveryError(RuntimeError):
     """A refusal or a failed operation. The process exits non-zero."""
 
 
+class DescriptionSettingError(DeliveryError):
+    """Only the operator can supply or correct this description setting."""
+
+
 def description_size(text):
     """One operator limit shared by review and publication, without truncation."""
     try:
@@ -58,7 +62,7 @@ def description_size(text):
         if limit <= 0:
             raise ValueError()
     except ValueError as error:
-        raise DeliveryError("PR_DESCRIPTION_MAX_BYTES must be a positive integer") from error
+        raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES must be a positive integer") from error
     if len(text.encode("utf-8")) > limit:
         raise DeliveryError("The pull request description exceeds the configured %d-byte limit; nothing was shortened" % limit)
 
@@ -67,9 +71,13 @@ def description_report():
     """The chosen role's latest reports, from this run's existing checkpoint."""
     role = os.environ.get("PR_DESCRIPTION_ROLE", "")
     if not role:
-        return ""
+        return "", ""
+    path = os.environ.get("TASK_HISTORY")
+    if not path:
+        raise DescriptionSettingError("TASK_HISTORY is unset; use a runtime that supplies it to review and delivery")
+    description_size("")
     try:
-        with Path(setting("TASK_HISTORY")).open("rb") as saved:
+        with Path(path).open("rb") as saved:
             raw = saved.read(64 * 1024 * 1024 + 1)
         if len(raw) > 64 * 1024 * 1024:
             raise ValueError("checkpoint exceeds the local 64 MiB read limit")
@@ -91,12 +99,14 @@ def description_report():
             elif selected:
                 break
         text = "\n\n".join(reversed(selected))
-        if not text.strip():
-            raise ValueError("the selected role has no latest report to publish")
-        description_size(text)
-        return text
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
-        raise DeliveryError("The saved pull request explanation cannot be read: " + str(error)) from error
+        text.encode("utf-8")
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as error:
+        reason = error.strerror if isinstance(error, OSError) else str(error)
+        return "", "Pull request explanation omitted: saved history could not be read (%s). The change itself still requires review." % reason
+    if not text.strip():
+        raise DeliveryError("The selected role has no latest report to publish; return to the worker for an explanation")
+    description_size(text)
+    return text, ""
 
 
 class TransientError(DeliveryError):

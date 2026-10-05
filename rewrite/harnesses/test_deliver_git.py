@@ -128,6 +128,8 @@ def service_handler(state):
             if state.get("description_refusal"):
                 return self.answer(403, {"message": "description update refused"})
             pull["body"] = payload["body"]
+            if state.get("description_line_endings"):
+                pull["body"] = pull["body"].replace("\n", "\r\n")
             if state.get("description_readback_mismatch"):
                 pull["body"] = "The stored explanation differs."
             if state.get("description_uncertain"):

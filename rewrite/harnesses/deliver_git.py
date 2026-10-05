@@ -450,11 +450,15 @@ def pull_request_body(issue, method):
     """Ordinary report text from the run, never committed into the target."""
     body = default_pull_request_body(issue, method)
     if not os.environ.get("PR_DESCRIPTION_ROLE"):
-        return body
-    body += "\n\n" + support.description_report()
+        return body, ""
+    text, note = support.description_report()
+    body += "\n\n" + (text or note)
     support.description_size(body)
-    refuse_forbidden_text([(None, body)])
-    return body
+    try:
+        refuse_forbidden_text([(None, body)])
+    except DeliveryError as error:
+        raise DeliveryError(str(error).replace("the staged change", "the pull request description")) from error
+    return body, note
 
 
 class DescriptionNotSettled(DeliveryError):
@@ -463,7 +467,11 @@ class DescriptionNotSettled(DeliveryError):
 
 def delivery_description(workspace, commit, issue, method, receipt):
     try:
-        body = pull_request_body(issue, method)
+        body, note = pull_request_body(issue, method)
+        if note:
+            receipt["description_omitted"] = note
+        else:
+            receipt.pop("description_omitted", None)
         if os.environ.get("PR_DESCRIPTION_ROLE"):
             home = Path(support.setting("TASK_HOME")).resolve()
             checkout = Path(workspace).resolve()
@@ -485,16 +493,20 @@ def delivery_description(workspace, commit, issue, method, receipt):
         raise
 
 
+def body_lines(text):
+    return text.replace("\r\n", "\n").replace("\r", "\n") if isinstance(text, str) else text
+
+
 def sync_pull_request_body(workspace, path, receipt, previous, pull, body, owner, name):
     """Refresh our description only while the observed body is still ours.
     Pending text survives an uncertain PATCH; neither it nor the receipt is
     evidence that a description was actually stored until read from the API."""
     if not os.environ.get("PR_DESCRIPTION_ROLE") or pull.get("state") != "open" or pull.get("merged"):
         return
-    actual = pull.get("body")
-    if actual != body:
-        known = {default_pull_request_body(receipt["issue"], method) for method in ("none", "merge")}
-        known.update(value for field in ("pull_request_body", "pending_pull_request_body")
+    actual = body_lines(pull.get("body"))
+    if actual != body_lines(body):
+        known = {body_lines(default_pull_request_body(receipt["issue"], method)) for method in ("none", "merge")}
+        known.update(body_lines(value) for field in ("pull_request_body", "pending_pull_request_body")
                      if isinstance(value := receipt.get(field), str))
         if actual not in known:
             receipt["description_retained"] = True
@@ -514,7 +526,7 @@ def sync_pull_request_body(workspace, path, receipt, previous, pull, body, owner
             observed = read_pull_request(owner, name, receipt["pull_request"])
         except DeliveryError as error:
             raise DescriptionNotSettled("Reading back the pull request description failed: %s" % error) from error
-        if observed.get("body") != body:
+        if body_lines(observed.get("body")) != body_lines(body):
             receipt["description_retained"] = True
             receipt.pop("pending_pull_request_body", None)
             support.write_receipt(path, dict(receipt, previous=previous))
@@ -686,9 +698,10 @@ def open_summary(receipt, pushed, committed):
 
 
 def description_summary(receipt):
+    lines = [receipt["description_omitted"]] if receipt.get("description_omitted") else []
     if not receipt.get("description_path"):
-        return []
-    return [("The service returned a different pull request description; it was not replaced. "
+        return lines
+    return lines + [("The service's different pull request description was retained without another replacement. "
              if receipt.get("description_retained") else "")
             + "The latest generated description accompanying commit %s is kept at %s outside the checkout."
             % (receipt["description_commit"], receipt["description_path"])]

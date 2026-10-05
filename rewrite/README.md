@@ -730,8 +730,10 @@ stop comment, not by a limit.
 
 No verdict, no pass. The adversarial review is what justifies delivering
 without a person, so by default the command exits 0 only on a verdict that
-does not object and 1 only on one that does; without a verdict it does
-neither. Trouble with the model service (a connection that fails or times
+does not object and 1 on one that does. An empty or oversized report selected
+for the pull request description also returns 1 for the worker to repair,
+explicitly before model review; it is not described as a model's verdict.
+Otherwise, without a verdict it does neither. Trouble with the model service (a connection that fails or times
 out, an HTTP error, a reply without a verdict or with one whose `blocking` is
 not plain), and any unexpected error, is waited out: the models named in
 `REVIEW_MODELS` (newline- or comma-separated, in order of preference; a model
@@ -899,9 +901,15 @@ the explanation too; its presence is not proof that the change is correct.
 The delivery adds the selected text to its ordinary introduction and checks
 the whole description for `DELIVERY_FORBIDDEN_TEXT` and its credential before
 any publication. `PR_DESCRIPTION_MAX_BYTES` is a positive UTF-8 byte limit
-(default 60000) for that complete body. Oversized or unreadable material is
-reported, not silently shortened. This limit is not a claim about a hosting
-service's exact limit. The old repository-document option
+(default 60000) for that complete body. An oversized or empty selected report
+sends the work back with its reason (exit 1), rather than holding the review
+without asking a model. When the checkpoint is missing, unreadable, malformed
+or over its local read limit, review continues without the explanation, and
+both the model's input and the delivery result state what could not be read.
+The pull request body states that omission too; the remaining diff and test
+output are still reviewed. An unset `TASK_HISTORY` or invalid size setting
+asks the operator to fix the configuration and restart. This limit is not a
+claim about a hosting service's exact limit. The old repository-document option
 `DELIVERY_PR_BODY_FILE` is removed; there is no compatibility path or migration.
 
 The generated body is retained in the delivery process's
@@ -914,8 +922,9 @@ While an open pull request still contains a body previously submitted by the
 automation, later reviewed work can update it. If the service returns a
 different body, keep it as the person's version and continue the configured
 push and merge. The result says it was retained and where the latest generated
-description is kept. A service that normalizes the submitted text receives the
-same treatment. Communication failures remain distinct from different text;
+description is kept. CRLF/CR and LF are compared as the same line endings,
+so line-ending normalization alone is not reported as a person's edit.
+Communication failures remain distinct from different text;
 an unknown write result is not a confirmed update.
 
 There is no atomic comparison-and-update. A person's edit between the last

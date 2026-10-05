@@ -159,6 +159,64 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertNotIn("Not explanation material", selected)
         self.assertIn("+    return 2", sent)
 
+    def test_description_failures_end_or_review_instead_of_waiting_for_unchanging_material(self):
+        path = self.home / "history.json"
+        for case in ("large", "empty", "broken", "missing", "oversized"):
+            with self.subTest(case=case):
+                if case in ("large", "empty"):
+                    path.write_text(json.dumps({"history": [{"role": "work", "speaker": "writer",
+                                                            "output": "x" * 70_000 if case == "large" else ""}]}))
+                elif case == "broken":
+                    path.write_text("broken JSON")
+                elif case == "missing":
+                    path.unlink()
+                else:
+                    with path.open("wb") as saved:
+                        saved.truncate((64 << 20) + 1)
+                service = ModelStandIn([{"verdict": (False, "The actual diff was reviewed.")}])
+                self.addCleanup(service.close)
+                process, stdout, stderr = self.start_review(service, TASK_HISTORY=str(path), PR_DESCRIPTION_ROLE="work")
+                try:
+                    try:
+                        status = process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.fail("description held review: " + stderr.read_text()[-500:])
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+                fixable = case in ("large", "empty")
+                self.assertEqual(status, 1 if fixable else 0, stdout.read_text() + stderr.read_text())
+                self.assertEqual(len(service.requests), 0 if fixable else 1)
+                self.assertNotIn("NOT REVIEWED", stdout.read_text())
+                if fixable:
+                    self.assertIn("SENT BACK", stdout.read_text())
+                else:
+                    sent = service.requests[0]["body"]["messages"][1]["content"]
+                    for words in ("Pull request explanation omitted", "return 2", "tests ran fine"):
+                        self.assertIn(words, sent)
+                    self.assertIn("Pull request explanation omitted", stdout.read_text())
+                print("description: %s exit=%d model_requests=%d" % (case, status, len(service.requests)))
+
+        for setting, options in (
+            ("TASK_HISTORY", {}),
+            ("PR_DESCRIPTION_MAX_BYTES", {"TASK_HISTORY": str(path), "PR_DESCRIPTION_MAX_BYTES": "0"}),
+            ("PR_DESCRIPTION_MAX_BYTES", {"TASK_HISTORY": str(path), "PR_DESCRIPTION_MAX_BYTES": "abc"}),
+        ):
+            with self.subTest(setting=setting, options=options):
+                service = ModelStandIn([{"verdict": (False, "must not be requested")}])
+                self.addCleanup(service.close)
+                process, stdout, stderr = self.start_review(service, PR_DESCRIPTION_ROLE="work", **options)
+                try:
+                    self.said(stderr, "fix the setting and restart the engine", timeout=3)
+                    self.assertIsNone(process.poll())
+                    self.assertIn(setting, stderr.read_text())
+                    self.assertNotIn("looked at again", stderr.read_text())
+                    self.assertEqual(service.requests, [])
+                finally:
+                    process.kill()
+                    process.wait(timeout=5)
+
     def start_review(self, service, **extra):
         """A review running in the background: its runtime text read from a
         file, and what it prints written to files the test can look at while

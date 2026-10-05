@@ -13,7 +13,9 @@ The send-back counter and a log stay in the process's own directory
 (TASK_HOME) and only inform: a verdict stands whether or not they were saved.
 
 No verdict, no pass. The command exits 0 only on a verdict that does not
-object and 1 only on one that does; without a verdict it does neither.
+object and 1 on one that does. An empty or oversized selected PR report also
+returns 1 for the worker to repair, explicitly before model review. Otherwise,
+without a verdict it does neither.
 Every call of the verdict tool in a reply is read, and in each every field
 named blocking in any letter case, taken as true or false when its meaning
 is plain: true or false, a number equal to 1 or 0, or "true", "yes", "1",
@@ -434,9 +436,12 @@ def prepare():
     except OSError as error:
         raise ReviewError("TASK_HOME cannot be used: %s" % error, recheck=True)
     try:
-        found["description"] = scrub(delivery_support.description_report(), key)
+        description, note = delivery_support.description_report()
+        found["description"], found["description_note"] = scrub(description, key), scrub(note, key)
+    except delivery_support.DescriptionSettingError as error:
+        raise ReviewError(str(error)) from error
     except delivery_support.DeliveryError as error:
-        raise ReviewError(str(error), recheck=True) from error
+        found["description_error"] = scrub(str(error), key)
     return found
 
 
@@ -537,6 +542,8 @@ def ask_once(found, model, prompt, diff, tests, rounds):
                        "\n\n[...]\n\nThe most recent reports:\n%s\n\nDiff of the change:\n%s\n\nTest output:\n%s"
                        % (prompt[:HEAD], prompt[-TAIL:] if len(prompt) > HEAD else "",
                           diff or "(no change)", tests or "(no test command configured)"))}]}
+    if found.get("description_note"):
+        request["messages"][1]["content"] += "\n\n" + found["description_note"]
     if found.get("description"):
         request["messages"][1]["content"] += (
             "\n\nProposed pull request explanation (review these original words with the diff; "
@@ -675,6 +682,11 @@ def reviewed(stdin_text, unchanged, passing, ran):
     commands printed, for a review that starts again."""
     found = prepare()
     key, state = found["key"], found["state"]
+    if found.get("description_error"):
+        reason = "Review: SENT BACK to the worker before model review: " + found["description_error"]
+        print(reason)
+        log(found, reason + "\n\n")
+        return 1
     counter = state / "review-send-backs"
     try:
         sent_back = int(counter.read_text().strip() or "0") if counter.is_file() else 0
@@ -703,6 +715,8 @@ def reviewed(stdin_text, unchanged, passing, ran):
     elif blocking:
         outcome, status = "SENT BACK to the worker", 1
         sent_back += 1
+    if found.get("description_note"):
+        findings = found["description_note"] + "\n" + findings
     findings = scrub(findings, key)
     # What the reviewer wrote without a verdict stays in the record: in the
     # result printed here, and in review.md, where it was logged as written.
