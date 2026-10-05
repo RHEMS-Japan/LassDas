@@ -838,13 +838,15 @@ it, each body receives an equal share; longer bodies retain their beginning
 and end with the omitted character range explicitly named. Short bodies stay
 unchanged. The review still asks the model: size alone neither holds the run
 nor produces NOT REVIEWED. This is not a claim that omitted material was
-reviewed; increase the budget for models able to accept more context.
+reviewed; increase the budget for models able to accept more context. A brief
+omission notice also accompanies the final review result and its saved log.
 
 The checkpoint read has a separate 64 MiB limit. Missing, malformed or larger
 checkpoint files do not prevent a review: the model receives the reason the
 saved context could not be read, the runtime's normal 12,000-character head
 and 6,000-character tail, and the available review log below. The live
-diagnostic also names that limitation. Missing context is not represented as
+diagnostic and final review result (stdout and `review.md`) name that limitation.
+Missing context is not represented as
 remembered or as a verdict; the model still reviews the current change and
 test output. This cannot restore output the runtime did not retain.
 

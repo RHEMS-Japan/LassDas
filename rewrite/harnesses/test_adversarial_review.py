@@ -1307,6 +1307,8 @@ class AdversarialReviewTests(unittest.TestCase):
                 if budget is None:
                     self.assertIn("omitted from this body", sent)
                     self.assertFalse(original in sent, "large body was not bounded")
+                    for result in (stdout.read_text(), self.review_log()):
+                        self.assertIn("Saved review context exceeded the 48000-character budget", result)
                 else:
                     self.assertNotIn("omitted from this body", sent)
                     self.assertTrue(original in sent, "configured larger budget was ignored")
@@ -1333,7 +1335,7 @@ class AdversarialReviewTests(unittest.TestCase):
             ("json", b"broken JSON"),
             ("shape", json.dumps(malformed).encode()),
             ("unicode", b'{"request":"\\ud800","history":[],"pending":{"role":"inspect-change"}}'),
-            ("nested", b"[" * 2000 + b"]" * 2000),
+            ("nested_structure", b"[" * 2000 + b"]" * 2000),
         )
         for name, content in cases:
             with self.subTest(case=name):
@@ -1366,6 +1368,8 @@ class AdversarialReviewTests(unittest.TestCase):
                               "Saved review context could not be read"):
                     self.assertIn(words, sent)
                 self.assertIn("Saved review context could not be read", stderr.read_text())
+                for result in (stdout.read_text(), self.review_log()):
+                    self.assertIn("Saved review context could not be read", result)
                 self.assertNotIn("held, with no verdict", stderr.read_text())
                 print("unreadable memory: %s model_requests=1 verdict=SENT_BACK" % name)
 

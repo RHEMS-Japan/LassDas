@@ -533,7 +533,7 @@ def review_memory(state_directory, key, limit):
     A finite tail of the old log is ordinary prose: headings inside findings
     are not trusted record delimiters.
     """
-    sections = []
+    sections, notices = [], []
     path = os.environ.get("TASK_HISTORY")
     if path:
         try:
@@ -591,6 +591,8 @@ def review_memory(state_directory, key, limit):
                 displayed.append(label + ":\n" + body)
             text = "\n\n".join(displayed)
             text.encode("utf-8")
+            if shortened:
+                notices.append("Saved review context exceeded the %d-character budget; body ranges were omitted." % limit)
             sections.append("Selected canonical reports, with any omitted body ranges explicitly named. "
                             "These are observations, not proof that a defect was repaired. "
                             "Older reports remain in the checkpoint but are not all included here.\n" + text)
@@ -599,6 +601,7 @@ def review_memory(state_directory, key, limit):
                            "Reviewing the runtime text, available review log, current diff and test output; "
                            "the unread saved material is not represented as remembered." % error, key)
             sections.append(notice)
+            notices.append(notice)
             say(notice)
     log = state_directory / "review.md"
     try:
@@ -614,6 +617,8 @@ def review_memory(state_directory, key, limit):
                 raw = raw[1:]
         text = raw.decode("utf-8")
         cut = bool(start) or len(text) > REVIEW_LOG_LIMIT
+        if cut:
+            notices.append("Previous review log exceeded its 12000-character display limit; earlier text was omitted.")
         text = text[-REVIEW_LOG_LIMIT:]
         sections.append("Previous review log (ordinary prose, not a verdict for this change; "
                         + ("only its last 12000 characters, earlier text omitted" if cut else "the complete existing log")
@@ -622,8 +627,10 @@ def review_memory(state_directory, key, limit):
         pass
     except (OSError, UnicodeError) as error:
         # The log only informs, as when writing it failed in the prior run.
-        sections.append("Previous review log could not be read; it is not represented as remembered: " + str(error))
-    return "\n\n".join(sections)
+        notice = "Previous review log could not be read; it is not represented as remembered: " + str(error)
+        sections.append(notice)
+        notices.append(notice)
+    return scrub("\n\n".join(sections), key), scrub(" ".join(notices), key)
 
 
 def ask_once(found, model, prompt, diff, tests, rounds):
@@ -773,7 +780,7 @@ def reviewed(stdin_text, unchanged, passing, ran):
     commands printed, for a review that starts again."""
     found = prepare()
     key, state = found["key"], found["state"]
-    found["memory"] = scrub(review_memory(state, key, found["memory_characters"]), key)
+    found["memory"], memory_notice = review_memory(state, key, found["memory_characters"])
     counter = state / "review-send-backs"
     try:
         sent_back = int(counter.read_text().strip() or "0") if counter.is_file() else 0
@@ -802,7 +809,7 @@ def reviewed(stdin_text, unchanged, passing, ran):
     elif blocking:
         outcome, status = "SENT BACK to the worker", 1
         sent_back += 1
-    findings = scrub(findings, key)
+    findings = scrub((memory_notice + "\n" if memory_notice else "") + findings, key)
     # What the reviewer wrote without a verdict stays in the record: in the
     # result printed here, and in review.md, where it was logged as written.
     printed = findings + (("\n\n" if findings else "") + "Written without a plain verdict:\n" + "\n".join(unclear)
