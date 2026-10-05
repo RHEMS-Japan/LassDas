@@ -143,6 +143,9 @@ func acceptTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 		text := acceptedNoticeText(ahead, requestPage(cfg, issue))
 		if creditLow {
 			text = "受け付けました。" + budgetWaitingText
+			if ahead > 0 {
+				text += fmt.Sprintf("\n前に %d 件あり、利用枠が戻ってから順番に処理します。", ahead)
+			}
 			if page := requestPage(cfg, issue); page != "" {
 				text += "\n進み具合はこちらで見られます: " + page
 			}
