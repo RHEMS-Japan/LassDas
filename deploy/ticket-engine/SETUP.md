@@ -93,11 +93,22 @@ round, with a model launch each time, until someone fixes the cause or the
 requester posts a stop ([section 9](#9-stopping-a-request)).
 
 In this example, verification, review and delivery failures return to `elicit`.
-It reads the actual failure: an ordinary repair goes to `work`, while a newly
-discovered requester-only scope choice goes through `ask_requester` with concrete
-alternatives. A reply never changes filesystem, delivery or credential permissions.
+It reads the actual failure: an ordinary repair or an unknown cause goes to
+`work` to investigate and check. After handoff, only a newly required expansion
+of authority that the requester alone can approve goes through `ask_requester`
+with concrete alternatives. The entrance rule to ask when requirements remain
+uncertain does not apply to recovery. A reply never changes filesystem, delivery
+or credential permissions.
 If a chosen alternative needs wider access, the operator must update that setting;
 otherwise the roles must use an agreed alternative inside the existing scope.
+When the runtime supports active-work limits, set positive
+`intake.max_active_minutes` and `intake.max_hard_exits` to bound attempts while
+operator changes are pending. The existing limit notice reports a pause, not
+completion; read the required permission change in the question and run record,
+fix the configuration, then have an authorized user post `再開` on its own
+first line. This grants another interval with the same saved cap; changing the
+configuration does not change an already accepted request's cap. Without a
+positive active-work limit, repeated attempts have no bound.
 Each failure adds a requirements launch and a routing decision, including ordinary
 repairs. A model process that exits with an error still retries its own stage.
 Existing installations need to update their four `on_failure` values and shared
@@ -222,10 +233,9 @@ Item 4 protects GitHub Actions workflow changes only. Other CI systems may run
 configuration taken from a pushed branch with their own credentials. Inspect
 all CI triggers and which branches receive secrets, including ticket branches,
 before granting push access. For example, CircleCI's configuration is not
-protected by a GitHub token lacking Workflows permission. Keep such paths out
-of `DELIVERY_ALLOWED_PATHS` when they must not change, or have the owner isolate
-that CI's credentials and approve the intended access. An instruction to a
-model not to edit a path is not a permission boundary.
+protected by a GitHub token lacking Workflows permission. Have that CI's owner
+isolate its credentials from ticket-branch builds and approve the intended
+access. An instruction to a model not to edit a path is not a permission boundary.
 
 With the shipped configuration, everything goes to OpenRouter and the models
 it serves: the working models, chosen for each launch among the publishers
@@ -401,7 +411,9 @@ script was syntax-checked but not run against Backlog for this guide.
    [Enterprise API guide](https://docs.github.com/en/enterprise-server@3.21/rest/using-the-rest-api/getting-started-with-the-rest-api).
    Do not change only the hostname of the Enterprise example: github.com
    does not use `/api/v3`. Authentication, trust and reachability of your
-   server must be checked separately.
+   server must be checked separately. The shipped egress policy refuses
+   private addresses; check that boundary first if an internal Enterprise
+   server fails the read check.
 
 Only open issues with the intake label and created at or after
 `intake.created_since` are discovered. PRs are excluded. `intake.issue_ids`
@@ -592,6 +604,8 @@ Run from the repository root, replacing the arguments below. The first repo
 receives requests; the second receives delivered code. This changes the
 tracker, source path and delivery values but preserves the stages and roles.
 The intake remains closed. `CONFIG` must be a new file outside any repository.
+The repository's setup test executes this conversion and the configuration
+check together; it does not test access to a live server.
 
 ```sh
 CONFIG='<absolute path outside the repository>/operator.json'
@@ -713,9 +727,10 @@ The engine reads the configuration strictly and, before it does anything,
 refuses what it can tell is wrong, saying where: a key it does not know, in
 the wrong letter case or written twice; a stage whose kind does not match its
 role; a missing project or start time; the example's paragraph still in
-`instructions`; a URL whose host is still under `example.invalid`; a GitHub
-repository component still beginning with `REPLACE_WITH_`; a recognizable
-token value in `github.key_env`. The latter is never echoed. `--check`
+`instructions`; a URL whose host is still under `example.invalid`; a
+`REPLACE_WITH_` component of `github.repository`; a token prefix
+(`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`) in
+`github.key_env`, which must name an environment variable, not its value. `--check`
 runs those same checks without starting anything, contacting anything or
 creating any file. Run it from the repository's root, on a checkout of the
 commit your image was built from (`engine_sha` in `docs/DISTRIBUTION.json`),
@@ -989,7 +1004,7 @@ the engine's notice that no stage has completed, after
    the model that gave the verdict.
 2. The requester stops the request (`停止`, [section 9](#9-stopping-a-request)).
 3. You fix the cause (the configuration's ConfigMap or the Secret, section 6)
-   and restart the Pod. The runtime records the stopped review as a failure
+   and restart the Pod. The runtime records the stopped review as an interruption
    and goes on at the review's `on_failure` stage, which is `elicit` here: the
    requirements are reconsidered, then the work and review run again. The requester is told that the
    request carries on after the restart.
@@ -1070,7 +1085,8 @@ First finish the settings and run the engine's `--check` (section 4). Then
 the following read-only GET checks can be run in the prepared runtime. They
 make no inference or tracker writes; the gateway may have its own policy for
 catalogue access. They compare current tool/text models from configured
-publishers with the gateway's **exact prefixed ids**. They do not prove that a
+publishers with the gateway's **exact prefixed ids**, and compare configured
+fallback and reviewer ids with that same current served list. They do not prove that a
 model can actually answer, that the account has credit, or that enough
 independent publishers are available for all your simultaneous roles.
 
@@ -1079,7 +1095,8 @@ kubectl -n "$NS" exec -i "$POD" -c engine -- python3 -B - /etc/ticket-automation
 # setup-gateway-catalogue
 import json, os, sys, urllib.error, urllib.parse, urllib.request
 with open(sys.argv[1]) as source:
-    selection = json.load(source)["model_selection"]
+    config = json.load(source)
+selection = config["model_selection"]
 gateway = selection["gateway"]
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -1119,14 +1136,26 @@ matches = sorted(prefix + row["id"] for row in public
 print(json.dumps({"served": len(served), "tool_text_matches": len(matches), "first_20_matches": matches[:20]}))
 if not matches:
     sys.exit("no current matching models; check the prefix and eligible publishers")
+configured = []
+fallback = selection.get("fallback", {}).get("model")
+if fallback:
+    configured.append(fallback)
+for role in config.get("roles", []):
+    for process in role.get("processes", []):
+        env = process.get("env", {})
+        reviewers = [name.strip() for name in env.get("REVIEW_MODELS", "").replace(",", "\n").splitlines() if name.strip()]
+        configured.extend(reviewers or ([env["REVIEW_MODEL"]] if env.get("REVIEW_MODEL") else []))
+missing = sorted(set(configured) - served)
+if missing:
+    sys.exit("configured fallback or review models are not served: " + ", ".join(missing))
 PY
 ```
 
 Select the fallback chat model and the independent review model from the
 gateway's current list, with their exact prefixed ids. The reviewer must be
 outside `model_selection.authors`; it will therefore **not** be in the
-matching working-model sample above. Confirm the review model's availability
-with the gateway operator as well. Finally, run an explicitly authorized
+matching working-model sample above. The check nevertheless requires the
+configured fallback and reviewer ids to exist in the served list. Finally, run an explicitly authorized
 small request before unattended intake; a successful catalogue check is not
 an end-to-end model test.
 

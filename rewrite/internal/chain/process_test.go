@@ -20,7 +20,7 @@ import (
 
 func TestRoleAndRouterInstructionsAllowConfiguredRecoveryQuestions(t *testing.T) {
 	for _, instructions := range []string{routingInstructions, processPrompt(Role{}, Process{}, Assignment{}, State{})} {
-		for _, phrase := range []string{"only when the workflow offers that role", "failed check may return to requirements", "concrete alternatives", "no answer itself widens those permissions"} {
+		for _, phrase := range []string{"only when the workflow offers that role", "failed check may return to requirements", "concrete alternatives", "no answer itself widens those permissions", "newly required expansion of authority", "unknown cause", "initial elicitation only"} {
 			if !strings.Contains(instructions, phrase) {
 				t.Errorf("recovery guidance omits %q", phrase)
 			}
@@ -135,6 +135,9 @@ func TestProcessGetsOriginalAndAssignmentWithoutShellInterpolation(t *testing.T)
 	}
 	if strings.Contains(result.Output, "diagnostic only") || result.Diagnostics != "diagnostic only" {
 		t.Fatal("diagnostic output was mixed with the report")
+	}
+	if strings.Contains(result.Output, "Requester comments (original words;") {
+		t.Fatal("a run without requester comments received an empty comments section")
 	}
 }
 

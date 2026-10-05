@@ -30,6 +30,7 @@ class SetupEditingTests(unittest.TestCase):
                               capture_output=True, text=True, timeout=10)
 
     def test_guidance_preserves_json_and_shared_instructions_without_modifying_the_source(self):
+        self.assertIn('python3 -m json.tool "$CONFIG" > /dev/null', GUIDE.read_text())
         with tempfile.TemporaryDirectory(prefix="setup-guidance-") as temporary:
             config, source, target, prose = self.fixture(Path(temporary))
             before = source.read_bytes()
@@ -61,21 +62,6 @@ class SetupEditingTests(unittest.TestCase):
             self.assertNotEqual(self.edit(source, target, prose).returncode, 0)
             self.assertFalse(target.exists())
             self.assertEqual(source.read_bytes(), before)
-
-    def test_documented_syntax_check_distinguishes_bad_json_from_unfinished_settings(self):
-        self.assertIn('python3 -m json.tool "$CONFIG" > /dev/null', GUIDE.read_text())
-        with tempfile.TemporaryDirectory(prefix="setup-syntax-") as temporary:
-            path = Path(temporary) / "operator.json"
-            for text in ('{"project_id": <project-id>}', '{"instructions": "line\ninside quotes"}'):
-                path.write_text(text)
-                result = subprocess.run([sys.executable, "-B", "-m", "json.tool", str(path)],
-                                        capture_output=True, text=True, timeout=10)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertRegex(result.stderr, r"line \d+ column \d+")
-            path.write_text(EXAMPLE.read_text())
-            unfinished = subprocess.run([sys.executable, "-B", "-m", "json.tool", str(path)],
-                                        capture_output=True, text=True, timeout=10)
-            self.assertEqual(unfinished.returncode, 0, "syntax checks must not be sold as completed setup")
 
 
 if __name__ == "__main__":

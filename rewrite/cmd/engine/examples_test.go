@@ -577,7 +577,9 @@ func TestEveryExampleCarriesTheEntranceStandard(t *testing.T) {
 			roles[role.Name] = role
 		}
 		for _, name := range []string{"elicit", "ask_requester"} {
-			for _, sentence := range []string{requesterPointTest, preferencesAreSettled, askWhenInDoubt} {
+			// Every example settles requirements before handoff. The ordered
+			// example separately distinguishes recovery from initial questions.
+			for _, sentence := range []string{requesterPointTest, preferencesAreSettled, strings.Split(askWhenInDoubt, ";")[0]} {
 				if !strings.Contains(routingRoleDescription(roles[name]), sentence) {
 					t.Fatalf("%s: %s does not carry: %s", path, name, sentence)
 				}
