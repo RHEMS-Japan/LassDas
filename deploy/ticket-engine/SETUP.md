@@ -986,7 +986,8 @@ First finish the settings and run the engine's `--check` (section 4). Then
 the following read-only GET checks can be run in the prepared runtime. They
 make no inference or tracker writes; the gateway may have its own policy for
 catalogue access. They compare current tool/text models from configured
-publishers with the gateway's **exact prefixed ids**. They do not prove that a
+publishers with the gateway's **exact prefixed ids**, and compare configured
+fallback and reviewer ids with that same current served list. They do not prove that a
 model can actually answer, that the account has credit, or that enough
 independent publishers are available for all your simultaneous roles.
 
@@ -995,7 +996,8 @@ kubectl -n "$NS" exec -i "$POD" -c engine -- python3 -B - /etc/ticket-automation
 # setup-gateway-catalogue
 import json, os, sys, urllib.error, urllib.parse, urllib.request
 with open(sys.argv[1]) as source:
-    selection = json.load(source)["model_selection"]
+    config = json.load(source)
+selection = config["model_selection"]
 gateway = selection["gateway"]
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -1035,14 +1037,26 @@ matches = sorted(prefix + row["id"] for row in public
 print(json.dumps({"served": len(served), "tool_text_matches": len(matches), "first_20_matches": matches[:20]}))
 if not matches:
     sys.exit("no current matching models; check the prefix and eligible publishers")
+configured = []
+fallback = selection.get("fallback", {}).get("model")
+if fallback:
+    configured.append(fallback)
+for role in config.get("roles", []):
+    for process in role.get("processes", []):
+        env = process.get("env", {})
+        reviewers = [name.strip() for name in env.get("REVIEW_MODELS", "").replace(",", "\n").splitlines() if name.strip()]
+        configured.extend(reviewers or ([env["REVIEW_MODEL"]] if env.get("REVIEW_MODEL") else []))
+missing = sorted(set(configured) - served)
+if missing:
+    sys.exit("configured fallback or review models are not served: " + ", ".join(missing))
 PY
 ```
 
 Select the fallback chat model and the independent review model from the
 gateway's current list, with their exact prefixed ids. The reviewer must be
 outside `model_selection.authors`; it will therefore **not** be in the
-matching working-model sample above. Confirm the review model's availability
-with the gateway operator as well. Finally, run an explicitly authorized
+matching working-model sample above. The check nevertheless requires the
+configured fallback and reviewer ids to exist in the served list. Finally, run an explicitly authorized
 small request before unattended intake; a successful catalogue check is not
 an end-to-end model test.
 

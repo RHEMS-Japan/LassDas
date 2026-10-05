@@ -66,7 +66,8 @@ class SetupModelPreflightTests(unittest.TestCase):
                 self.assertNotIn("synthetic-private-value", out)
 
     def gateway(self):
-        return {"model_selection": {"authors": ["maker"], "gateway": {
+        return {"roles": [{"name": "review", "processes": [{"env": {"REVIEW_MODEL": "route/another/current"}}]}],
+                "model_selection": {"authors": ["maker"], "fallback": {"model": "route/maker/current"}, "gateway": {
             "models_url": "https://gateway.example/v1/models", "prefix": "route/",
             "key_env": "GATEWAY_API_KEY"}}}
 
@@ -77,7 +78,7 @@ class SetupModelPreflightTests(unittest.TestCase):
     def catalogue(self, config=None, public=None, served=None, failure=None):
         requests = []
         public = public if public is not None else [self.public_model()]
-        served = served if served is not None else [{"id": "route/maker/current"}]
+        served = served if served is not None else [{"id": "route/maker/current"}, {"id": "route/another/current"}]
 
         class Client:
             def open(self, request, timeout):
@@ -105,6 +106,28 @@ class SetupModelPreflightTests(unittest.TestCase):
         self.assertTrue(all(request.get_method() == "GET" and request.data is None for request in requests))
         self.assertIsNone(namespace["NoRedirect"]().redirect_request(None, None, 302, "", {}, "https://other.example"))
         self.assertNotIn("synthetic-private-value", out)
+
+    def test_configured_fallback_and_each_selected_reviewer_must_be_served(self):
+        for missing in ("fallback", "reviewer", "second-reviewer"):
+            with self.subTest(missing=missing):
+                config = self.gateway()
+                env = config["roles"][0]["processes"][0]["env"]
+                if missing == "fallback":
+                    config["model_selection"]["fallback"]["model"] = "route/maker/not-served"
+                elif missing == "reviewer":
+                    env["REVIEW_MODEL"] = "route/another/not-served"
+                else:
+                    env["REVIEW_MODELS"] = "route/another/current, route/another/not-served"
+                (code, out, _), requests = self.catalogue(config=config)
+                self.assertNotEqual(code, 0)
+                self.assertIn("not-served", str(code))
+                self.assertNotIn("synthetic-private-value", str(code) + out)
+                self.assertTrue(all(request.get_method() == "GET" for request in requests))
+        config = self.gateway()
+        env = config["roles"][0]["processes"][0]["env"]
+        env.update(REVIEW_MODEL="ignored/not-served", REVIEW_MODELS="route/another/current")
+        (code, _, _), _ = self.catalogue(config=config)
+        self.assertEqual(code, 0, "REVIEW_MODELS must override REVIEW_MODEL as the runtime does")
 
     def test_wrong_prefix_or_missing_capabilities_never_report_available_models(self):
         for public, served in (([self.public_model()], [{"id": "maker/current"}]),
