@@ -17,6 +17,7 @@ the failures that were met.
 | `egress-configmap.yaml.example` | this Pod's own firewall rules |
 | `operator-scripts-configmap.yaml.example` | the operator's programs the shipped ordered configuration calls: `build`, `test` and the report check `confirm-report` |
 | `operations/idle-check.sh`, `operations/copy-queue.sh`, `operations/queue_helper.py` | read-only queue inspection and a new private copy of its records; explicit Pod selection, no deployment or engine launch (SETUP.md, sections 7, 9 and 10) |
+| `operations/read-issues.sh`, `operations/file-ticket.sh`, `operations/tracker_helper.py` | Backlog-only complete reads or one explicitly requested issue creation; Pod-local credentials, stdin text, private evidence and no POST retry (SETUP.md, sections 7 and 9) |
 | `secrets.yaml.example` | the two Secrets' keys, without values, and where each value comes from |
 | `status-service.yaml.example` | a cluster-internal address for the status page |
 | `status-ingress.yaml.example` | optional: the status page at a host name; exposing it is the operator's choice |
