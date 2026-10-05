@@ -1190,7 +1190,9 @@ start immediately followed by a pause. An answer received while it is low
 likewise gets one acknowledgement saying it is waiting. Those receipts replace
 the separate pause comment for that episode, including after a restart. The
 recovery comment is sent when execution starts, not merely when credit returns
-while another request still occupies the slot.
+while another request still occupies the slot. It replaces the ordinary start
+announcement rather than adding a second one. A low-allowance receipt also
+states how many requests are ahead when there are any.
 
 An authorized stop does not wait for the balance: recording it launches no
 model. A request held below the floor is still read for a stop on every tick,
