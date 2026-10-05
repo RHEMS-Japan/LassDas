@@ -841,10 +841,12 @@ nor produces NOT REVIEWED. This is not a claim that omitted material was
 reviewed; increase the budget for models able to accept more context.
 
 The checkpoint read has a separate 64 MiB limit. Missing, malformed or larger
-checkpoint files still use the existing review-unavailable handling below:
-by default the review holds without a verdict, while the operator's explicit
-`REVIEW_UNAVAILABLE=pass` says NOT REVIEWED. Complete material remains in the
-checkpoint. This cannot restore output the runtime did not retain there.
+checkpoint files do not prevent a review: the model receives the reason the
+saved context could not be read, the runtime's normal 12,000-character head
+and 6,000-character tail, and the available review log below. The live
+diagnostic also names that limitation. Missing context is not represented as
+remembered or as a verdict; the model still reviews the current change and
+test output. This cannot restore output the runtime did not retain.
 
 The existing `TASK_HOME/review.md` also supplies its last 12,000 characters,
 with a notice when older text was omitted. Its headings are ordinary prose,

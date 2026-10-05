@@ -586,15 +586,20 @@ def review_memory(state_directory, key, limit):
                 if shortened and len(body) > share:
                     start = (share + 1) // 2
                     end = len(body) - (share - start)
-                    body = (body[:start] + "\n[characters %d:%d omitted from this body; complete text remains in TASK_HISTORY]\n"
+                    body = (body[:start] + "\n[characters %d:%d omitted from this body]\n"
                             % (start, end) + body[end:])
                 displayed.append(label + ":\n" + body)
             text = "\n\n".join(displayed)
+            text.encode("utf-8")
             sections.append("Selected canonical reports, with any omitted body ranges explicitly named. "
                             "These are observations, not proof that a defect was repaired. "
                             "Older reports remain in the checkpoint but are not all included here.\n" + text)
-        except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
-            raise ReviewError("The saved review handoff cannot be read: " + str(error), recheck=True) from error
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as error:
+            notice = scrub("Saved review context could not be read: %s. "
+                           "Reviewing the runtime text, available review log, current diff and test output; "
+                           "the unread saved material is not represented as remembered." % error, key)
+            sections.append(notice)
+            say(notice)
     log = state_directory / "review.md"
     try:
         with log.open("rb") as written:

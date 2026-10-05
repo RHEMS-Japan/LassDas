@@ -1325,19 +1325,49 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(finding, service.requests[0]["body"]["messages"][1]["content"])
 
-    def test_saved_memory_missing_or_malformed_history_never_reaches_the_model(self):
-        service = ModelStandIn([{"verdict": (False, "must not be requested")}])
-        self.addCleanup(service.close)
-        path = self.home.parent / "missing-history.json"
-        for content in (None, "broken JSON", '{"request":"r","history":[],"pending":null}'):
-            with self.subTest(content=content):
-                if content is not None:
-                    path.write_text(content, encoding="utf-8")
-                result = self.run_review(service, TASK_HISTORY=str(path), REVIEW_UNAVAILABLE="pass")
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn("NOT REVIEWED", result.stdout)
-                self.assertIn("saved review handoff cannot be read", result.stdout)
-                self.assertEqual(service.requests, [])
+    def test_unreadable_saved_memory_still_reviews_runtime_text_diff_and_log(self):
+        malformed = {"request": "r", "history": [], "pending": {"role": "inspect-change"}, "workflow": ["invalid"]}
+        cases = (
+            ("missing", None),
+            ("oversized", None),
+            ("json", b"broken JSON"),
+            ("shape", json.dumps(malformed).encode()),
+            ("unicode", b'{"request":"\\ud800","history":[],"pending":{"role":"inspect-change"}}'),
+            ("nested", b"[" * 2000 + b"]" * 2000),
+        )
+        for name, content in cases:
+            with self.subTest(case=name):
+                path = self.home.parent / (name + "-history.json")
+                if name == "oversized":
+                    with path.open("wb") as saved:
+                        saved.truncate((64 << 20) + 1)
+                elif content is not None:
+                    path.write_bytes(content)
+                prior = "The prior review asked for a test of the requested behaviour."
+                (self.home / "review.md").write_text(prior, encoding="utf-8")
+                service = ModelStandIn([{"verdict": (True, "A real review sends the change back.")}])
+                self.addCleanup(service.close)
+                process, stdout, stderr = self.start_review(service, TASK_HISTORY=str(path))
+                try:
+                    try:
+                        status = process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.fail("review did not ask for a verdict: " + stderr.read_text()[-600:])
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+                self.assertEqual(status, 1, stdout.read_text() + stderr.read_text())
+                self.assertIn("SENT BACK", stdout.read_text())
+                self.assertNotIn("NOT REVIEWED", stdout.read_text())
+                self.assertEqual(len(service.requests), 1)
+                sent = service.requests[0]["body"]["messages"][1]["content"]
+                for words in (self.STDIN, prior, "return 2", "tests ran fine",
+                              "Saved review context could not be read"):
+                    self.assertIn(words, sent)
+                self.assertIn("Saved review context could not be read", stderr.read_text())
+                self.assertNotIn("held, with no verdict", stderr.read_text())
+                print("unreadable memory: %s model_requests=1 verdict=SENT_BACK" % name)
 
     def test_saved_memory_uses_latest_plain_reports_in_a_connected_workflow(self):
         service = ModelStandIn([{"verdict": (False, "checked independently")}])
