@@ -1730,6 +1730,41 @@ class DeliveryTests(unittest.TestCase):
                              (changed, added))
         self.assertEqual(self.methods().count("POST"), 1)
 
+    def test_conflict_diagnostics_keep_byte_names_distinct(self):
+        translations = [(b"main.go", b"\x82.go"), (b"library/run.go", b"library/\x83.go")]
+        for path in ("main.go", "library/run.go"):
+            self.advance_integration_branch(path, "// theirs\n")
+            self.change(path, "// ours\n")
+        # Real merges, with the existing shim supplying byte names that this
+        # filesystem cannot create. Both refusals must identify both files.
+        self.git_names_in_bytes(translations)
+        for reason in ("2 paths conflict with this change:", "conflict markers in:"):
+            with self.subTest(reason=reason):
+                refused = self.deliver(DELIVERY_ALLOWED_PATHS="\udc82.go:library")
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                self.assertIn(reason, refused.stdout)
+                for _, name in translations:
+                    self.assertIn(repr(name), refused.stdout)
+                self.assertNotIn("\ufffd", refused.stdout)
+        self.assertEqual(self.state["pulls"], [])
+
+    def test_check_names_integration_changes_without_losing_bytes(self):
+        translations = [(b"notes.md", b"\x82.md"), (b"library/run.go", b"library/\x83.go")]
+        for path in ("notes.md", "library/run.go", "main.go"):
+            self.advance_integration_branch(path, "// theirs\n")
+        self.change("main.go", "// ours\n")
+        self.git_names_in_bytes(translations)
+        refused = self.deliver(DELIVERY_ALLOWED_PATHS="main.go")
+        self.assertIn("1 path conflict with this change: main.go", refused.stdout)
+        checked = self.deliver("--dry-run", DELIVERY_ALLOWED_PATHS="main.go")
+        self.assertEqual(checked.returncode, 3, checked.stdout + checked.stderr)
+        names = next(line for line in checked.stdout.splitlines()
+                     if line.startswith("Paths the integration branch changed"))
+        for _, name in translations:
+            self.assertIn(repr(name), names)
+        self.assertNotIn("\ufffd", names)
+        self.assertEqual(self.state["pulls"], [])
+
     def test_forbidden_text_is_still_found_in_a_change_that_is_not_utf8(self):
         self.shift_jis("main.go", "package main // 日本語 internal-project-codename\n")
         refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="Internal-Project-Codename")

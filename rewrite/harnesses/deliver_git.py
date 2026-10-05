@@ -312,7 +312,7 @@ def stage_and_commit(workspace, issue, allowed, receipt):
             marked.add(support.scrub(line.rsplit(":", 2)[0])[:QUOTED])
     if marked:
         raise DeliveryError("Refused: the change still carries Git conflict markers in: "
-                            + ", ".join(sorted(marked)[:20]))
+                            + ", ".join(support.readable(path) for path in sorted(marked)[:20]))
     # Whether anything is staged, from Git's exit status alone: the change is
     # not read here, so a large one is not held in memory.
     staged, _, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--quiet", "--no-ext-diff",
@@ -400,9 +400,9 @@ def catch_up(workspace, url, base, issue, method):
         check=False, environment=environment)
     if code == 0:
         return True
-    _, unmerged, _ = support.run(support.git("-C", str(workspace), "diff", "--name-only", "--diff-filter=U"),
+    _, unmerged, _ = support.run(support.git("-C", str(workspace), "diff", "--name-only", "-z", "--diff-filter=U"),
                                  check=False)
-    conflicted = sorted(line for line in unmerged.splitlines() if line)
+    conflicted = sorted(names(unmerged))
     if not conflicted:
         # Not a conflict: Git refused for another reason. Leave the tree as it was.
         support.run(support.git("-C", str(workspace), "merge", "--abort"), check=False)
@@ -413,7 +413,8 @@ def catch_up(workspace, url, base, issue, method):
         "(<<<<<<<, =======, >>>>>>>); a path one side deleted or renamed has none and needs a decision "
         "whether it stays. Resolve them in place, keep the result building and tested, and the next "
         "delivery completes the merge."
-        % (base, len(conflicted), "" if len(conflicted) == 1 else "s", ", ".join(conflicted[:20])))
+        % (base, len(conflicted), "" if len(conflicted) == 1 else "s",
+           ", ".join(support.readable(path) for path in conflicted[:20])))
 
 
 def push_branch(workspace, url, branch, commit):
@@ -798,7 +799,8 @@ def check_only(workspace, owner, name, base, branch, method, url, allowed, uncha
                 "(DELIVERY_ALLOW_UNCHANGED is 1)" if unchanged else
                 "is refused (DELIVERY_ALLOW_UNCHANGED is not 1)")]
     if exempt:
-        lines.append("Paths the integration branch changed, which need no grant: %s." % ", ".join(sorted(exempt)))
+        lines.append("Paths the integration branch changed, which need no grant: %s."
+                     % ", ".join(support.readable(path) for path in sorted(exempt)))
     status, payload = support.api("GET", "/repos/%s/%s" % (owner, name))  # no retry: this is a check
     lines.append("Reading the repository answered status %d%s." %
                  (status, "" if status != 200 else "; its default branch is %s" % payload.get("default_branch", "?")))
