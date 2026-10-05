@@ -721,8 +721,8 @@ func TestAResumeAfterARestartIsRunningNotAttentionAndKeepsItsStart(t *testing.T)
 		Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}}},
 		History: []chain.Result{
 			{Role: "elicit", Speaker: "elicit-process", StartedAt: started, FinishedAt: started.Add(2 * time.Minute)},
-			{Role: "implement", Speaker: "implement-process", Error: "context canceled", StartedAt: started.Add(2 * time.Minute), FinishedAt: started.Add(5 * time.Minute)},
-			{Role: "implement", Speaker: "runtime", Error: "The process stopped while this action was pending. Available reports may be partial.", FinishedAt: started.Add(5 * time.Minute)},
+			{Role: "implement", Speaker: "implement-process", Interrupted: true, Error: "context canceled", StartedAt: started.Add(2 * time.Minute), FinishedAt: started.Add(5 * time.Minute)},
+			{Role: "implement", Speaker: "runtime", Interrupted: true, Error: "The process stopped while this action was pending. Available reports may be partial.", FinishedAt: started.Add(5 * time.Minute)},
 		}}
 	raw, err := json.Marshal(state)
 	if err != nil {
@@ -749,6 +749,18 @@ func TestAResumeAfterARestartIsRunningNotAttentionAndKeepsItsStart(t *testing.T)
 		t.Errorf("the request page must show the first record's start (%s) as the start", want)
 	}
 	expectAll(t, page, `<span class="chip passed">elicit<small>elicit</small></span>`, `<span class="chip current">implement<small>implement</small></span>`)
+	// The same diagnostic without a recorded interruption is an error, not
+	// evidence that the controller interrupted this work.
+	state.History[1].Interrupted, state.History[2].Interrupted = false, false
+	raw, err = json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "history.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, body = get(t, ts, "/")
+	expectAll(t, body, `Needs attention <b>1</b>`, "retrying after a failure; assigned to implement")
 }
 
 func TestTheCardNamesTheStageRunningNowNotTheLastRecorded(t *testing.T) {
@@ -1239,7 +1251,7 @@ func TestLaunchesAreToldApartWithoutAStageNoteAndNotesStandOnTheirOwn(t *testing
 		var records []record
 		for i, result := range results {
 			records = append(records, record{Index: i + 1, Role: result.Role, Speaker: result.Speaker, Model: result.Model, Started: result.StartedAt, Finished: result.FinishedAt,
-				Output: result.Output, Error: result.Error, Diagnostics: result.Diagnostics, Instruction: result.Instruction, Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"})
+				Output: result.Output, Error: result.Error, Interrupted: result.Interrupted, Diagnostics: result.Diagnostics, Instruction: result.Instruction, Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"})
 		}
 		return records
 	}
@@ -1260,11 +1272,16 @@ func TestLaunchesAreToldApartWithoutAStageNoteAndNotesStandOnTheirOwn(t *testing
 	// grey note, and a note without a start has no duration.
 	noted := groupLaunches(entries(
 		chain.Result{Role: "implement", Speaker: "implement-process", Model: "m", Output: "FIRST-RUN", StartedAt: started, FinishedAt: started.Add(time.Minute)},
-		chain.Result{Role: "implement", Speaker: "runtime", Error: "The process stopped while this action was pending. Available reports may be partial.", FinishedAt: started.Add(20 * time.Minute)},
+		chain.Result{Role: "implement", Speaker: "runtime", Interrupted: true, Error: "The process stopped while this action was pending. Available reports may be partial.", FinishedAt: started.Add(20 * time.Minute)},
 		chain.Result{Role: "router", Speaker: "runtime", Error: "routing unavailable: model service returned HTTP 502", FinishedAt: started.Add(21 * time.Minute)},
 	))
 	if len(noted) != 3 || noted[0].Outcome != returned || noted[0].Duration != "1m00s" || noted[1].Outcome != interrupted || noted[1].Duration != "" || noted[2].Outcome != failed || noted[2].Failure != "routing unavailable: model service returned HTTP 502" {
 		t.Fatalf("notes were attached to the launch before them or shown wrongly: %+v", noted)
+	}
+	plain := groupLaunches(entries(chain.Result{Role: "implement", Speaker: "runtime",
+		Error: "The process stopped while this action was pending.", FinishedAt: started}))
+	if len(plain) != 1 || plain[0].Outcome != failed {
+		t.Fatalf("diagnostic wording was treated as a recorded interruption: %+v", plain)
 	}
 	// Two processes of which one could not start: the launch failed, it did
 	// not "not start". Two different failures never fold, and a folded entry
