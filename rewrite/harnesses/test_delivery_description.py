@@ -2,6 +2,7 @@
 import json
 import unittest
 
+import test_adversarial_review as review_fixture
 import test_deliver_git as delivery_fixture
 
 
@@ -183,6 +184,7 @@ class DescriptionTests(unittest.TestCase):
     def test_bad_description_is_not_shortened_or_pushed(self):
         for shape, text in [
             ("large", "x" * 60_001),
+            ("report fits but complete body does not", "x" * 59_900),
             ("large Unicode", "界" * 30_000),
         ]:
             with self.subTest(shape=shape):
@@ -207,6 +209,25 @@ class DescriptionTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.fixture.state["pulls"], [])
                 self.assertNotIn("refs/heads/ticket/TICKET-41", self.fixture.remote_branches())
+
+    def test_review_uses_the_delivered_bodys_byte_limit(self):
+        self.explain("変更と検証の説明。")
+        delivered = self.deliver()
+        self.assertEqual(delivered.returncode, 0, delivered.stderr)
+        size = len(self.fixture.state["pulls"][0]["body"].encode("utf-8"))
+        review = review_fixture.AdversarialReviewTests()
+        review.setUp()
+        self.addCleanup(review.doCleanups)
+        service = review_fixture.ModelStandIn([{"verdict": (False, "checked")}])
+        self.addCleanup(service.close)
+        for limit, status, calls in ((size - 1, 1, 0), (size, 0, 1)):
+            with self.subTest(limit=limit):
+                result = review.run_review(service, TASK_HISTORY=str(self.history), PR_DESCRIPTION_ROLE="work",
+                                           DELIVERY_MERGE_METHOD="none", PR_DESCRIPTION_MAX_BYTES=str(limit))
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                self.assertEqual(len(service.requests), calls)
+                print("published_body_bytes=%d review_limit=%d exit=%d model_requests=%d"
+                      % (size, limit, result.returncode, len(service.requests)))
 
     def test_unreadable_history_delivers_with_an_explicit_omission(self):
         for content in (b"not JSON", b'{"history":[]}\xff'):

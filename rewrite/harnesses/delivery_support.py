@@ -55,7 +55,13 @@ class DescriptionSettingError(DeliveryError):
     """Only the operator can supply or correct this description setting."""
 
 
-def description_size(text):
+def default_pull_request_body(issue, method):
+    return ("Prepared by the configured ticket engine for %s. Only the operator's allowed "
+            "paths are included. Review the change itself; this description is not a result.%s"
+            % (issue, " Merging it is left to a person." if method == "none" else ""))
+
+
+def description_size(text, source="The pull request description"):
     """One operator limit shared by review and publication, without truncation."""
     try:
         limit = int(setting("PR_DESCRIPTION_MAX_BYTES", "60000"))
@@ -63,8 +69,10 @@ def description_size(text):
             raise ValueError()
     except ValueError as error:
         raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES must be a positive integer") from error
-    if len(text.encode("utf-8")) > limit:
-        raise DeliveryError("The pull request description exceeds the configured %d-byte limit; nothing was shortened" % limit)
+    size = len(text.encode("utf-8"))
+    if size > limit:
+        raise DeliveryError("%s is %d bytes and exceeds the configured %d-byte limit; nothing was shortened"
+                            % (source, size, limit))
 
 
 def description_report():
@@ -75,7 +83,14 @@ def description_report():
     path = os.environ.get("TASK_HISTORY")
     if not path:
         raise DescriptionSettingError("TASK_HISTORY is unset; use a runtime that supplies it to review and delivery")
-    description_size("")
+    issue = os.environ.get("TASK_ISSUE")
+    if not issue:
+        raise DescriptionSettingError("TASK_ISSUE is unset; use the assigned request in both review and delivery")
+    prefix = default_pull_request_body(issue, setting("DELIVERY_MERGE_METHOD", "merge")) + "\n\n"
+    try:
+        description_size(prefix + "x", "The required introduction and a one-byte report")
+    except DeliveryError as error:
+        raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES cannot fit the required introduction: " + str(error)) from error
     try:
         with Path(path).open("rb") as saved:
             raw = saved.read(64 * 1024 * 1024 + 1)
@@ -102,10 +117,19 @@ def description_report():
         text.encode("utf-8")
     except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as error:
         reason = error.strerror if isinstance(error, OSError) else str(error)
-        return "", "Pull request explanation omitted: saved history could not be read (%s). The change itself still requires review." % reason
+        note = "Pull request explanation omitted: saved history could not be read (%s). The change itself still requires review." % reason
+        try:
+            description_size(prefix + note)
+        except DeliveryError as error:
+            raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES cannot fit the explanation omission notice: " + str(error)) from error
+        return "", note
+    if not selected:
+        raise DescriptionSettingError("PR_DESCRIPTION_ROLE=%r has no recorded report; choose a role that reports "
+                                      "before review, not a process name or a later reporting role" % role)
     if not text.strip():
-        raise DeliveryError("The selected role has no latest report to publish; return to the worker for an explanation")
-    description_size(text)
+        raise DeliveryError("The latest report of role %s is empty; return to the worker for an explanation" % role)
+    description_size(prefix + text, "The complete description (latest report of role %s: %d bytes)"
+                     % (role, len(text.encode("utf-8"))))
     return text, ""
 
 

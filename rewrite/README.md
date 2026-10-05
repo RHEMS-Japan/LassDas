@@ -793,7 +793,9 @@ requests with one model and 300 with three. A longer
 it delivers unreviewed work when no verdict can be obtained: after
 `REVIEW_ATTEMPTS` requests (3), the models in turn, or at once where the review
 would otherwise hold, the command prints `NOT REVIEWED` with the reason and
-exits 0. One rule comes before it: a checkout in which Git lists no changed
+exits 0. Description settings that the worker cannot fix still hold for an
+operator correction and restart. Another rule comes before this opt-in:
+a checkout in which Git lists no changed
 path and no earlier delivery round committed one can end with nothing
 delivered if it is let through, so it is let through only on a verdict, and
 without one the command ends 1 with `NOT REVIEWED` and the reason. The same
@@ -883,8 +885,9 @@ this mode has run with a live model or a real tracker.
 ### A pull request description from the run's reports
 
 An operator can give the fixed review and delivery commands the same
-`PR_DESCRIPTION_ROLE`, naming the role whose final report should explain the
-change to a person reviewing the pull request. Tell that existing role to
+`PR_DESCRIPTION_ROLE`, naming a role that reports before review, not a process
+name or the later reporting role. Its report explains the change to a person
+reviewing the pull request. Tell that existing role to
 write its findings, implementation explanation, settings and verification
 commands in its final ordinary report. No special headings or model answer
 schema are required. With no role selected, the fixed delivery description
@@ -900,15 +903,24 @@ the explanation too; its presence is not proof that the change is correct.
 
 The delivery adds the selected text to its ordinary introduction and checks
 the whole description for `DELIVERY_FORBIDDEN_TEXT` and its credential before
-any publication. `PR_DESCRIPTION_MAX_BYTES` is a positive UTF-8 byte limit
-(default 60000) for that complete body. An oversized or empty selected report
+any publication. Give review and delivery the same `PR_DESCRIPTION_ROLE`,
+`PR_DESCRIPTION_MAX_BYTES` and `DELIVERY_MERGE_METHOD` (default `merge`). The
+same `TASK_ISSUE` must reach both; `watch` supplies it from the assigned request.
+`PR_DESCRIPTION_MAX_BYTES` is a
+positive UTF-8 byte limit (default 60000); both commands check the complete
+body, including the shared introduction. An oversized or empty selected report
 sends the work back with its reason (exit 1), rather than holding the review
 without asking a model. When the checkpoint is missing, unreadable, malformed
 or over its local read limit, review continues without the explanation, and
 both the model's input and the delivery result state what could not be read.
 The pull request body states that omission too; the remaining diff and test
-output are still reviewed. An unset `TASK_HISTORY` or invalid size setting
-asks the operator to fix the configuration and restart. This limit is not a
+output are still reviewed. An unset `TASK_HISTORY` or `TASK_ISSUE`, an invalid size setting,
+or no recorded report from the selected role asks the operator to fix the
+configuration and restart, even with `REVIEW_UNAVAILABLE=pass`. So does a limit
+too small for the required introduction or the reason an explanation was omitted:
+the worker cannot shorten that fixed text. A recorded but
+empty report still goes back to the worker; the refusal identifies the role,
+and an oversized report also states its actual UTF-8 byte count. This limit is not a
 claim about a hosting service's exact limit. The old repository-document option
 `DELIVERY_PR_BODY_FILE` is removed; there is no compatibility path or migration.
 

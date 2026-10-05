@@ -440,20 +440,13 @@ def find_pull_request(owner, name, branch, base):
     return payload[0] if payload else None
 
 
-def default_pull_request_body(issue, method):
-    return ("Prepared by the configured ticket engine for %s. Only the operator's allowed "
-            "paths are included. Review the change itself; this description is not a result.%s"
-            % (issue, " Merging it is left to a person." if method == "none" else ""))
-
-
 def pull_request_body(issue, method):
     """Ordinary report text from the run, never committed into the target."""
-    body = default_pull_request_body(issue, method)
+    body = support.default_pull_request_body(issue, method)
     if not os.environ.get("PR_DESCRIPTION_ROLE"):
         return body, ""
     text, note = support.description_report()
     body += "\n\n" + (text or note)
-    support.description_size(body)
     try:
         refuse_forbidden_text([(None, body)])
     except DeliveryError as error:
@@ -505,7 +498,7 @@ def sync_pull_request_body(workspace, path, receipt, previous, pull, body, owner
         return
     actual = body_lines(pull.get("body"))
     if actual != body_lines(body):
-        known = {body_lines(default_pull_request_body(receipt["issue"], method)) for method in ("none", "merge")}
+        known = {body_lines(support.default_pull_request_body(receipt["issue"], method)) for method in ("none", "merge")}
         known.update(body_lines(value) for field in ("pull_request_body", "pending_pull_request_body")
                      if isinstance(value := receipt.get(field), str))
         if actual not in known:
@@ -546,7 +539,7 @@ def open_pull_request(owner, name, branch, base, issue, method, body=None, befor
     status, payload = support.api_retried("POST", "/repos/%s/%s/pulls" % (owner, name),
                                           describe="opening the pull request", payload={
         "title": "Deliver " + issue, "head": branch, "base": base,
-        "body": default_pull_request_body(issue, method) if body is None else body})
+        "body": support.default_pull_request_body(issue, method) if body is None else body})
     if status == 201:
         return payload
     if status == 422:
