@@ -19,6 +19,13 @@ var _ Tracker = GitHub{}
 // IssueScope checks the role's authority before calling this method. DELETE
 // is for the scope's own cleanup only, never a role's request.
 func (g GitHub) Forward(ctx context.Context, method, path string, query, form url.Values, expected int) ([]byte, error) {
+	return g.forward(ctx, method, path, query, form, expected, func(ctx context.Context, issue Issue, _, _ int64) ([]json.RawMessage, error) {
+		return g.Comments(ctx, issue)
+	})
+}
+
+func (g GitHub) forward(ctx context.Context, method, path string, query, form url.Values, expected int,
+	comments func(context.Context, Issue, int64, int64) ([]json.RawMessage, error)) ([]byte, error) {
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	if !strings.HasPrefix(path, "/issues/") || len(parts) < 2 {
 		return nil, errors.New("outside the issue scope's tracker operations")
@@ -69,7 +76,7 @@ func (g GitHub) Forward(ctx context.Context, method, path string, query, form ur
 		// before selecting the scope's page, so an unreadable later page does
 		// not turn into a successful partial answer. Conditional reads remain
 		// shared with the engine's other readers through g.call.
-		rows, err := g.Comments(ctx, issue)
+		rows, err := comments(ctx, issue, after, count)
 		if err != nil {
 			return nil, err
 		}

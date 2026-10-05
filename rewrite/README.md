@@ -2228,6 +2228,9 @@ Post stdin is sent unchanged as the API's form `content`; there is no success
 template, answer schema or completion mark. The native comment receipt goes to
 stdout. `comment` reads that API id back, and `comments` retrieves all pages
 after the cursor, including a possible inclusive page boundary without duplicates.
+For the scoped GitHub connection, an enumeration releases its saved list when
+it reaches the end. A later read from the last seen comment ID fetches anew,
+so a reply posted after that enumeration is not hidden by the earlier list.
 This follows the [comment API](https://developer.nulab.com/docs/backlog/api/2/add-comment/).
 
 A failed or unreadable submission response is ambiguous: the command reports
