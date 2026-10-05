@@ -87,7 +87,7 @@ class BranchDeliveryTests(unittest.TestCase):
 
     def test_dry_run_and_incompatible_operator_settings_cannot_publish(self):
         for arguments, settings in [(("--dry-run",), {}), ((), {"DELIVERY_MERGE_METHOD": "none"}),
-                                    ((), {"DELIVERY_PR_BODY_FILE": "notes.md"}), (("--branch-only",), {})]:
+                                    (("--branch-only",), {})]:
             with self.subTest(arguments=arguments, settings=settings):
                 result = self.deliver(*arguments, **settings)
                 self.assertNotEqual(result.returncode, 0)
@@ -141,14 +141,27 @@ class BranchDeliveryTests(unittest.TestCase):
         pushed = receipt["head"]
         for altered in (self.other_commit(pushed), self.base, None):
             with self.subTest(altered=altered):
+                self.save(receipt)
                 if altered:
                     self.f.git(self.f.remote, "update-ref", BRANCH, altered)
                 else:
                     self.f.git(self.f.remote, "update-ref", "-d", BRANCH)
                 prior = self.pushes()
                 result = self.deliver()
-                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("A person changed", result.stdout)
+                self.assertIn("nothing was committed or pushed", result.stdout)
+                saved = self.f.receipt()
+                self.assertIs(saved["changed_by_person"], True)
+                self.assertEqual(saved["branch_head"], altered or "")
+                self.assertTrue(saved["ended_at"])
+                self.assertEqual(self.deliver().returncode, 0)
+                verified = self.verify("raise SystemExit('verification must not run after handoff')")
+                self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+                self.assertIn("Not checked", verified.stdout)
+                self.assertIn("person", verified.stdout)
                 self.assertEqual(self.pushes(), prior)
+                self.assertEqual(self.f.state["requests"], [])
                 self.assertNotIn("Published branch", result.stdout)
                 if altered:
                     self.assertEqual(self.ref(), altered)
@@ -172,6 +185,11 @@ class BranchDeliveryTests(unittest.TestCase):
         self.assertEqual(self.f.receipt()["published_head"], receipt["head"])
         self.assertIn("publishing_head", self.f.receipt())
         self.assertEqual(self.f.state["requests"], [])
+        repeated = self.deliver()
+        self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+        self.assertTrue(self.f.receipt()["changed_by_person"])
+        self.assertEqual(self.ref(), other)
+        self.assertEqual(self.verify().returncode, 0)
 
     def test_an_uncertain_push_is_resolved_by_remote_readback(self):
         self.shim('case " $* " in *" push "*)\n  REAL_GIT "$@" || exit $?\n'

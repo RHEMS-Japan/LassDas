@@ -70,6 +70,16 @@ def receipt_fields(workspace):
     if not receipt:
         raise DeliveryError("No delivery receipt is present; nothing was delivered to verify")
     if receipt.get("branch_only"):
+        if receipt.get("changed_by_person"):
+            if (receipt.get("branch_only") is not True or not receipt.get("ended_at")
+                    or "branch_head" not in receipt
+                    or not COMMIT.fullmatch(str(receipt.get("head", "")))
+                    or not str(receipt.get("branch", "")).startswith("ticket/")
+                    or any(receipt.get(key) for key in ("unchanged", "pull_request", "merge_sha",
+                                                       "merge_left_to_person", "previous", "publishing_head",
+                                                       "closed_unmerged"))):
+                raise DeliveryError("The branch-only record does not identify the person's handoff")
+            return receipt, ""
         published = str(receipt.get("published_head", ""))
         if (receipt.get("branch_only") is not True or not COMMIT.fullmatch(published)
                 or receipt.get("head") != published or not receipt.get("branch_confirmed_at")
@@ -165,6 +175,13 @@ def verify(arguments):
     workspace = os.environ.get("TASK_WORKSPACE") or os.getcwd()
     home = os.environ.get("TASK_HOME") or tempfile.gettempdir()
     receipt, merge = ({}, "") if dry else receipt_fields(workspace)
+    if receipt.get("branch_only"):
+        owner, name = support.repository()
+        base = support.setting("DELIVERY_BASE_BRANCH")
+        issue = support.setting("TASK_ISSUE")
+        if (receipt.get("repository") != owner + "/" + name or receipt.get("base_branch") != base
+                or receipt.get("issue") != issue or receipt.get("branch") != "ticket/" + issue):
+            raise DeliveryError("The branch-only record belongs to a different request or verification target")
     named = "%s (%s)" % (receipt.get("pull_request", "(none recorded)"),
                          receipt.get("pull_request_url") or "no address recorded")
     if receipt.get("closed_unmerged"):
@@ -180,6 +197,11 @@ def verify(arguments):
                        + earlier + ["The configured verification commands were not run."]))
         return 0
     if receipt.get("changed_by_person"):
+        if receipt.get("branch_only"):
+            print("Not checked: a person changed or deleted branch %s. This process handed it over without "
+                  "publishing more work. The branch was not read again and the configured verification "
+                  "commands were not run." % receipt.get("branch"))
+            return 0
         if receipt.get("merge_sha"):
             print("Not checked: when the delivery last looked, a person had changed branch %s of pull request "
                   "%s to %s and merged it as commit %s. This process did not verify that merge or run the "
@@ -204,11 +226,6 @@ def verify(arguments):
     pending = bool(receipt.get("merge_left_to_person")) and not receipt.get("merge_sha")
     owner, name = support.repository()
     base = support.setting("DELIVERY_BASE_BRANCH")
-    if branch_only:
-        issue = support.setting("TASK_ISSUE")
-        if (receipt.get("repository") != owner + "/" + name or receipt.get("base_branch") != base
-                or receipt.get("issue") != issue or receipt.get("branch") != "ticket/" + issue):
-            raise DeliveryError("The branch-only record belongs to a different request or verification target")
     url = support.remote_url(owner, name)
     commands = verify_commands()
     # An unmerged pull request is checked where it is: on its ticket branch.
