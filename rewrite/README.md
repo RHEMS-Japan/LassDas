@@ -905,8 +905,9 @@ this mode has run with a live model or a real tracker.
 ### A pull request description from the run's reports
 
 An operator can give the fixed review and delivery commands the same
-`PR_DESCRIPTION_ROLE`, naming a role that reports before review, not a process
-name or the later reporting role. Its report explains the change to a person
+`PR_DESCRIPTION_ROLE`, naming a role that reports before review and runs again
+after a review send-back (`work` in the shipped example), not a process name
+or the later reporting role. Its report explains the change to a person
 reviewing the pull request. Tell that existing role to
 write its findings, implementation explanation, settings and verification
 commands in its final ordinary report. No special headings or model answer

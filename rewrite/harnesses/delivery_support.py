@@ -89,6 +89,8 @@ def description_report():
     prefix = default_pull_request_body(issue, setting("DELIVERY_MERGE_METHOD", "merge")) + "\n\n"
     try:
         description_size(prefix + "x", "The required introduction and a one-byte report")
+    except DescriptionSettingError:
+        raise
     except DeliveryError as error:
         raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES cannot fit the required introduction: " + str(error)) from error
     try:

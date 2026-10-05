@@ -233,6 +233,9 @@ class AdversarialReviewTests(unittest.TestCase):
                     self.assertEqual(service.requests, [])
                     self.assertNotIn("NOT REVIEWED", stdout.read_text())
                     self.assertNotIn("SENT BACK", stdout.read_text())
+                    if options.get("PR_DESCRIPTION_MAX_BYTES") in {"0", "abc"}:
+                        self.assertIn("PR_DESCRIPTION_MAX_BYTES must be a positive integer", stderr.read_text())
+                        self.assertNotIn("cannot fit the required introduction", stderr.read_text())
                     if setting == "PR_DESCRIPTION_ROLE":
                         self.assertIn("report", stderr.read_text())
                         self.assertIn("role that reports before review, not a process name", stderr.read_text())
