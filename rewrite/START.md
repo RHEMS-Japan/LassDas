@@ -72,7 +72,7 @@ GitHub は受付ラベルと工程ラベルを先に作り、`automation` が既
 ### ゲートウェイ経由で呼び出す場合
 
 `model_selection.gateway` を設定すると、選んだモデルへの呼び出しだけが指定のゲートウェイを通ります。作業役とルーティングの利用料はゲートウェイ側の口座に付き、カタログ側の口座には付きません。
-判断サービス（`model_selection.judge` と `router.decision`）はカタログ側のままにします。実測では、このゲートウェイは判断APIを提供していません（HTTP 405）。
+判断サービス（`model_selection.judge` と `router.decision`）は、直接OpenRouterへ送る構成ならそのままにし、モデル用とは別にその鍵も残します。ゲートウェイだけにする場合は両方を外し、`model_selection.fallback` にゲートウェイのchat URL・接頭辞付きモデル名・鍵の変数名を設定します。`router.llm` も同じ接続先を使います。判断APIの対応は一覧にモデル名があるだけでは分かりません。接続方式の選択と、推論を起動しない一覧/鍵名の確認は [SETUP.md](../deploy/ticket-engine/SETUP.md#with-a-gateway-in-front-of-the-models) にあります。
 ゲートウェイは同じモデルを接頭辞付きのidで出します。接頭辞は同じモデルへの経路であり、別のモデルでも品質の裏付けでもありません。履歴には選ばれたidを `model`、経路を `model_prefix` として別々に残します。
 設定例は `examples/operator-gateway.json`。`examples/operator.json` との違いは4箇所だけです — `model_selection.gateway`、各processの `OPENROUTER_BASE_URL`、各processの `OPENROUTER_API_KEY` の渡し元、`router.llm` の宛先と鍵の名前。URLと鍵の変数名（例では `GATEWAY_API_KEY`）は実環境のものへ置き換えてください。
 ゲートウェイの一覧が取れない回は選択を行わず、既存の復旧へ戻ります。接頭辞なしの呼び出しへは切り替えません。
