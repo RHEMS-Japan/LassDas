@@ -457,7 +457,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				// runtime's hands on its way to stopped.
 				stopping = !answered
 				if answered {
-					resumeTurn(ctx, cfg, issue, directory, creditKnown && creditLow, say)
+					resumeTurn(ctx, cfg, issue, directory, len(state.History), creditKnown && creditLow, say)
 				}
 			}
 			if !stopping {
