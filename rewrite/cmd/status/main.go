@@ -864,7 +864,7 @@ func (j *job) derive(now time.Time) {
 		// pending. The card says which, and names the failure it retries.
 		if state.Recovering {
 			prefix := "retrying after a failure; "
-			if n := len(state.History); n > 0 && strings.HasPrefix(state.History[n-1].Error, "The process stopped while this action was pending") {
+			if n := len(state.History); n > 0 && state.History[n-1].Speaker == "runtime" && state.History[n-1].Interrupted {
 				prefix = "taking up an interrupted step; "
 			} else {
 				// The latest launch is one role's process records behind the
@@ -1001,8 +1001,7 @@ func (j *job) derive(now time.Time) {
 			// The runtime's own failure (a router it could not reach) needs a
 			// person; its note that a stopped action is being taken up again
 			// after a restart is the run going on, not a call for attention.
-			if record.Speaker == "runtime" && record.Error != "" && !record.Interrupted && len(j.Live) == 0 &&
-				!strings.HasPrefix(record.Error, "The process stopped while this action was pending") {
+			if record.Speaker == "runtime" && record.Error != "" && !record.Interrupted && len(j.Live) == 0 {
 				j.Lane, j.Attention = "attention", record.Error
 			}
 		}
