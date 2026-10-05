@@ -6,8 +6,13 @@ in one repository, takes each matching new issue as a request, works on a
 checkout of one delivery repository, merges the
 result into that repository's integration branch (or opens the pull request
 and leaves the merge to a person, [section 4](#leaving-the-merge-to-a-person)),
-and reports back on the issue. You need this directory, `rewrite/` and
-`docs/DISTRIBUTION.json`; nothing else.
+and reports back on the issue. Use the source checkout for the commit the
+published image was built from (`engine_sha` in `docs/DISTRIBUTION.json`).
+The guide uses this directory and `rewrite/`, and refers to
+`deploy/pod/Dockerfile` for image contents and the Go version. Using the
+published image does not require rebuilding it. Building your own image
+requires the whole source checkout and the build inputs named by that
+Dockerfile, not just these template files.
 
 Read [README.md](README.md) in this directory first. It separates what has
 been measured from what is only proposed. The engine itself is described in
@@ -17,11 +22,14 @@ installation", it means one consumer's instance that has run from these
 templates since September 2026. What happened there is told without its
 names; it cannot be checked from this repository.
 
-**What it does not promise.** A request that reaches "delivered" has had its
-change merged, the configured checks pass on the merged branch, and a report
-posted; with the merge left to a person, its pull request is open instead and
-the checks passed on the pull request's head. That is not proof that the
-request was understood correctly. Read the change.
+**What it does not promise.** The configured `delivered` tracker status is
+the final workflow turn, not proof of a merge or production deployment. A
+normal changed delivery is checked on the merged branch, or on the pull
+request's head when merging is left to a person. There are also endings
+without a change, after a person closes a pull request, or after they change
+its branch. Read the final report and delivery record to distinguish them;
+the status alone does not say what arrived. Even a checked change is not
+proof that the request was understood correctly.
 
 ## Contents
 
@@ -269,13 +277,18 @@ means what; a turn you leave out is left alone.
 | --- | --- |
 | `processing` | the request is accepted, and while the engine works on it |
 | `awaiting_requester` | a question waits for the requester's reply |
-| `delivered` | the change is merged and the report is posted; with the merge left to a person, the pull request is open and the report is posted ([section 4](#leaving-the-merge-to-a-person)) |
+| `delivered` | the workflow ends after the report is confirmed; its actual delivery may be a merge, an open PR, or an ending without a new delivery ([section 4](#leaving-the-merge-to-a-person)) |
 | `stopped` | the requester posted a stop |
 
 Backlog's built-in Open and Resolved statuses have the ids 1 and 3
 (rewrite/README.md). For the turns that need their own name, add custom
 statuses to the project if your space allows them, for example "Automation
 running" and "Waiting for the requester".
+
+If delivery stops at a PR, map `delivered` to a status such as "PR ready for
+review", or omit that turn. Do not copy Resolved merely because its id is 3.
+No status name substitutes for the final report when the request ended
+without a delivery. GitHub stage labels have the same limitation.
 
 `intake.category_on_accept` adds one category to every accepted issue, so the
 board can filter them. Create the category in the project first.
@@ -537,9 +550,12 @@ workflow, so do not substitute that whole file for the ordered configuration.
 Run this from the repository's root, with your values in place of the
 `<...>` parts (none of them may contain `#` or `&`). `CONFIG` is where your
 copy lives: an absolute path outside any repository, used again below.
+Do not run it until the project id is known. If it is not known yet, keep the
+example unchanged and finish section 2 first; an unquoted `<project-id>` is
+not a JSON number and makes an invalid file, not a draft the engine can use.
 
 ```sh
-CONFIG=<absolute path outside the repository>/operator.json
+CONFIG='<absolute path outside the repository>/operator.json'
 sed -e 's#https://tracker.example.invalid/api/v2#https://<space>.backlog.com/api/v2#' \
     -e 's#"project_id": 0,#"project_id": <project-id>,#' \
     -e 's#REPLACE_WITH_RFC3339_ACCEPTANCE_START#2100-01-01T00:00:00Z#' \
@@ -626,7 +642,48 @@ project's own knowledge is written (a path in the repository such as
 must not touch. Keep the rest of the paragraph; it tells every role how
 progress is decided.
 
+For long guidance, edit a UTF-8 text file rather than escaping quotes and
+newlines inside JSON by hand. This command replaces the example's first
+sentence and preserves its shared instructions, writing a **new** file:
+
+```sh
+python3 - "$CONFIG" '<new configuration path>' '<project guidance text file>' <<'PY'
+# setup-guidance-edit
+import json, sys
+from pathlib import Path
+source, target, guidance_file = map(Path, sys.argv[1:])
+config = json.loads(source.read_text(encoding="utf-8"))
+guidance = guidance_file.read_text(encoding="utf-8").strip()
+first, separator, shared = config["instructions"].partition(". ")
+if not guidance:
+    sys.exit("project guidance is empty; no configuration written")
+if not first.startswith("Operator setup is incomplete:") or not separator or not shared:
+    sys.exit("instructions are already customized or the example changed; edit the existing guidance deliberately")
+config["instructions"] = guidance + "\n\n" + shared
+with target.open("x", encoding="utf-8") as output:
+    json.dump(config, output, ensure_ascii=False, indent=2)
+    output.write("\n")
+PY
+```
+
+Read the result, set `CONFIG` to that new path, and run both checks below.
+The source file is untouched, an existing target is never overwritten, and
+the command deliberately refuses to replace already customized guidance.
+Neither file should contain credential values.
+
 ### Check that no example value is left
+
+First check JSON syntax. This prints the line and column of malformed JSON
+without starting the engine (for example an unquoted numeric placeholder, a
+missing comma or a literal newline inside a quoted string):
+
+```sh
+python3 -m json.tool "$CONFIG" > /dev/null
+```
+
+Exit 0 only means readable JSON; it does not check project ids, endpoints,
+permissions, duplicate keys or the meaning of the workflow. Then use the
+engine check below for its own configuration rules.
 
 The engine reads the configuration strictly and, before it does anything,
 refuses what it can tell is wrong, saying where: a key it does not know, in
@@ -733,7 +790,7 @@ settings are common, and user IDs mean numeric GitHub account IDs.
   "announce": true,
   "declare_models": true,
   "status_page": "https://<status-host>/jobs/",
-  "statuses": {"processing": <processing-status-id>, "awaiting_requester": <awaiting-status-id>, "delivered": 3, "stopped": 1},
+  "statuses": {"processing": <processing-status-id>, "awaiting_requester": <awaiting-status-id>, "delivered": <completion-status-id>, "stopped": <stopped-status-id>},
   "category_on_accept": <accepted-category-id>,
   "assign": true,
   "stop_user_ids": [<operator-user-id>]
@@ -741,7 +798,7 @@ settings are common, and user IDs mean numeric GitHub account IDs.
 ```
 
 (merged into the existing `intake` object, with your own ids from section 2
-in place of each `<...>`; 3 and 1 are Backlog's built-in Resolved and Open.
+in place of each `<...>`; omit any status turn you do not want to change.
 A `<...>` left in place is found by the check at the end of
 [Check that no example value is left](#check-that-no-example-value-is-left).)
 
@@ -1099,6 +1156,30 @@ Copy each `*.example` in this directory, drop the `.example`, and replace
 every `<placeholder>`. Keep the copies outside this repository: they name your
 repository and your cluster.
 
+### Keep object names and references together
+
+Choose one `<consumer>` prefix and one `<namespace>` for the whole set. The
+suffixes below are relationships, not independent names to guess:
+
+| Object | References that must agree |
+| --- | --- |
+| StatefulSet `<consumer>-ticket-engine` | its Pod template `app` label, its `matchLabels`, and the status Service's selector; its first Pod is `<consumer>-ticket-engine-0` |
+| ConfigMap `<consumer>-ticket-engine-operator` | the StatefulSet's `config` volume; keep the data key `operator.json` and its mount path unchanged |
+| ConfigMap `<consumer>-ticket-engine-operator-scripts` | the StatefulSet's `operator-scripts` volume; keep the script data keys the commands call |
+| ConfigMap `<consumer>-ticket-engine-egress` | the StatefulSet's `network-policy` volume |
+| Secret `<consumer>-ticket-engine` | engine and mirror `secretKeyRef` names; each referenced key must exist |
+| Secret `<consumer>-ticket-engine-status` | status container `secretKeyRef` names; this is not the delivery credential |
+| Service `<consumer>-ticket-engine-status` | optional Ingress backend name, and selector pointing at the Pod's `app` label |
+
+Set `metadata.namespace` consistently on all namespaced objects. A Secret
+and a Service can share a name because they have different kinds. The
+StatefulSet's `serviceName` is not the status Service: the template currently
+names a governing Service it does not create (see the status Service's
+comment); this guide does not rely on per-Pod DNS names. Do not point the
+Ingress at that absent name. If any chosen object already belongs to another
+installation, choose a different prefix; do not overwrite it to make these
+references agree.
+
 ```sh
 NS=<namespace>
 POD=<consumer>-ticket-engine-0
@@ -1139,7 +1220,12 @@ POD=<consumer>-ticket-engine-0
 
 3. **The egress rules.** In your copy of `egress-configmap.yaml.example`,
    `<dns-cluster-ip>` is the address the Pods' `/etc/resolv.conf` names (the
-   file's comment shows how to read it). Then:
+   file's comment shows how to read it). A Service GET is not evidence of
+   what the Pod received: node-local DNS can differ. Reading a Pod's file
+   needs permission to execute a command in that specific Pod, not only
+   read-only API access. Use a Pod its owner has authorized for this check,
+   or ask the runtime operator to supply the observed nameserver address;
+   do not inspect an unrelated workload or guess it. Then:
 
    ```sh
    kubectl -n "$NS" apply -f egress-configmap.yaml
@@ -1273,16 +1359,22 @@ fails the same way.
 ### The status page
 
 ```sh
-kubectl -n "$NS" port-forward "pod/$POD" 9200:9200
+LOCAL_PORT=9201
+kubectl -n "$NS" port-forward "pod/$POD" "$LOCAL_PORT":9200
 ```
 
-Open <http://127.0.0.1:9200/> in a browser. It asks for the user and password
+Choose an unused local port; if 9201 is occupied, choose another and use that
+same number in the browser and health check. Do not stop an unrelated local
+service. Only the left/local port changes; the Pod still listens on 9200.
+Keep the port-forward terminal open and the default local-only binding.
+
+With the example above, open <http://localhost:9201/>. It asks for the user and password
 from the status Secret; without them it answers 401. Signed in, an empty queue
 shows nine counters at 0 (`Queued`, `Running`, `Awaiting answer`,
 `Needs attention`, `Delivered`, `Done without a change`,
 `Done with the pull request open`, `Done, the pull request closed unmerged`,
 `Stopped`), "No request has been accepted into this queue yet.",
-and one column per configured stage. <http://127.0.0.1:9200/healthz> answers
+and one column per configured stage. <http://localhost:9201/healthz> answers
 `ok` without signing in. `/config` shows the configuration as the page read
 it, and `/log` the engine's log. The labels switch to Japanese from the link
 at the top of the page.
