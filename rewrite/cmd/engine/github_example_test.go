@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -70,7 +71,7 @@ func TestUneditedGitHubExampleAndPartialEditsSendNothing(t *testing.T) {
 				if mode == "--watch" {
 					args = append(args, "--run-dir", queue)
 				}
-				if err := run(context.Background(), args, io.Discard, io.Discard); err == nil || calls != 0 {
+				if err := run(exampleCheckContext(t), args, io.Discard, io.Discard); err == nil || errors.Is(err, context.DeadlineExceeded) || calls != 0 {
 					t.Fatalf("unfinished %s configuration: err=%v calls=%d", edit, err, calls)
 				}
 				if _, err := os.Stat(queue); !os.IsNotExist(err) {

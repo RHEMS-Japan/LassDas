@@ -213,7 +213,7 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 	})
 	root := filepath.Join(t.TempDir(), "must-not-be-created")
 	var log bytes.Buffer
-	err := watchRequests(context.Background(), cfg, root, &log)
+	err := watchRequests(exampleCheckContext(t), cfg, root, &log)
 	if err == nil || !strings.Contains(err.Error(), "explicit intake.project_id") {
 		t.Fatalf("unset scope did not stop intake: %v", err)
 	}
