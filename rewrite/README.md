@@ -1152,6 +1152,15 @@ monitor is specific to `--watch`, not the standalone `--request`/`--issue` comma
 rate limits, per-request monitoring resource usage, distributed ownership and
 crash supervision are not production-validated.
 
+Controller pauses are distinct from a person's stop. A later `再開` comment
+from the requester or a currently authorized operator releases a controller
+pause, not a saved stop. Authorization is checked when accepting that resume;
+removing the operator from `intake.stop_user_ids` later does not revoke it or
+turn its comment into an answer to a pending question. New control comments
+still use the current operator list. Each pause and accepted resume has its
+own notice, including the first occurrence: settling an earlier unconfirmed
+notice must not defer that first occurrence to the next poll.
+
 To send a stop report, set `intake.stop_report_role` to an existing configured
 reporting role. An unknown role is rejected before intake. The saved stop holds
 the original work first; then only that role is available to the existing

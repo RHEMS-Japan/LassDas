@@ -172,7 +172,9 @@ func pauseReplyIDs(source tracker.Tracker, directory string, issue sourceIssue, 
 			continue
 		}
 		comment, err := source.ReadComment(pause.Resume.Comment, issue)
-		if err != nil || !comment.OnIssue || comment.ID <= pause.NoticeID || firstInstructionLine(comment.Body) != "再開" || !authorizedPauseComment(comment, issue, operators) {
+		// Authorization was checked when this control instruction was saved.
+		// A later operator-list change does not undo an accepted operation.
+		if err != nil || !comment.OnIssue || comment.ID <= pause.NoticeID || firstInstructionLine(comment.Body) != "再開" {
 			return nil, errPauseRecord
 		}
 		ids = append(ids, comment.ID)
@@ -208,6 +210,11 @@ func pauseReplyIDs(source tracker.Tracker, directory string, issue sourceIssue, 
 // pause used exactly the same words. This describes a condition standing now,
 // not news about an old event, so the queue's kind-start seam does not hide it.
 func (n notices) sayPauseEvent(ctx context.Context, kind, event, words string) (int64, error) {
+	// Establish the kind before timestamping the current condition. Settling
+	// an older pending notice inside say may cross a whole-second boundary.
+	if _, err := kindSince(n.queue, kind, time.Now().UTC()); err != nil {
+		return 0, err
+	}
 	if err := n.say(ctx, kind, words, "", time.Now().UTC(), func(log noticeLog, _ time.Time) bool {
 		for _, record := range log.Notices {
 			if record.Kind == kind && record.Event == event {
@@ -371,7 +378,7 @@ func applyPauseResume(ctx context.Context, cfg config, issue sourceIssue, direct
 	}
 	resume := pause.Resume
 	comment, err := cfg.source().ReadComment(resume.Comment, issue)
-	if err != nil || !comment.OnIssue || comment.ID <= pause.NoticeID || firstInstructionLine(comment.Body) != "再開" || !authorizedPauseComment(comment, issue, cfg.Intake.StopUserIDs) {
+	if err != nil || !comment.OnIssue || comment.ID <= pause.NoticeID || firstInstructionLine(comment.Body) != "再開" {
 		return errPauseRecord
 	}
 	result := chain.Result{Speaker: "requester", Output: comment.Body, FinishedAt: resume.RecordedAt}
