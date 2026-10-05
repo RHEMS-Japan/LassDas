@@ -158,6 +158,109 @@ func TestOverviewListsEveryRequestWithItsPosition(t *testing.T) {
 	}
 }
 
+func TestPausedRequestsShowTheReasonWithoutBecomingDoneOrRunning(t *testing.T) {
+	for _, variant := range []string{"active-limit", "unmeasured-active", "resume intent", "resume saved", "released", "damaged", "unreadable", "history missing", "stopped", "delivered"} {
+		t.Run(variant, func(t *testing.T) {
+			root := fixtureQueue(t)
+			directory := filepath.Join(root, "jobs", "7")
+			write := func(name string, value any) {
+				t.Helper()
+				raw, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(directory, name), raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			at := time.Date(2026, 1, 2, 0, 20, 0, 0, time.UTC)
+			pause := map[string]any{"reason": "active-limit", "at": at, "notice_id": 900}
+			if variant == "unmeasured-active" {
+				pause["reason"] = variant
+			}
+			if variant == "damaged" {
+				pause["reason"] = "unknown reason"
+			}
+			s, err := newServer(root, "", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := *s.loadJob("7", at, false).State
+			if strings.HasPrefix(variant, "resume") || variant == "released" || variant == "history missing" {
+				pause["resume"] = map[string]any{"comment": map[string]any{"id": 901, "content": "再開"},
+					"recorded_at": at, "history_index": len(state.History), "applied": variant != "resume intent"}
+				if variant != "resume intent" && variant != "history missing" {
+					state.History = append(state.History, chain.Result{Speaker: "requester", Output: "再開", FinishedAt: at})
+				}
+			}
+			if variant == "delivered" {
+				state.Done = true
+			}
+			write(filepath.Join("run", "history.json"), state)
+			if variant == "unreadable" {
+				if err := os.Mkdir(filepath.Join(directory, "work-limit.json"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				write("work-limit.json", map[string]any{"version": 1, "pauses": []any{pause}})
+			}
+			if variant == "stopped" {
+				write("stop-request.json", map[string]any{"id": 902, "content": "停止"})
+			}
+			if variant == "released" {
+				write("notices.json", map[string]any{"notices": []any{map[string]any{
+					"kind": "work-resume-accepted", "event": "1", "posted_at": at, "comment_id": 903}}})
+			}
+			j := s.loadJob("7", at.Add(time.Minute), false)
+			switch variant {
+			case "active-limit", "unmeasured-active":
+				if j.Lane != "awaiting" || j.Status != "paused; waiting for an authorized resume instruction" || !strings.Contains(j.Attention, pauseResumeHelp) {
+					t.Fatalf("saved pause shown as something else: %+v", j)
+				}
+				if variant == "unmeasured-active" && !strings.Contains(j.Attention, "reaching the limit was not confirmed") {
+					t.Fatal("an unmeasured interval was shown as a reached limit")
+				}
+				if !strings.Contains(translate("ja", j.Attention), "再開") || !strings.Contains(localize("ja", j.Status), "一時停止中") {
+					t.Fatal("the pause is not explained in the viewer's language")
+				}
+			case "resume intent", "resume saved":
+				if j.Lane != "awaiting" || j.Status != "resume recorded; waiting for the controller to finish releasing the pause" || !strings.Contains(j.Attention, "separate answer") {
+					t.Fatalf("partial release was shown as running: %+v", j)
+				}
+			case "damaged", "unreadable", "history missing":
+				if j.Lane != "attention" || j.Status != "held: the saved pause record is unreadable" {
+					t.Fatalf("damaged pause was shown as runnable: %+v", j)
+				}
+			case "stopped":
+				if j.Lane != "stopped" || j.Attention != "" {
+					t.Fatal("the pause obscured the authorized stop")
+				}
+			case "delivered":
+				if j.Lane != "delivered" {
+					t.Fatal("a completed request became paused")
+				}
+			case "released":
+				if j.Lane != "running" || j.WorkPause != "" {
+					t.Fatal("an acknowledged release still looks held")
+				}
+			}
+			if variant != "delivered" && (j.State.Done || j.Stage != "implement" || j.Trail[len(j.Trail)-1].State == "passed") {
+				t.Fatal("a pause advanced or completed a workflow stage")
+			}
+			if variant == "active-limit" {
+				ts := serve(t, root, "", "", "")
+				for _, path := range []string{"/", "/jobs/7"} {
+					_, body := get(t, ts, path)
+					expectAll(t, body, "paused; waiting for an authorized resume instruction", "The configured active-work limit was reached.", "再開", "停止")
+					if strings.Contains(body, "running implement") {
+						t.Fatal("stale live output labelled a held request as running")
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestRequestPageShowsEverythingOnDisk(t *testing.T) {
 	ts := serve(t, fixtureQueue(t), fixtureConfig(t), "", "")
 	response, body := get(t, ts, "/jobs/7")

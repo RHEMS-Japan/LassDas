@@ -135,3 +135,79 @@ func TestConsumedAnswerIsNotReplacedByEditsOrLaterRepliesAfterRestart(t *testing
 	}
 	assertAnswer()
 }
+
+func TestEveryAnsweredQuestionGetsItsOwnReceiptWithoutWaitingThirtyMinutes(t *testing.T) {
+	cfg := questionConfiguration(t)
+	cfg.Intake.Announce = true
+	root := t.TempDir()
+	var mu sync.Mutex
+	var comments []json.RawMessage
+	var posts []string
+	nextID, questions, reads := int64(700), 0, 0
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Host == "watch-tracker.example" {
+			if strings.HasSuffix(r.URL.Path, "/comments") {
+				if r.Method == http.MethodPost {
+					if err := r.ParseForm(); err != nil {
+						return nil, err
+					}
+					words := r.Form.Get("content")
+					posts = append(posts, words)
+					posted := issueComment(nextID, 900, words)
+					nextID++
+					comments = append(comments, posted)
+					if words == postedQuestion {
+						questions++
+						comments = append(comments, issueComment(nextID, 55, requesterAnswer))
+						nextID++
+					}
+					return selectionReply(r, 201, posted), nil
+				}
+				return selectionReply(r, 200, append([]json.RawMessage{}, comments...)), nil
+			}
+			reads++
+			return selectionReply(r, 200, []any{watchedIssue(51, "Original conditions", "2026-01-03T00:00:00Z")}), nil
+		}
+		var input struct{ State chain.State }
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			return nil, err
+		}
+		answers := 0
+		for _, result := range input.State.History {
+			if result.Speaker == "requester" {
+				answers++
+			}
+		}
+		choice := "ask_requester"
+		if answers == 2 {
+			choice = "done"
+		}
+		return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
+	})
+	log := &lockedLog{}
+	finish := startStopQueue(t, cfg, root, 20*time.Millisecond, log)
+	defer finish()
+	waitFor(t, func() bool { state, err := loadWatchState(root, 51); return err == nil && state.Done })
+	finish()
+	mu.Lock()
+	wantReads := reads + 2
+	mu.Unlock()
+	finish = startStopQueue(t, cfg, root, 20*time.Millisecond, log)
+	defer finish()
+	waitFor(t, func() bool { mu.Lock(); defer mu.Unlock(); return reads >= wantReads })
+	finish()
+	mu.Lock()
+	defer mu.Unlock()
+	receipts := 0
+	for _, text := range posts {
+		if text == resumedNoticeText {
+			receipts++
+		}
+	}
+	if questions != 2 || receipts != 2 {
+		t.Fatalf("each answer needs one receipt, including after restart: questions=%d receipts=%d posts=%q", questions, receipts, posts)
+	}
+	t.Logf("questions=%d receipts=%d after completion and restart, without a thirty-minute wait", questions, receipts)
+}

@@ -209,6 +209,11 @@ func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	for _, record := range log.Notices {
 		notices = append(notices, record.CommentID)
 	}
+	controls, err := pauseReplyIDs(source, directory, issue, cfg.Intake.StopUserIDs, rows)
+	if err != nil {
+		return false, false, err
+	}
+	notices = append(notices, controls...)
 	path := filepath.Join(directory, "question.json")
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
