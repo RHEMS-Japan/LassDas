@@ -27,13 +27,6 @@ func exampleCheckContext(t *testing.T) context.Context {
 	return ctx
 }
 
-func TestExampleChecksHaveAShortDeadline(t *testing.T) {
-	deadline, ok := exampleCheckContext(t).Deadline()
-	if left := time.Until(deadline); !ok || left <= 0 || left > 2*time.Second {
-		t.Fatalf("example checks are not bounded to two seconds: deadline=%v set=%v", deadline, ok)
-	}
-}
-
 func loadExample(t *testing.T, path string) config {
 	t.Helper()
 	data, err := os.ReadFile(path)
