@@ -411,15 +411,16 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 			}
 		}
 	}
-	questionAware, err := questionExecutor(cfg, assigned, *directory, executor)
+	questionAware, questionPosted, err := questionExecutor(cfg, assigned, *directory, executor)
 	if err != nil {
 		return err
 	}
 	engine := chain.Chain{
 		Router:   router,
 		Executor: questionAware, Store: store,
-		Workflow: cfg.Workflow,
-		Observe:  observe,
+		Workflow:       cfg.Workflow,
+		Observe:        observe,
+		QuestionPosted: questionPosted,
 	}
 	if cfg.Intake != nil {
 		engine.WaitAfter = cfg.Intake.QuestionRole

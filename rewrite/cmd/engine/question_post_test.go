@@ -43,6 +43,10 @@ func TestQuestionPostWorker(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if os.Getenv("QUESTION_SKIP_POST") == "1" {
+		fmt.Println("The requested feature already exists; no comment posted.")
+		return
+	}
 	client, err := tracker.CertificateClient(os.Getenv("TASK_TRACKER_CERT"))
 	if err != nil {
 		t.Fatal(err)
@@ -53,6 +57,138 @@ func TestQuestionPostWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Println("The question was posted.")
+}
+
+func TestQuestionWaitRequiresAnActualPost(t *testing.T) {
+	for _, mode := range []string{"nothing-posted", "question-posted", "tracker-unreadable"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := questionConfiguration(t)
+			if mode != "question-posted" {
+				cfg.Roles[0].Processes[0].Env["QUESTION_SKIP_POST"] = "1"
+			}
+			root := t.TempDir()
+			n := requestNotices(cfg, sourceIssue{ID: 51, Key: "EXAMPLE-51"}, filepath.Join(root, "jobs", "51"))
+			if err := os.MkdirAll(n.directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := n.save(noticeLog{Notices: []noticeRecord{{Kind: "declare:ask_requester", Text: postedQuestion, CommentID: 703, Predates: true}}}); err != nil {
+				t.Fatal(err)
+			}
+			var mu sync.Mutex
+			blocked := mode == "tracker-unreadable"
+			rows := []json.RawMessage{issueComment(700, 900, "The question role is starting."), issueComment(701, 900, "")}
+			routedAfterQuestion := false
+			betweenQuestions := false
+			transport := http.DefaultTransport
+			useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+				if r.URL.Host != "watch-tracker.example" && r.URL.Host != "watch-model.example" {
+					return transport.RoundTrip(r)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if r.URL.Host == "watch-tracker.example" {
+					if strings.HasSuffix(r.URL.Path, "/comments") {
+						if r.Method == http.MethodPost {
+							rows = append(rows, issueComment(702, 900, postedQuestion))
+							return selectionReply(r, 201, rows[len(rows)-1]), nil
+						}
+						if blocked && askedTimes(t, root) > 0 {
+							return selectionReply(r, 503, map[string]string{"message": "tracker temporarily unavailable"}), nil
+						}
+						visible := append([]json.RawMessage{}, rows...)
+						if askedTimes(t, root) > 0 {
+							// A controller notice, another person's note and an empty
+							// status change are not this role's question.
+							visible = append(visible, issueComment(703, 900, postedQuestion), issueComment(704, 88, "An unrelated note."), issueComment(705, 900, ""))
+						}
+						if betweenQuestions {
+							visible = append(visible, issueComment(710, 900, "Another role's report between the two question launches."))
+						}
+						return selectionReply(r, 200, visible), nil
+					}
+					if strings.HasSuffix(r.URL.Path, "/myself") {
+						return selectionReply(r, 200, map[string]any{"id": 900}), nil
+					}
+					issue := watchedIssue(51, "Use the existing feature if present.", "2026-01-03T00:00:00Z")
+					if strings.HasSuffix(r.URL.Path, "/issues") {
+						return selectionReply(r, 200, []any{issue}), nil
+					}
+					return selectionReply(r, 200, issue), nil
+				}
+				var input struct{ State chain.State }
+				if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+					return nil, err
+				}
+				choice := "ask_requester"
+				questions := 0
+				for _, result := range input.State.History {
+					if result.Role == "ask_requester" {
+						choice = "done"
+						routedAfterQuestion = true
+						questions++
+					}
+				}
+				if mode == "nothing-posted" && questions == 1 {
+					betweenQuestions = true
+					choice = "ask_requester"
+				}
+				return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
+			})
+			log := &lockedLog{}
+			finish := startStopQueue(t, cfg, root, 20*time.Millisecond, log)
+			if mode == "tracker-unreadable" {
+				waitFor(t, func() bool {
+					log.mu.Lock()
+					defer log.mu.Unlock()
+					return strings.Contains(log.text.String(), "work paused while stop instructions are unavailable")
+				})
+				mu.Lock()
+				if routedAfterQuestion {
+					t.Error("an unreadable tracker was taken to mean no question was posted")
+				}
+				blocked = false
+				mu.Unlock()
+			}
+			waitFor(t, func() bool {
+				state, err := loadWatchState(root, 51)
+				if mode == "question-posted" {
+					_, recorded := questionBoundaryAt(t, root)
+					return err == nil && state.Waiting && recorded
+				}
+				return err == nil && state.Done
+			})
+			finish()
+			state, err := loadWatchState(root, 51)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "question-posted" {
+				if after, ok := questionBoundaryAt(t, root); !ok || after != 702 || routedAfterQuestion {
+					t.Fatalf("posted question did not keep its boundary: %d %t routed=%t", after, ok, routedAfterQuestion)
+				}
+				// A successful POST followed by a read that omits that comment
+				// is uncertainty, not proof that the role posted nothing.
+				mu.Lock()
+				rows = nil
+				mu.Unlock()
+				q := questionProcesses{cfg: cfg, key: "EXAMPLE-51", path: filepath.Join(root, "jobs", "51", "run", "question-post.json")}
+				if _, err := q.posted(context.Background()); err == nil {
+					t.Fatal("a stored POST missing from the next read was treated as no question")
+				}
+			} else {
+				found := false
+				for _, result := range state.History {
+					found = found || result.Speaker == "runtime" && strings.Contains(result.Output, "質問役は質問を投稿しなかったので、そのまま進める")
+				}
+				if !state.Done || state.Waiting || !found || !routedAfterQuestion {
+					t.Fatalf("questionless exit did not reach the next decision with its reason: %+v", state)
+				}
+				if _, ok := questionBoundaryAt(t, root); ok {
+					t.Fatal("an invisible question was recorded")
+				}
+			}
+		})
+	}
 }
 
 // The asking process really posts through its scoped client. The tracker and

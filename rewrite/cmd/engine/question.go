@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -39,18 +41,21 @@ func validateQuestionRole(cfg config) error {
 // questionBoundary records the asking role's last successfully stored comment.
 // Later controller notices and requester replies must not advance it.
 type questionBoundary struct {
-	After *int64 `json:"after"`
+	After  *int64 `json:"after"`
+	Before int64  `json:"before,omitempty"`
 }
 
 type questionProcesses struct {
 	processes  chain.Processes
 	role, path string
 	prepare    func(context.Context, chain.Process) (chain.Process, func(), error)
+	cfg        config
+	key        string
 }
 
-func questionExecutor(cfg config, issue, runDirectory string, processes chain.Processes) (chain.Executor, error) {
+func questionExecutor(cfg config, issue, runDirectory string, processes chain.Processes) (chain.Executor, func(context.Context) (bool, error), error) {
 	if cfg.Intake == nil || cfg.Intake.QuestionRole == "" {
-		return processes, nil
+		return processes, nil, nil
 	}
 	path := filepath.Join(runDirectory, "question-post.json")
 	var mu sync.Mutex
@@ -68,26 +73,49 @@ func questionExecutor(cfg config, issue, runDirectory string, processes chain.Pr
 		if boundary.After != nil && *boundary.After >= id {
 			return nil
 		}
-		data, err = json.Marshal(questionBoundary{After: &id})
+		boundary.After = &id
+		data, err = json.Marshal(boundary)
 		if err != nil {
 			return err
 		}
 		return writeRuntimeFile(path, data)
 	}))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return questionProcesses{processes: processes, role: cfg.Intake.QuestionRole, path: path, prepare: prepare}, nil
+	q := questionProcesses{processes: processes, role: cfg.Intake.QuestionRole, path: path, prepare: prepare, cfg: cfg, key: issue}
+	return q, q.posted, nil
 }
 
 func (q questionProcesses) Execute(ctx context.Context, assignment chain.Assignment, state chain.State) []chain.Result {
 	processes := q.processes
 	if assignment.Role == q.role {
-		// Keep a receipt across retries of this question. Starting the record
-		// before the child also distinguishes a missing receipt from old runs.
+		// Retain an uncertain POST across recovery of this same launch, but
+		// start a new boundary when routing chooses another question. Posts
+		// by other roles between questions are not this launch's question.
 		_, err := os.Stat(q.path)
-		if errors.Is(err, os.ErrNotExist) {
-			err = writeRuntimeFile(q.path, []byte(`{"after":null}`))
+		fresh := state.Step != q.role || !state.Recovering
+		if errors.Is(err, os.ErrNotExist) || err == nil && fresh {
+			var rows []json.RawMessage
+			rows, err = q.cfg.source().Comments(ctx, sourceIssue{Key: q.key})
+			boundary := questionBoundary{}
+			for _, raw := range rows {
+				var id int64
+				id, _, err = q.cfg.source().CommentText(raw)
+				if err != nil {
+					break
+				}
+				if id > boundary.Before {
+					boundary.Before = id
+				}
+			}
+			if err == nil {
+				var data []byte
+				data, err = json.Marshal(boundary)
+				if err == nil {
+					err = writeRuntimeFile(q.path, data)
+				}
+			}
 		}
 		if err != nil {
 			return []chain.Result{{Role: assignment.Role, Speaker: "runtime", Error: "Recording question submission: " + err.Error(), FinishedAt: time.Now().UTC()}}
@@ -95,6 +123,96 @@ func (q questionProcesses) Execute(ctx context.Context, assignment chain.Assignm
 		processes.Prepare = q.prepare
 	}
 	return processes.Execute(ctx, assignment, state)
+}
+
+func (q questionProcesses) posted(ctx context.Context) (bool, error) {
+	source := q.cfg.source()
+	directory := filepath.Dir(filepath.Dir(q.path))
+	raw, err := os.ReadFile(filepath.Join(directory, "issue.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		raw, err = source.Forward(ctx, http.MethodGet, "/issues/"+url.PathEscape(q.key), nil, nil, http.StatusOK)
+	}
+	if err != nil {
+		return false, err
+	}
+	issue, err := source.ReadIssue(raw)
+	if err != nil {
+		return false, err
+	}
+	if issue.Key != q.key {
+		return false, errors.New("the question belongs to a different issue")
+	}
+	rows, err := source.Comments(ctx, issue)
+	if err != nil {
+		return false, err
+	}
+	raw, err = os.ReadFile(q.path)
+	if err != nil {
+		return false, err
+	}
+	var boundary questionBoundary
+	if err := json.Unmarshal(raw, &boundary); err != nil || boundary.Before < 0 || boundary.After != nil && *boundary.After <= 0 {
+		return false, errors.New("the question's launch boundary is unreadable")
+	}
+	n := requestNotices(q.cfg, issue, directory)
+	log, err := n.load()
+	if err != nil {
+		return false, err
+	}
+	var candidates []tracker.Comment
+	receiptSeen := boundary.After == nil
+	for _, raw := range rows {
+		comment, err := source.ReadComment(raw, issue)
+		if err != nil || !comment.OnIssue {
+			return false, errors.New("issue comments could not be read for the assigned issue")
+		}
+		knownPost := boundary.After != nil && comment.ID == *boundary.After
+		receiptSeen = receiptSeen || knownPost
+		if comment.ID <= boundary.Before || strings.TrimSpace(comment.Body) == "" {
+			continue
+		}
+		notice := false
+		for _, record := range log.Notices {
+			// Once a notice has its id, identical words in another post do
+			// not make it that notice. An own POST receipt also resolves that.
+			unconfirmed := record.CommentID == 0 && !record.Predates
+			notice = notice || comment.ID == record.CommentID || unconfirmed && !knownPost && comment.Body == record.Text
+		}
+		if !notice {
+			candidates = append(candidates, comment)
+		}
+	}
+	if !receiptSeen {
+		return false, errors.New("the submitted question is not visible in the comment read; waiting to confirm it")
+	}
+	if len(candidates) == 0 {
+		return false, nil
+	}
+	// The scoped POST receipt already identifies the engine's own post.
+	// Without one, a lost response is resolved from native account metadata.
+	for _, comment := range candidates {
+		if boundary.After != nil && comment.ID == *boundary.After {
+			return true, nil
+		}
+	}
+	me, err := source.Myself(ctx)
+	if err != nil {
+		return false, err
+	}
+	if me.ID <= 0 {
+		return false, errors.New("the engine's tracker account is unavailable")
+	}
+	for i := len(candidates) - 1; i >= 0; i-- {
+		if candidates[i].Author.ID == me.ID {
+			boundary.After = &candidates[i].ID
+			data, err := json.Marshal(boundary)
+			if err != nil {
+				return false, err
+			}
+			return true, writeRuntimeFile(q.path, data)
+		}
+	}
+	return false, nil
 }
 
 func latestComment(source tracker.Tracker, rows []json.RawMessage, issue sourceIssue) (int64, error) {

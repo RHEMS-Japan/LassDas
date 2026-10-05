@@ -462,11 +462,19 @@ request at a person.
 }
 ```
 
-`intake.question_role` names the configured role whose successful run waits for
-a person. It must name an existing role with a comment-capable process, which
+`intake.question_role` names the configured role that can ask a person. It
+must name an existing role with a comment-capable process, which
 is checked before any work is accepted. Without the setting nothing waits.
 
-A successful run of that role holds the request. The run history records that
+A successful run holds the request only when a nonempty comment was actually
+posted by the engine account after that question launch began. Controller
+announcements and empty status-change comments do not count. If the role
+posted nothing, the history says so and the router chooses the next role;
+the requester is not assigned an invisible question. An unreadable tracker
+does not establish that nothing was posted: work stays held, and the existing
+control-channel retry and pause rules apply until the read succeeds.
+
+For a posted question, the run history records that
 it is waiting, and the collector records in `queue/jobs/<id>/question.json` how
 far that issue's comments had gone at the moment of the question. The request
 is then skipped until the issue's creator, or an operator listed in
