@@ -93,11 +93,22 @@ round, with a model launch each time, until someone fixes the cause or the
 requester posts a stop ([section 9](#9-stopping-a-request)).
 
 In this example, verification, review and delivery failures return to `elicit`.
-It reads the actual failure: an ordinary repair goes to `work`, while a newly
-discovered requester-only scope choice goes through `ask_requester` with concrete
-alternatives. A reply never changes filesystem, delivery or credential permissions.
+It reads the actual failure: an ordinary repair or an unknown cause goes to
+`work` to investigate and check. After handoff, only a newly required expansion
+of authority that the requester alone can approve goes through `ask_requester`
+with concrete alternatives. The entrance rule to ask when requirements remain
+uncertain does not apply to recovery. A reply never changes filesystem, delivery
+or credential permissions.
 If a chosen alternative needs wider access, the operator must update that setting;
 otherwise the roles must use an agreed alternative inside the existing scope.
+When the runtime supports active-work limits, set positive
+`intake.max_active_minutes` and `intake.max_hard_exits` to bound attempts while
+operator changes are pending. The existing limit notice reports a pause, not
+completion; read the required permission change in the question and run record,
+fix the configuration, then have an authorized user post `再開` on its own
+first line. This grants another interval with the same saved cap; changing the
+configuration does not change an already accepted request's cap. Without a
+positive active-work limit, repeated attempts have no bound.
 Each failure adds a requirements launch and a routing decision, including ordinary
 repairs. A model process that exits with an error still retries its own stage.
 Existing installations need to update their four `on_failure` values and shared
@@ -989,7 +1000,7 @@ the engine's notice that no stage has completed, after
    the model that gave the verdict.
 2. The requester stops the request (`停止`, [section 9](#9-stopping-a-request)).
 3. You fix the cause (the configuration's ConfigMap or the Secret, section 6)
-   and restart the Pod. The runtime records the stopped review as a failure
+   and restart the Pod. The runtime records the stopped review as an interruption
    and goes on at the review's `on_failure` stage, which is `elicit` here: the
    requirements are reconsidered, then the work and review run again. The requester is told that the
    request carries on after the restart.

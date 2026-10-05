@@ -911,17 +911,28 @@ the run to its first stage. Other stage transitions use the configured order.
 
 The shipped example sends failed verification, review and delivery commands to
 `elicit`, not straight to `work`. Requirements are reconsidered using the actual
-failure and earlier answers. A repair inside the agreed scope continues to work;
-a new choice only the requester can make can go through the existing question
-role, with concrete alternatives. This also covers a worker reporting that the
+failure and earlier answers. A repair or an unknown failure inside the agreed
+scope continues to work: investigate and check the cause, recording choices.
+After handoff, only evidence that a newly required expansion of authority cannot
+be decided by the roles may lead to the existing question role, with concrete
+alternatives. The entrance rule to ask about an uncertain requirement does not
+apply to recovery. This also covers a worker reporting that the
 allowed paths cannot satisfy the request, followed by a failed check. Nothing
 parses that report to decide progression. A process error in a model stage still
 retries that stage; it is not this command-failure path.
 
 A reply does not widen filesystem, delivery or credential permissions. A wider
 choice needs the operator to update the relevant configuration; an in-scope
-alternative can proceed without that. Do not silently reduce the request. Each
-failed command now costs another requirements launch and routing decision, even
+alternative can proceed without that. Do not silently reduce the request.
+Where active-work limits are available, set a positive `intake.max_active_minutes`
+and `intake.max_hard_exits` to bound retries while an operator changes permissions.
+Reaching the limit pauses the request and posts the existing pause notice; it is
+not completion. The question comment and run record identify the configuration
+change needed. After the operator resolves it, an authorized user can post
+`再開` on its own first line to grant another interval with the same saved cap.
+A requester reply alone never updates permissions. Without a positive
+active-work limit, this recovery path has no bound on repeated attempts.
+Each failed command now costs another requirements launch and routing decision, even
 for a simple repair. Existing configurations retain their selected `on_failure`
 targets until the operator edits them. `confirm_report` still returns to `report`.
 
