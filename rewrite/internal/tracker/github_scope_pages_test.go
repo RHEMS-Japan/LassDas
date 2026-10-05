@@ -234,3 +234,46 @@ func TestGitHubRoleListReadsEachUpstreamPageOnlyOncePerEnumeration(t *testing.T)
 		})
 	}
 }
+
+// Reading the whole list must release the cached enumeration so a later
+// read from the last seen ID observes a requester's new reply.
+func TestGitHubReplyAfterCompleteEnumerationIsSeen(t *testing.T) {
+	for _, total := range []int64{150, 200} {
+		t.Run(fmt.Sprint(total), func(t *testing.T) {
+			var count atomic.Int64
+			count.Store(total)
+			g, _ := githubFixture(t, func(base string, _ int32, w http.ResponseWriter, r *http.Request) {
+				page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+				page = max(page, 1)
+				rows := []any{}
+				for id := int64(page-1)*100 + 1; id <= min(int64(page)*100, count.Load()); id++ {
+					rows = append(rows, githubScopeComment(base, id, fmt.Sprintf("comment %d", id)))
+				}
+				json.NewEncoder(w).Encode(rows)
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			access, err := ServeIssue(ctx, g, "7", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer access.Close()
+			client, err := CertificateClient(access.Certificate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.CloseIdleConnections()
+			t.Setenv("PROBE_WORKER", access.Key)
+			worker := Backlog{BaseURL: access.URL, KeyEnv: "PROBE_WORKER", Client: client}
+			rows, err := worker.Comments(ctx, "7", 0)
+			if err != nil || int64(len(rows)) != total {
+				t.Fatalf("first enumeration: rows=%d err=%v", len(rows), err)
+			}
+			count.Add(1) // the requester replies after the role read everything
+			rows, err = worker.Comments(ctx, "7", total)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("the reply after the last seen comment was not returned: rows=%d err=%v", len(rows), err)
+			}
+		})
+	}
+}
