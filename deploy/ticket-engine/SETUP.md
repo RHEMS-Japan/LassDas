@@ -549,9 +549,10 @@ The engine reads the configuration strictly and, before it does anything,
 refuses what it can tell is wrong, saying where: a key it does not know, in
 the wrong letter case or written twice; a stage whose kind does not match its
 role; a missing project or start time; the example's paragraph still in
-`instructions`; a URL whose host is still under `example.invalid`; a GitHub
-repository component still beginning with `REPLACE_WITH_`; a recognizable
-token value in `github.key_env`. The latter is never echoed. `--check`
+`instructions`; a URL whose host is still under `example.invalid`; a
+`REPLACE_WITH_` component of `github.repository`; a token prefix
+(`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`) in
+`github.key_env`, which must name an environment variable, not its value. `--check`
 runs those same checks without starting anything, contacting anything or
 creating any file. Run it from the repository's root, on a checkout of the
 commit your image was built from (`engine_sha` in `docs/DISTRIBUTION.json`),
