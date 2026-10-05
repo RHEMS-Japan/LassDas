@@ -128,7 +128,7 @@ func TestIssueReachesProcessUnchangedAndResumesWithoutRepeatingWork(t *testing.T
 	}
 }
 
-func TestHistoryBindingUsesTheAcquiredRunAndKeepsOmittedAnswersReadable(t *testing.T) {
+func TestHistoryBindingUsesTheAcquiredRunAndKeepsEarlierRecordsReadable(t *testing.T) {
 	directory := t.TempDir()
 	t.Setenv("TASK_HISTORY", filepath.Join(directory, "another-request", "history.json"))
 	for _, label := range []string{"first", "second"} {
@@ -188,7 +188,7 @@ func TestHistoryBindingUsesTheAcquiredRunAndKeepsOmittedAnswersReadable(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(prompt), "Accepted answer") || !strings.Contains(string(prompt), "7 earlier records") || !strings.Contains(string(prompt), filepath.Join(store.Dir, "history.json")) {
+			if strings.Contains(string(prompt), "Observation 0\n") || !strings.Contains(string(prompt), "7 earlier records") || !strings.Contains(string(prompt), filepath.Join(store.Dir, "history.json")) {
 				t.Fatalf("bounded prompt or usable source reference missing: %s", prompt)
 			}
 		})
