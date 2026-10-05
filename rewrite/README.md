@@ -826,18 +826,25 @@ replace a question answer with a recorded role. Selection uses recorded
 role/process identities and configured stage kinds, not words such as
 "fixed" or "approved". For connected workflows without stage kinds, the
 latest report of each role process is included instead. These selected
-reports are carried in full, separately from the normal 12,000-character
+reports are carried separately from the normal 12,000-character
 head and 6,000-character tail of stdin. Older reports remain available to
 native roles; the fixed review does not automatically receive every old
 answer or determine which old answer is semantically relevant.
 
-The selected original request and reports have a combined 48,000-character
-budget. The checkpoint read has a separate 64 MiB limit. Missing, malformed
-or oversized required material uses the existing review-unavailable handling
-below: by default the review holds without a verdict, while the operator's
-explicit `REVIEW_UNAVAILABLE=pass` still says NOT REVIEWED. It is never
-silently shortened and represented as the full handoff. This cannot restore
-output the runtime did not retain in the checkpoint in the first place.
+`REVIEW_MEMORY_CHARACTERS` sets a positive character budget for the selected
+original request and report bodies (default 48000, excluding headings and
+omission notices). Within it, all selected bodies are carried in full. Above
+it, each body receives an equal share; longer bodies retain their beginning
+and end with the omitted character range explicitly named. Short bodies stay
+unchanged. The review still asks the model: size alone neither holds the run
+nor produces NOT REVIEWED. This is not a claim that omitted material was
+reviewed; increase the budget for models able to accept more context.
+
+The checkpoint read has a separate 64 MiB limit. Missing, malformed or larger
+checkpoint files still use the existing review-unavailable handling below:
+by default the review holds without a verdict, while the operator's explicit
+`REVIEW_UNAVAILABLE=pass` says NOT REVIEWED. Complete material remains in the
+checkpoint. This cannot restore output the runtime did not retain there.
 
 The existing `TASK_HOME/review.md` also supplies its last 12,000 characters,
 with a notice when older text was omitted. Its headings are ordinary prose,

@@ -1267,28 +1267,63 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("only its last 12000 characters, earlier text omitted", sent)
         self.assertLess(len(sent), 40000)
 
-    def test_saved_memory_large_response_is_unavailable_not_silently_reviewed(self):
-        service = ModelStandIn([{"verdict": (False, "must not be requested")}])
+    def test_saved_memory_over_budget_is_reviewed_with_explicit_omissions(self):
+        answer = "Use only release/ with three entries."
+        history = [{"role": "elicit", "speaker": "planner", "output": "Requirements start.\n" + "r" * 9000 + "\nRequirements end."},
+                   {"role": "ask", "speaker": "questioner", "output": "Which existing destination is approved?"},
+                   {"role": "ask", "speaker": "requester", "output": answer},
+                   {"role": "work", "speaker": "worker", "output": "Work start.\n" + "w" * 9000 + "\nWork end."},
+                   {"role": "inspect-change", "speaker": "reviewer", "output": "Prior finding.\n" + "f" * 5000}]
+        stages = [{"name": "elicit", "kind": "model"}, {"name": "work", "kind": "model"},
+                  {"name": "inspect-change", "kind": "command"}]
+        path = self.saved_memory(history, stages)
+        state = json.loads(path.read_text())
+        original = "Request start.\n" + "q" * 26000 + "\nRequest end."
+        state["request"] = original
+        path.write_text(json.dumps(state), encoding="utf-8")
+        for budget in (None, "80000"):
+            with self.subTest(budget=budget):
+                service = ModelStandIn([{"verdict": (False, "review actually performed")}])
+                self.addCleanup(service.close)
+                options = {} if budget is None else {"REVIEW_MEMORY_CHARACTERS": budget}
+                process, stdout, stderr = self.start_review(service, TASK_HISTORY=str(path), **options)
+                try:
+                    try:
+                        status = process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.fail("review held without asking the model: " + stderr.read_text()[-600:])
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+                self.assertEqual(status, 0, stdout.read_text() + stderr.read_text())
+                self.assertIn("PASSED", stdout.read_text())
+                self.assertNotIn("NOT REVIEWED", stdout.read_text())
+                self.assertEqual(len(service.requests), 1)
+                sent = service.requests[0]["body"]["messages"][1]["content"]
+                for words in (answer, "Request start.", "Request end.", "Requirements start.",
+                              "Requirements end.", "Work start.", "Work end.", "Prior finding."):
+                    self.assertIn(words, sent)
+                if budget is None:
+                    self.assertIn("omitted from this body", sent)
+                    self.assertFalse(original in sent, "large body was not bounded")
+                else:
+                    self.assertNotIn("omitted from this body", sent)
+                    self.assertTrue(original in sent, "configured larger budget was ignored")
+                print("review memory: budget=%s model_requests=1 verdict=PASSED omissions=%s" %
+                      (budget or "default", budget is None))
+
+    def test_saved_memory_includes_the_previous_command_review(self):
+        service = ModelStandIn([{"verdict": (False, "checked again")}])
         self.addCleanup(service.close)
-        path = self.saved_memory([{"role": "maker", "speaker": "worker", "output": "a" * 48001}])
-        process, stdout, stderr = self.start_review(service, TASK_HISTORY=str(path))
-        deadline = time.monotonic() + 5
-        try:
-            while "48000-character review memory limit" not in stderr.read_text() and process.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.02)
-            self.assertIsNone(process.poll(), "oversized handoff finished instead of holding without a verdict")
-            self.assertEqual(service.requests, [])
-            self.assertIn("48000-character review memory limit", stderr.read_text())
-            self.assertNotIn("PASSED", stdout.read_text())
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=5)
-        # The operator's existing opt-in remains exactly that, not a new gate.
-        result = self.run_review(service, TASK_HISTORY=str(path), REVIEW_UNAVAILABLE="pass")
+        finding = "Previous command review required preserving the chosen destination."
+        path = self.saved_memory([
+            {"role": "work", "speaker": "builder", "output": "Current repair."},
+            {"role": "inspect-change", "speaker": "reviewer", "output": finding}],
+            [{"name": "work", "kind": "model"}, {"name": "inspect-change", "kind": "command"}])
+        result = self.run_review(service, TASK_HISTORY=str(path))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("NOT REVIEWED", result.stdout)
-        self.assertEqual(service.requests, [])
+        self.assertIn(finding, service.requests[0]["body"]["messages"][1]["content"])
 
     def test_saved_memory_missing_or_malformed_history_never_reaches_the_model(self):
         service = ModelStandIn([{"verdict": (False, "must not be requested")}])

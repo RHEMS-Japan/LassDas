@@ -78,6 +78,7 @@ Environment (all from the operator, never from a role):
   REVIEW_KEY_ENV          name of the variable holding the credential (default REVIEW_API_KEY)
   REVIEW_TEST_COMMANDS    newline-separated commands run without a shell; their output is shown
   REVIEW_DIFF_PATHS       optional space-separated paths to diff (default: the whole tree)
+  REVIEW_MEMORY_CHARACTERS positive body-character budget for saved review material (default 48000)
   TASK_HOME               the process's own directory, where the send-back counter and the log live
   TASK_HISTORY            runtime-supplied read-only checkpoint, not an operator-selected document
   REVIEW_UNAVAILABLE      pass, in any case: deliver unreviewed work when no verdict can be obtained (default: hold)
@@ -106,7 +107,6 @@ LIMIT = 20000       # characters of diff shown; a longer diff is cut with a visi
 NEW_FILE_LIMIT = 6000
 FINDINGS_LIMIT = 6000  # characters of findings printed, and of a reply kept as written when it gives no verdict
 HEAD, TAIL = 12000, 6000  # the runtime's text: its start (assignment, request, settled requirements) and its end (latest reports)
-MEMORY_LIMIT = 48000  # characters of selected canonical request/reports, never silently shortened
 REVIEW_LOG_LIMIT = 12000  # characters from the existing ordinary log, explicitly a tail
 HISTORY_BYTES = 64 << 20  # local checkpoint read bound, not model context size
 
@@ -416,6 +416,7 @@ def prepare():
              "timeout": number("REVIEW_TIMEOUT_SECONDS", "300", 1), "attempts": number("REVIEW_ATTEMPTS", "3", 1),
              "retry": seconds("REVIEW_RETRY_SECONDS", "5"), "cap": seconds("REVIEW_RETRY_CAP_SECONDS", "300"),
              "hold": seconds("REVIEW_HOLD_SECONDS", "900"),
+             "memory_characters": number("REVIEW_MEMORY_CHARACTERS", "48000", 1),
              "paths": setting("REVIEW_DIFF_PATHS", "").split()}
     try:
         found["tests"] = [line for line in setting("REVIEW_TEST_COMMANDS", "").splitlines() if line.strip()]
@@ -524,7 +525,7 @@ def said_in(message):
     return as_written(content) if isinstance(content, str) else ""
 
 
-def review_memory(state_directory):
+def review_memory(state_directory, key, limit):
     """Read existing sources, not a model-authored summary or resolution schema.
 
     Latest reports are selected by recorded role/process identity and workflow
@@ -572,16 +573,24 @@ def review_memory(state_directory):
                     if history[index]["speaker"] != "runtime":
                         selected.add(index)
                     index -= 1
-            protected = ["Canonical original request:\n" + request]
+            protected = [("Canonical original request", scrub(request, key))]
             for index in sorted(selected):
                 record = history[index]
                 label = json.dumps({"record": index, "role": record["role"], "speaker": record["speaker"],
                                     "finished_at": record.get("finished_at", "")}, ensure_ascii=False)
-                protected.append("Saved report " + label + ":\n" + record.get("output", ""))
-            text = "\n\n".join(protected)
-            if len(text) > MEMORY_LIMIT:
-                raise ValueError("selected request and reports exceed the 48000-character review memory limit; no full handoff was formed")
-            sections.append("Selected canonical reports, kept in full within the review memory limit. "
+                protected.append(("Saved report " + label, scrub(record.get("output", ""), key)))
+            shortened = sum(len(body) for _, body in protected) > limit
+            share = limit // len(protected)
+            displayed = []
+            for label, body in protected:
+                if shortened and len(body) > share:
+                    start = (share + 1) // 2
+                    end = len(body) - (share - start)
+                    body = (body[:start] + "\n[characters %d:%d omitted from this body; complete text remains in TASK_HISTORY]\n"
+                            % (start, end) + body[end:])
+                displayed.append(label + ":\n" + body)
+            text = "\n\n".join(displayed)
+            sections.append("Selected canonical reports, with any omitted body ranges explicitly named. "
                             "These are observations, not proof that a defect was repaired. "
                             "Older reports remain in the checkpoint but are not all included here.\n" + text)
         except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
@@ -759,7 +768,7 @@ def reviewed(stdin_text, unchanged, passing, ran):
     commands printed, for a review that starts again."""
     found = prepare()
     key, state = found["key"], found["state"]
-    found["memory"] = scrub(review_memory(state), key)
+    found["memory"] = scrub(review_memory(state, key, found["memory_characters"]), key)
     counter = state / "review-send-backs"
     try:
         sent_back = int(counter.read_text().strip() or "0") if counter.is_file() else 0
