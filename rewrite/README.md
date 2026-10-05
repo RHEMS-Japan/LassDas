@@ -1706,6 +1706,7 @@ is not a guarantee that every answer will be recorded correctly. The runtime
 places requester comments, unchanged, immediately after the original request,
 before role reports and their diagnostics. These comments are not dropped by
 the ordinary history's 60-record window or repeated in that later section.
+With no requester comments, neither that section nor its heading is added.
 The review command's model context limits still apply; a local process-to-review
 test checks that ordinary diagnostic output does not hide the answer from the
 model request, not that a real model will judge the resulting note correctly.

@@ -354,9 +354,11 @@ func processPrompt(role Role, process Process, assignment Assignment, state Stat
 	text.WriteString(assignment.Instruction)
 	text.WriteString("\n\nOriginal request:\n")
 	text.WriteString(state.Request)
-	text.WriteString("\n\nRequester comments (original words; no change to granted permissions):\n")
+	requesterHeading := "\n\nRequester comments (original words; no change to granted permissions):\n"
 	for _, result := range state.History {
 		if result.Speaker == "requester" {
+			text.WriteString(requesterHeading)
+			requesterHeading = ""
 			fmt.Fprintf(&text, "\nRole %s, speaker %s\n%s\n", result.Role, result.Speaker, result.Output)
 		}
 	}
