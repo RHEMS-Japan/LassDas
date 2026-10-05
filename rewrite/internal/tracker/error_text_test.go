@@ -15,12 +15,16 @@ import (
 
 func TestServiceErrorsAreShortUnicodeTextRedactedBeforeCutting(t *testing.T) {
 	for _, kind := range []string{"github", "backlog"} {
-		for _, sample := range []struct{ name, body string }{
-			{"short", "service temporarily unavailable"},
-			{"boundary", strings.Repeat("x", 200)},
-			{"long", strings.Repeat("x", 4096)},
-			{"unicode", strings.Repeat("日本語🙂", 300)},
-			{"credential across cut", strings.Repeat("x", 193) + githubTestToken + strings.Repeat("終", 400)},
+		for _, sample := range []struct{ name, body, display string }{
+			{"short", "service temporarily unavailable", ""},
+			{"boundary", strings.Repeat("x", 200), ""},
+			{"long", strings.Repeat("x", 4096), ""},
+			{"unicode", strings.Repeat("日本語🙂", 300), ""},
+			{"credential across cut", strings.Repeat("x", 193) + githubTestToken + strings.Repeat("終", 400), ""},
+			{"flag", strings.Repeat("x", 199) + "🇯🇵 remainder", strings.Repeat("x", 199) + "…"},
+			{"family", strings.Repeat("x", 199) + "👩‍👩‍👧‍👦 remainder", strings.Repeat("x", 199) + "…"},
+			{"accent", strings.Repeat("x", 199) + "e\u0301 remainder", strings.Repeat("x", 199) + "…"},
+			{"complete flag", strings.Repeat("x", 198) + "🇯🇵 remainder", strings.Repeat("x", 198) + "🇯🇵…"},
 		} {
 			t.Run(kind+"/"+sample.name, func(t *testing.T) {
 				var err error
@@ -58,11 +62,26 @@ func TestServiceErrorsAreShortUnicodeTextRedactedBeforeCutting(t *testing.T) {
 				if len(runes) > 200 {
 					want = string(runes[:200]) + "…"
 				}
+				if sample.display != "" {
+					want = sample.display
+				}
 				if err.Error() != "tracker returned HTTP 503: "+want || !utf8.ValidString(err.Error()) {
 					t.Fatalf("display did not preserve at most 200 complete redacted characters: %q", err)
 				}
 			})
 		}
+	}
+}
+
+func TestRedirectDisplayDoesNotSplitAGrapheme(t *testing.T) {
+	prefix := "https://moved.example/" + strings.Repeat("x", 199-len("https://moved.example/"))
+	g, calls := githubFixture(t, func(_ string, _ int32, w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", prefix+"👩‍👩‍👧‍👦")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	})
+	_, _, err := g.call(context.Background(), "GET", g.APIURL+"/user", nil, 200, githubItemLimit)
+	if err == nil || calls.Load() != 1 || !strings.Contains(err.Error(), prefix+"…") || strings.Contains(err.Error(), "👩") {
+		t.Fatalf("redirect was followed or split a displayed cluster: %v", err)
 	}
 }
 

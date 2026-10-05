@@ -1,6 +1,10 @@
 package tracker
 
-import "fmt"
+import (
+	"fmt"
+
+	"ticket-runner/internal/textclip"
+)
 
 // trackerError is an answer with a status other than the one expected, kept
 // whole so an adapter can tell one refusal from another.
@@ -15,14 +19,7 @@ func (e *trackerError) Error() string {
 	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, clip(e.Body, 200))
 }
 
-// clip is text cut to its first limit characters, marked where it was cut.
+// clip retains complete graphemes within the code-point budget and marks a cut.
 func clip(text string, limit int) string {
-	count := 0
-	for index := range text {
-		if count == limit {
-			return text[:index] + "…"
-		}
-		count++
-	}
-	return text
+	return textclip.Clip(text, limit)
 }

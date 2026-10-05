@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/textclip"
 	"ticket-runner/internal/tracker"
 )
 
@@ -546,7 +547,7 @@ func modelCreditRemaining(ctx context.Context, cfg config) (*float64, error) {
 		return nil, errors.New(redact(err.Error()))
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("model budget endpoint returned HTTP %d: %s", response.StatusCode, limitRunes(redact(string(body)), 200))
+		return nil, fmt.Errorf("model budget endpoint returned HTTP %d: %s", response.StatusCode, textclip.Clip(strings.TrimSpace(redact(string(body))), 200))
 	}
 	var payload struct {
 		Data *struct {
@@ -722,7 +723,8 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string, run
 
 // noticeDetail renders one failure line for a comment a person will read: the
 // first nonblank line, with every configured credential value removed, cut to
-// 200 characters. Scrubbing happens before the cut so no partial key survives.
+// 200 code points without splitting a grapheme, plus an ellipsis if cut.
+// Scrubbing happens before the cut so no partial key survives.
 // A process that died says only "exit status N" first; its last line, where a
 // harness puts its reason, is added so the comment says why. GitHub receives
 // only this detail as inline code, so diagnostic mentions cannot notify users.
@@ -737,7 +739,7 @@ func noticeDetail(cfg config, text string) string {
 		line = strings.ReplaceAll(line, value, "[credential]")
 		line = strings.ReplaceAll(line, url.QueryEscape(value), "[credential]")
 	}
-	line = limitRunes(line, 200)
+	line = textclip.Clip(strings.TrimSpace(line), 200)
 	if cfg.GitHub == nil || line == "" {
 		return line
 	}

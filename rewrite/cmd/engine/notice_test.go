@@ -767,7 +767,7 @@ func TestBudgetReaderUsesTheConfiguredCredentialAndNeverPrintsIt(t *testing.T) {
 	}
 }
 
-func TestNoticeDetailKeepsOneScrubbedLineWithinTwoHundredCharacters(t *testing.T) {
+func TestNoticeDetailKeepsOneScrubbedLineWithinTwoHundredCharactersAndACutMark(t *testing.T) {
 	cfg := watchConfiguration(t)
 	long := strings.Repeat("あ", 300)
 	detail := noticeDetail(cfg, "\n  synthetic-watch-key failed: "+long+"\nsecond line")
@@ -777,7 +777,7 @@ func TestNoticeDetailKeepsOneScrubbedLineWithinTwoHundredCharacters(t *testing.T
 	if strings.Contains(detail, "second line") {
 		t.Fatalf("more than the first line survived: %q", detail)
 	}
-	if count := utf8.RuneCountInString(detail); count != 200 {
+	if count := utf8.RuneCountInString(detail); count != 201 || !strings.HasSuffix(detail, "…") {
 		t.Fatalf("the detail is %d characters", count)
 	}
 	if !utf8.ValidString(detail) {
