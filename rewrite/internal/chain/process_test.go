@@ -18,6 +18,19 @@ import (
 	"time"
 )
 
+func TestRoleAndRouterInstructionsAllowConfiguredRecoveryQuestions(t *testing.T) {
+	for _, instructions := range []string{routingInstructions, processPrompt(Role{}, Process{}, Assignment{}, State{})} {
+		for _, phrase := range []string{"only when the workflow offers that role", "failed check may return to requirements", "concrete alternatives", "no answer itself widens those permissions", "newly required expansion of authority", "unknown cause", "initial elicitation only"} {
+			if !strings.Contains(instructions, phrase) {
+				t.Errorf("recovery guidance omits %q", phrase)
+			}
+		}
+		if strings.Contains(instructions, "before the work is handed over;") {
+			t.Fatal("shared guidance still forbids recovery questions")
+		}
+	}
+}
+
 func TestLaunchPreparationFailureReleasesAndReturnsAnObservation(t *testing.T) {
 	var attempts, released atomic.Int32
 	process := Process{Name: "worker", Command: []string{"/bin/sh", "-c", `printf '%s' "$LOCAL_KEY"; printf '%s' "$LOCAL_KEY" >&2`}}

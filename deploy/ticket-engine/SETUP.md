@@ -69,8 +69,8 @@ The shipped ordered configuration, `rewrite/examples/operator-stages.json`,
 runs every request through these stages. A stage that runs a command is
 finished only when the command exits 0; a stage that runs a model is finished
 when its model process returns without an error. Two decisions are a model's:
-at the entrance, whether to ask the requester before the work starts, and in
-the review, whether the change goes back to `work`. Beyond those two, nothing
+after requirements, whether to ask the requester (initially or after a failure),
+and in the review, whether the change needs rework. Beyond those two, nothing
 a model writes moves the request: writing "done" or "delivered" changes
 nothing.
 
@@ -80,7 +80,7 @@ nothing.
 | (`ask_requester`) | model | Only when such points are left: posts one comment with them, and the request waits for the requester's reply. |
 | `work` | model | Investigates, changes the checkout and runs the project's checks. |
 | `verify` | command | Your build and test commands, against the changed checkout. |
-| `review` | command | A second model reviews the diff and the test output; a blocking verdict sends the work back to `work`. Without a verdict it neither lets the work through nor sends it back: it waits and asks again ([section 4](#when-the-review-gets-no-verdict)). |
+| `review` | command | A second model reviews the diff and the test output; a blocking verdict sends the work back to `elicit`, then repair or a requester-only question. Without a verdict it neither lets the work through nor sends it back: it waits and asks again ([section 4](#when-the-review-gets-no-verdict)). |
 | `deliver` | command | Commits, brings the ticket branch up to date with the integration branch, pushes `ticket/<ISSUE-KEY>`, opens or reuses one pull request and merges it, or leaves the merge to a person ([section 4](#leaving-the-merge-to-a-person)). |
 | `verify_merged` | command | Fetches the integration branch after the merge, or the pull request's branch when the merge is left to a person, and runs your build and tests on it. |
 | `report` | model | Writes the report and posts it on the issue. |
@@ -91,6 +91,28 @@ A command stage that fails sends the work back to the model stage named in its
 and no failure ending: a command that can never pass keeps the request going
 round, with a model launch each time, until someone fixes the cause or the
 requester posts a stop ([section 9](#9-stopping-a-request)).
+
+In this example, verification, review and delivery failures return to `elicit`.
+It reads the actual failure: an ordinary repair or an unknown cause goes to
+`work` to investigate and check. After handoff, only a newly required expansion
+of authority that the requester alone can approve goes through `ask_requester`
+with concrete alternatives. The entrance rule to ask when requirements remain
+uncertain does not apply to recovery. A reply never changes filesystem, delivery
+or credential permissions.
+If a chosen alternative needs wider access, the operator must update that setting;
+otherwise the roles must use an agreed alternative inside the existing scope.
+When the runtime supports active-work limits, set positive
+`intake.max_active_minutes` and `intake.max_hard_exits` to bound attempts while
+operator changes are pending. The existing limit notice reports a pause, not
+completion; read the required permission change in the question and run record,
+fix the configuration, then have an authorized user post `再開` on its own
+first line. This grants another interval with the same saved cap; changing the
+configuration does not change an already accepted request's cap. Without a
+positive active-work limit, repeated attempts have no bound.
+Each failure adds a requirements launch and a routing decision, including ordinary
+repairs. A model process that exits with an error still retries its own stage.
+Existing installations need to update their four `on_failure` values and shared
+instructions to adopt this behavior. `confirm_report` continues to return to `report`.
 
 ## 1. What you need before starting
 
@@ -440,7 +462,7 @@ date.
 The shipped delivery merges its own pull request through the API right after
 opening it, and it does not wait. That is the only reason the integration
 branch's rules matter here: anything the delivery identity cannot satisfy at
-that moment makes GitHub refuse the merge, the work goes back to `work`, and
+that moment makes GitHub refuse the merge, the work goes back to `elicit`, and
 every later stage runs again, round after round, until the rule changes or
 the requester posts a stop ([section 11](#a-delivery-is-refused-by-a-branch-rule)).
 Check the integration branch for:
@@ -854,10 +876,10 @@ A stage can carry a sentence of yours, posted once when it first begins if
 "stages": [
   {"name": "elicit", "kind": "model"},
   {"name": "work", "kind": "model", "announce": "自動実装を開始しました。"},
-  {"name": "verify", "kind": "command", "on_failure": "work"},
-  {"name": "review", "kind": "command", "on_failure": "work"},
-  {"name": "deliver", "kind": "command", "on_failure": "work", "announce": "納品先へのマージを始めました。マージ後の検証と報告を続けます。"},
-  {"name": "verify_merged", "kind": "command", "on_failure": "work"},
+  {"name": "verify", "kind": "command", "on_failure": "elicit"},
+  {"name": "review", "kind": "command", "on_failure": "elicit"},
+  {"name": "deliver", "kind": "command", "on_failure": "elicit", "announce": "納品先へのマージを始めました。マージ後の検証と報告を続けます。"},
+  {"name": "verify_merged", "kind": "command", "on_failure": "elicit"},
   {"name": "report", "kind": "model"},
   {"name": "confirm_report", "kind": "command", "on_failure": "report"}
 ]
@@ -951,7 +973,7 @@ process's `env`. The example sets the first four:
 | `REVIEW_UNAVAILABLE` | `pass` lets the work through unreviewed when no verdict comes (below); unset, the review waits, and any other value is a mistyped setting |
 | `REVIEW_ATTEMPTS` | with `REVIEW_UNAVAILABLE=pass` only, the requests made before the work is let through unreviewed: 3 unless set |
 
-A blocking verdict sends the work back to `work`, and a verdict that does not
+A blocking verdict sends the work back to `elicit`, and a verdict that does not
 object lets it through to the delivery. Without a verdict the review does
 neither; it waits:
 
@@ -982,9 +1004,9 @@ the engine's notice that no stage has completed, after
    the model that gave the verdict.
 2. The requester stops the request (`停止`, [section 9](#9-stopping-a-request)).
 3. You fix the cause (the configuration's ConfigMap or the Secret, section 6)
-   and restart the Pod. The runtime records the stopped review as a failure
-   and goes on at the review's `on_failure` stage, which is `work` here: the
-   worker runs again, and the review after it. The requester is told that the
+   and restart the Pod. The runtime records the stopped review as an interruption
+   and goes on at the review's `on_failure` stage, which is `elicit` here: the
+   requirements are reconsidered, then the work and review run again. The requester is told that the
    request carries on after the restart.
 
 Each request to a model carries the change and the test output. Once the

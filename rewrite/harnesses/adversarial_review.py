@@ -47,8 +47,8 @@ again. What the review is doing is said on stderr when it changes, and
 again every REVIEW_HOLD_SECONDS while it does not, for the live view. The
 runtime's own notice tells the requester when a stage runs long. An operator
 who fixes a setting restarts the engine: the runtime records the stopped
-review as a failure and goes on at the review's on_failure stage (the work
-stage in the examples), and the review runs again after it.
+review as an interruption and goes on at the review's on_failure stage
+(requirements in the ordered example), and the review runs again after repair.
 
 REVIEW_UNAVAILABLE=pass is the operator's opt-in for the old behaviour, and
 it delivers unreviewed work when no verdict can be obtained: after
