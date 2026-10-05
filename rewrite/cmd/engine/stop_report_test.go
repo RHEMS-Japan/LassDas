@@ -245,6 +245,16 @@ func TestStoppedReportResumesAfterControllerCancellationWithoutRepeatingPost(t *
 	cfg := stoppedReportConfiguration(t)
 	root := t.TempDir()
 	dir := filepath.Join(root, "jobs", "51")
+	cache := filepath.Join(dir, "homes/1-0/.cache/blob")
+	receipt := filepath.Join(dir, "workspace/.git/ticket-engine/delivery.json")
+	for _, path := range []string{cache, receipt} {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("retained across report restart"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.MkdirAll(filepath.Join(dir, "workspace"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -318,14 +328,32 @@ func TestStoppedReportResumesAfterControllerCancellationWithoutRepeatingPost(t *
 	})
 	finish := startStopQueue(t, cfg, root, 20*time.Millisecond, io.Discard)
 	waitFor(t, func() bool { return posts.Load() == 1 })
+	for _, path := range []string{cache, receipt} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("active stop report lost %s: %v", path, err)
+		}
+	}
 	finish()
 	stopped, err := stopReportState(root)
 	if err != nil || stopped.Done || stopped.Pending == nil || stopped.Pending.Role != "report" || len(stopped.History) != 1 || !strings.Contains(stopped.History[0].Error, "context canceled") {
 		t.Fatalf("stopped report history lost: %#v %v", stopped, err)
 	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatalf("interrupted stop report lost its cache: %v", err)
+	}
 	finishAgain := startStopQueue(t, cfg, root, 20*time.Millisecond, io.Discard)
 	waitFor(t, func() bool { s, e := stopReportState(root); return e == nil && s.Done })
+	waitFor(t, func() bool {
+		_, err := os.Stat(filepath.Join(dir, "homes", ".trimmed"))
+		return err == nil
+	})
 	finishAgain()
+	if _, err := os.Stat(cache); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("finished stop report kept its cache: %v", err)
+	}
+	if data, err := os.ReadFile(receipt); err != nil || string(data) != "retained across report restart" {
+		t.Fatalf("finished stop report lost its delivery receipt: %q, %v", data, err)
+	}
 	after, _ := os.ReadFile(filepath.Join(dir, "run", "history.json"))
 	if !bytes.Equal(before, after) || posts.Load() != 1 || routes.Load() != 3 || readbacks.Load() != 1 || !sawInterrupted.Load() {
 		t.Fatalf("restart changed work/repeated post/lost warning: posts=%d routes=%d readbacks=%d warning=%v", posts.Load(), routes.Load(), readbacks.Load(), sawInterrupted.Load())
