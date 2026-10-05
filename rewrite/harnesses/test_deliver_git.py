@@ -115,7 +115,27 @@ def service_handler(state):
                     "head": {"ref": payload["head"], "sha": None}, "base": payload["base"], "merged": False,
                     "merge_commit_sha": None, "state": "open", "body": payload.get("body", "")}
             state["pulls"].append(pull)
+            if state.get("description_post_uncertain"):
+                state["description_post_uncertain"] = False
+                return self.answer(503, {"message": "response lost after creating the pull request"})
             self.answer(201, self.current(pull))
+
+        def do_PATCH(self):
+            self.record()
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            pull = state["pulls"][int(self.path.rsplit("/", 1)[1]) - 1]
+            if state.get("description_refusal"):
+                return self.answer(403, {"message": "description update refused"})
+            pull["body"] = payload["body"]
+            if state.get("description_line_endings"):
+                pull["body"] = pull["body"].replace("\n", "\r\n")
+            if state.get("description_readback_mismatch"):
+                pull["body"] = "The stored explanation differs."
+            if state.get("description_uncertain"):
+                state["description_uncertain"] = False
+                return self.answer(503, {"message": "response lost after storing the description"})
+            return self.answer(200, self.current(pull))
 
         def do_PUT(self):
             self.record()

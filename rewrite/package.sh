@@ -16,13 +16,13 @@ for command in engine tracker status; do
     go -C "$source_dir" build -p 1 -trimpath \
       -o "$output_dir/bin/ticket-$command" "./cmd/$command"
 done
-for harness in git_workspace hermes raven linux_role adversarial_review; do
+for harness in git_workspace hermes raven linux_role adversarial_review delivery_support; do
   cp "$source_dir/harnesses/$harness.py" "$output_dir/harnesses/$harness.py"
 done
 for guide in START RUNTIME README OPERATING; do
   cp "$source_dir/$guide.md" "$output_dir/$guide.md"
 done
-for example in operator operator-gateway operator-stages operator-github; do
+for example in operator operator-gateway operator-stages operator-github operator-github-stages; do
   cp "$source_dir/examples/$example.json" "$output_dir/examples/$example.json"
 done
 printf '%s\n' "$output_dir"

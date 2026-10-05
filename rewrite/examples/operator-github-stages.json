@@ -19,12 +19,20 @@
       "z-ai"
     ]
   },
-  "backlog": {
-    "base_url": "https://tracker.example.invalid/api/v2",
-    "key_env": "TRACKER_API_KEY"
+  "github": {
+    "api_url": "https://tracker.example.invalid/api/v3",
+    "repository": "REPLACE_WITH_OWNER/REPLACE_WITH_REPOSITORY",
+    "key_env": "TRACKER_API_KEY",
+    "intake_label": "automation",
+    "labels": {
+      "accepted": "automation-accepted",
+      "processing": "automation-working",
+      "awaiting_requester": "automation-awaiting-requester",
+      "delivered": "automation-delivered",
+      "stopped": "automation-stopped"
+    }
   },
   "intake": {
-    "project_id": 0,
     "created_since": "REPLACE_WITH_RFC3339_ACCEPTANCE_START",
     "poll_interval_seconds": 30,
     "max_running": 1,

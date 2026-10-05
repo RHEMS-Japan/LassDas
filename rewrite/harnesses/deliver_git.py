@@ -1,6 +1,6 @@
 """Deliver the reviewed workspace to the operator's repository. Fixed process.
 
-This is not a model tool and reads nothing from a role's answer: the target,
+This is not a model tool and takes no authority from a role's answer: the target,
 the branch, the paths that may be delivered and the merge method are operator
 settings. It stages only the allowed paths, refuses any other change, pushes
 the ticket branch, opens or reuses one pull request, merges it (or, under the
@@ -70,6 +70,8 @@ Environment (all from the operator, never from a role):
   DELIVERY_FORBIDDEN_TEXT    optional newline-separated text refused in a diff
   DELIVERY_MERGE_METHOD      merge (default), squash, rebase, or none to leave the merge to a person
   DELIVERY_ALLOW_UNCHANGED   1 lets a request that changed no file end without a delivery (default: refused)
+  PR_DESCRIPTION_ROLE       optional role whose saved report explains the change (see README)
+  PR_DESCRIPTION_MAX_BYTES  full description byte limit (default 60000)
   DELIVERY_REMOTE_URL        optional Git URL override (default: github.com)
   DELIVERY_API_BASE          optional REST base (default: api.github.com)
   DELIVERY_AUTHOR_NAME/_EMAIL, DELIVERY_POLL_SECONDS,
@@ -80,9 +82,10 @@ of the target, commits nothing and pushes nothing, and always ends non-zero:
 an operator check must never be mistaken for a delivery that happened.
 """
 import os
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -438,16 +441,106 @@ def find_pull_request(owner, name, branch, base):
     return payload[0] if payload else None
 
 
-def open_pull_request(owner, name, branch, base, issue, method):
+def pull_request_body(issue, method):
+    """Ordinary report text from the run, never committed into the target."""
+    body = support.default_pull_request_body(issue, method)
+    if not os.environ.get("PR_DESCRIPTION_ROLE"):
+        return body, ""
+    text, note = support.description_report()
+    body += "\n\n" + (text or note)
+    try:
+        refuse_forbidden_text([(None, body)])
+    except DeliveryError as error:
+        raise DeliveryError(str(error).replace("the staged change", "the pull request description")) from error
+    return body, note
+
+
+class DescriptionNotSettled(DeliveryError):
+    """The pull request exists; a failed description update does not undo it."""
+
+
+def delivery_description(workspace, commit, issue, method, receipt):
+    try:
+        body, note = pull_request_body(issue, method)
+        if note:
+            receipt["description_omitted"] = note
+        else:
+            receipt.pop("description_omitted", None)
+        if os.environ.get("PR_DESCRIPTION_ROLE"):
+            home = Path(support.setting("TASK_HOME")).resolve()
+            checkout = Path(workspace).resolve()
+            if home == checkout or checkout in home.parents:
+                raise DeliveryError("TASK_HOME for the description must be outside the checkout")
+            home.mkdir(parents=True, exist_ok=True)
+            path = home / "pull-request-description.md"
+            # Atomic replacement does not follow a previous output symlink.
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=home, delete=False) as saved:
+                saved.write(body)
+            os.replace(saved.name, path)
+            receipt.update(description_path=str(path), description_commit=commit)
+        return body
+    except OSError as error:
+        raise DescriptionNotSettled("The generated pull request description could not be retained: " + str(error)) from error
+    except DeliveryError as error:
+        if receipt.get("pull_request"):
+            raise DescriptionNotSettled(str(error)) from error
+        raise
+
+
+def body_lines(text):
+    return text.replace("\r\n", "\n").replace("\r", "\n") if isinstance(text, str) else text
+
+
+def sync_pull_request_body(workspace, path, receipt, previous, pull, body, owner, name):
+    """Refresh our description only while the observed body is still ours.
+    Pending text survives an uncertain PATCH; neither it nor the receipt is
+    evidence that a description was actually stored until read from the API."""
+    if not os.environ.get("PR_DESCRIPTION_ROLE") or pull.get("state") != "open" or pull.get("merged"):
+        return
+    actual = body_lines(pull.get("body"))
+    if actual != body_lines(body):
+        known = {body_lines(support.default_pull_request_body(receipt["issue"], method)) for method in ("none", "merge")}
+        known.update(body_lines(value) for field in ("pull_request_body", "pending_pull_request_body")
+                     if isinstance(value := receipt.get(field), str))
+        if actual not in known:
+            receipt["description_retained"] = True
+            receipt.pop("pending_pull_request_body", None)
+            support.write_receipt(path, dict(receipt, previous=previous))
+            return
+        receipt["pending_pull_request_body"] = body
+        support.write_receipt(path, dict(receipt, previous=previous))
+        try:
+            status, _ = support.api_retried("PATCH", "/repos/%s/%s/pulls/%d" % (owner, name, receipt["pull_request"]),
+                                           describe="updating the pull request description", payload={"body": body})
+        except DeliveryError as error:
+            raise DescriptionNotSettled("The pull request description update is unconfirmed: %s" % error) from error
+        if status != 200:
+            raise DescriptionNotSettled("Could not update the pull request description (status %d); no text was silently omitted" % status)
+        try:
+            observed = read_pull_request(owner, name, receipt["pull_request"])
+        except DeliveryError as error:
+            raise DescriptionNotSettled("Reading back the pull request description failed: %s" % error) from error
+        if body_lines(observed.get("body")) != body_lines(body):
+            receipt["description_retained"] = True
+            receipt.pop("pending_pull_request_body", None)
+            support.write_receipt(path, dict(receipt, previous=previous))
+            return
+    receipt.pop("description_retained", None)
+    receipt["pull_request_body"] = body
+    receipt.pop("pending_pull_request_body", None)
+    support.write_receipt(path, dict(receipt, previous=previous))
+
+
+def open_pull_request(owner, name, branch, base, issue, method, body=None, before_create=None):
     existing = find_pull_request(owner, name, branch, base)
     if existing:
         return existing
+    if before_create is not None:
+        before_create()
     status, payload = support.api_retried("POST", "/repos/%s/%s/pulls" % (owner, name),
                                           describe="opening the pull request", payload={
         "title": "Deliver " + issue, "head": branch, "base": base,
-        "body": "Prepared by the configured ticket engine for %s. Only the operator's allowed "
-                "paths are included. Review the change itself; this description is not a result.%s"
-                % (issue, " Merging it is left to a person." if method == "none" else "")})
+        "body": support.default_pull_request_body(issue, method) if body is None else body})
     if status == 201:
         return payload
     if status == 422:
@@ -580,6 +673,7 @@ def summary(receipt, pushed, committed):
     if receipt.get("previous"):
         lines.append("Earlier merged rounds for this ticket: %d." % len(receipt["previous"]))
     lines.append("Merging is not by itself a check that the result works; the verification process reports that.")
+    lines.extend(description_summary(receipt))
     return "\n".join(lines)
 
 
@@ -593,7 +687,18 @@ def open_summary(receipt, pushed, committed):
              % ("created" if committed else "reused", "pushed" if pushed else "did not need to push", support.RECEIPT)]
     if receipt.get("previous"):
         lines.append("Earlier merged rounds for this ticket: %d." % len(receipt["previous"]))
+    lines.extend(description_summary(receipt))
     return "\n".join(lines)
+
+
+def description_summary(receipt):
+    lines = [receipt["description_omitted"]] if receipt.get("description_omitted") else []
+    if not receipt.get("description_path"):
+        return lines
+    return lines + [("The service's different pull request description was retained without another replacement. "
+             if receipt.get("description_retained") else "")
+            + "The latest generated description accompanying commit %s is kept at %s outside the checkout."
+            % (receipt["description_commit"], receipt["description_path"])]
 
 
 def earlier_merges(receipt):
@@ -715,6 +820,10 @@ def check_only(workspace, owner, name, base, branch, method, url, allowed, uncha
 
 
 def refusal(issue, owner, name, base, branch, error):
+    if isinstance(error, DescriptionNotSettled):
+        return ("The delivery for %s has an unsettled pull request description: %s\n"
+                "Earlier commits, pushes or pull requests have not been undone. The delivery record identifies them."
+                % (issue, error))
     if isinstance(error, MergedNotSettled):
         return "\n".join([
             "%s for %s." % (error, issue),
@@ -882,6 +991,8 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
             if (method == "none" and tip == receipt.get("head") == head(workspace)
                     and not changed_paths(workspace)):
                 # Open, nothing new, and the branch holds the commit on record.
+                body = delivery_description(workspace, receipt["head"], issue, method, receipt)
+                sync_pull_request_body(workspace, path, receipt, previous, pull, body, owner, name)
                 receipt["previous"] = previous
                 print(open_summary(receipt, pushed=False, committed=False))
                 return 0
@@ -926,14 +1037,30 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
         tip = ticket_tip(workspace, url, branch)
         if changed_by_person(workspace, tip, commit):
             return end_changed(workspace, path, receipt, previous, tip)
+    body = delivery_description(workspace, commit, issue, method, receipt)
     pushed = push_branch(workspace, url, branch, commit)
     if pushed:
         receipt["pushed_at"] = support.timestamp()
         support.write_receipt(path, dict(receipt, previous=previous))
     # A recorded pull request is read directly: an interrupted run may have
     # merged it already, and a merged one is no longer in the open list.
-    pull = (read_pull_request(owner, name, int(receipt["pull_request"])) if receipt.get("pull_request")
-            else open_pull_request(owner, name, branch, base, issue, method))
+    def current_pull_request():
+        def before_create():
+            if os.environ.get("PR_DESCRIPTION_ROLE"):
+                # Only a new POST replaces its pending text. Finding a PR
+                # instead must retain the text of the earlier uncertain POST.
+                receipt["pending_pull_request_body"] = body
+                support.write_receipt(path, dict(receipt, previous=previous))
+
+        try:
+            return (read_pull_request(owner, name, int(receipt["pull_request"])) if receipt.get("pull_request")
+                    else open_pull_request(owner, name, branch, base, issue, method, body, before_create))
+        except DeliveryError as error:
+            if os.environ.get("PR_DESCRIPTION_ROLE"):
+                raise DescriptionNotSettled("The pull request could not be confirmed: %s" % error) from error
+            raise
+
+    pull = current_pull_request()
     receipt["pull_request"] = int(pull["number"])
     receipt["pull_request_url"] = pull.get("html_url", "")
     receipt.setdefault("opened_at", support.timestamp())
@@ -953,7 +1080,8 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
             previous = previous + [dict(merged, **times)]
             for field in ("pull_request", "pull_request_url", "opened_at"):
                 receipt.pop(field, None)
-            pull = open_pull_request(owner, name, branch, base, issue, method)
+            support.write_receipt(path, dict(receipt, previous=previous))
+            pull = current_pull_request()
             receipt.update(pull_request=int(pull["number"]), pull_request_url=pull.get("html_url", ""),
                            opened_at=support.timestamp())
             support.write_receipt(path, dict(receipt, previous=previous))
@@ -964,6 +1092,7 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
             return 0
         elif pull.get("state") == "closed":
             return end_closed(path, receipt, previous)
+    sync_pull_request_body(workspace, path, receipt, previous, pull, body, owner, name)
     if method == "none":
         # The delivery ends here: the pull request is open for a person to merge.
         receipt["previous"] = previous
