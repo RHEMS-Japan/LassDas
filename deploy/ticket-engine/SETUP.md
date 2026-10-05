@@ -977,9 +977,19 @@ neither; it waits:
 - Trouble with the model service (no connection, a time-out, an HTTP error,
   a reply without a plain verdict) is waited out: the models are asked again
   in their order, round after round, with the wait between rounds growing
-  from `REVIEW_RETRY_SECONDS` to `REVIEW_RETRY_CAP_SECONDS`. An HTTP 400,
-  401, 403, 404, 413 or 422 is named as yours to fix (a key, a model id, or a
-  request the endpoint refuses, such as one too large), and asking goes on.
+  from `REVIEW_RETRY_SECONDS` to `REVIEW_RETRY_CAP_SECONDS` for transient
+  failures. HTTP 400 (unless it explicitly names excessive context), 401,
+  402, 403, 404 and 422 stop further attempts to that model. Other configured
+  models are still tried; if none remains, fix the credential, available
+  credit, model id or request setting and restart. Waiting alone does not
+  make the same refused request run again.
+- HTTP 413 and context-length 400 reduce the supplied material and retry.
+  The reason and omitted ranges reach the model, live diagnostics and final
+  review result. The combined runtime/history/diff/test body budget is
+  halved below `REVIEW_MEMORY_CHARACTERS`; headings and omission notices are
+  additional. The proposed pull request explanation remains complete. If
+  minimal material is still refused by every model, use a model or gateway
+  capable of accepting the required instructions and explanation and restart.
 - A setting that cannot work (one that is missing or mistyped, an endpoint
   that is not HTTPS, a key that is not set, test commands that cannot be
   read) holds the review until you fix it.
@@ -1007,7 +1017,7 @@ the engine's notice that no stage has completed, after
    request carries on after the restart.
 
 Each request to a model carries the change and the test output. Once the
-waits reach `REVIEW_RETRY_CAP_SECONDS`, each model is asked at most once every
+waits reach `REVIEW_RETRY_CAP_SECONDS`, each still-available model is asked at most once every
 300 seconds: up to about 100 rounds in eight hours, fewer when requests run
 into `REVIEW_TIMEOUT_SECONDS`, since each of those waits out that limit first.
 Whether to name more models in
@@ -1019,7 +1029,9 @@ to (section 1).
 instead: after `REVIEW_ATTEMPTS` requests (3) without a verdict, or at once
 where it would hold, its result says `NOT REVIEWED` with the reason, and the
 work goes on to the delivery. This guide leaves it unset, because the review is
-what justifies delivering without a person. Its details, and the one case it
+what justifies delivering without a person. Reduced retries after a context
+refusal also count against `REVIEW_ATTEMPTS`; a smaller input does not grant
+extra requests. Its details, and the one case it
 still sends back (a checkout with no change), are in rewrite/README.md
 ("Stages instead of roles", from the paragraph that begins "No verdict, no
 pass").
@@ -2329,12 +2341,13 @@ or a conflict (below). Stop the request (`停止`) while you fix the cause.
 
 The review has no verdict and waits
 ([section 4](#when-the-review-gets-no-verdict)); the `review` record's live
-output on the status page says why. Usually a key, a model id, or a request
-the endpoint refuses, such as one too large (an HTTP 400, 401, 403, 404, 413
-or 422, named as yours to fix), a key that is not set, or the model service
-being down. Fix the setting or the Secret and restart the Pod, or wait for
-the service; for a request too large (413), show the reviewer less with
-`REVIEW_DIFF_PATHS`, or use a model or gateway that takes more. Meanwhile
+output on the status page says why. A permanent HTTP refusal (400 without a
+context-length reason, 401, 402, 403, 404 or 422) is not polled: fix the setting
+or the Secret and restart the Pod. A transient service failure is retried.
+HTTP 413 and context-length 400 automatically reduce runtime text, history,
+diff and test output, stating the omission, but keep the complete proposed
+pull request explanation. If even minimal material is refused by all
+configured models, use a model or gateway that can accept it and restart. Meanwhile
 later requests wait their turn behind this one, and the requester gets the
 notice that no stage has completed.
 

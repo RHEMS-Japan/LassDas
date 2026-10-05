@@ -35,8 +35,13 @@ in the operator's order, a model named twice once a round, round after
 round, the wait between rounds growing from REVIEW_RETRY_SECONDS to
 REVIEW_RETRY_CAP_SECONDS, and the printed result names the model that gave
 the verdict. An HTTP error is said with what the service answered, scrubbed
-and cut to about 200 characters; 400, 401, 403, 404, 413 and 422 are named
-as the operator's to fix, and the other models are still asked. What asking
+and cut to about 200 characters. Permanent request, authentication, credit
+and model-setting refusals remove that model from further attempts; other
+configured models are still asked. HTTP 413 and context-length 400 reduce
+the supplied material and retry, with the omission stated to the model and
+in the result. The proposed PR explanation remains complete. When every
+model requires an operator correction, no model is called again until restart.
+What asking
 again cannot get past (a setting that is missing or mistyped, an endpoint
 that is not HTTPS, a credential that is not set, test commands that cannot
 be read, a REVIEW_UNAVAILABLE other than pass or none) holds the review: the
@@ -648,19 +653,40 @@ def review_memory(state_directory, key, limit):
     return scrub("\n\n".join(sections), key), scrub(" ".join(notices), key)
 
 
+def review_material(found, model, prompt, diff, tests):
+    """Keep each source identifiable when a service requires less context.
+    The separately reviewed PR explanation is never cut by this budget."""
+    parts = [("Where this stage sits, the original request and the settled requirements (from the runtime)", prompt[:HEAD]),
+             ("The most recent reports", prompt[-TAIL:] if len(prompt) > HEAD else ""),
+             ("Saved review context", found.get("memory") or "(no additional saved context available)"),
+             ("Diff of the change", diff or "(no change)"),
+             ("Test output", tests or "(no test command configured)")]
+    budget = found.get("context_limits", {}).get(model)
+    shown = []
+    for label, body in parts:
+        if budget is not None and len(body) > budget // len(parts):
+            share = budget // len(parts)
+            start, end = (share + 1) // 2, len(body) - share // 2
+            body = body[:start] + "\n[characters %d:%d omitted from this body]\n" % (start, end) + body[end:]
+        shown.append(label + ":\n" + body)
+    note = found.get("context_notes", {}).get(model, "")
+    return ((note + "\n\n") if note else "") + "\n\n".join(shown), sum(len(body) for _, body in parts)
+
+
 def ask_once(found, model, prompt, diff, tests, rounds):
-    """One request to one model: (blocking, findings, None) on a verdict,
-    (None, what the reviewer wrote, why) otherwise."""
+    """Ask one model, reducing oversized material before trying it again.
+    Return a verdict or its absence; permanent refusals raise ReviewError."""
+    if found.get("attempts_left") == 0:
+        return None, "", "the configured review request limit was reached"
+    if "attempts_left" in found:
+        found["attempts_left"] -= 1
+    found["requests_made"] = found.get("requests_made", 0) + 1
+    material, amount = review_material(found, model, prompt, diff, tests)
     request = {"model": model, "temperature": 0.2, "tools": [TOOL],
                "tool_choice": {"type": "function", "function": {"name": "verdict"}},
                "messages": [
                    {"role": "system", "content": SYSTEM % rounds},
-                   {"role": "user", "content": (
-                       "Where this stage sits, the original request and the settled requirements (from the runtime):\n%s"
-                       "\n\n[...]\n\nThe most recent reports:\n%s\n\nSaved review context:\n%s\n\nDiff of the change:\n%s\n\nTest output:\n%s"
-                       % (prompt[:HEAD], prompt[-TAIL:] if len(prompt) > HEAD else "",
-                          found.get("memory") or "(no additional saved context available)",
-                          diff or "(no change)", tests or "(no test command configured)"))}]}
+                   {"role": "user", "content": material}]}
     if found.get("description_note"):
         request["messages"][1]["content"] += "\n\n" + found["description_note"]
     if found.get("description"):
@@ -682,29 +708,51 @@ def ask_once(found, model, prompt, diff, tests, rounds):
             return None, said_in(message), "the reviewer returned no verdict"
         return read_verdict(calls)
     except urllib.error.HTTPError as error:
-        return None, "", refused(error, found["key"])
+        why, too_large = refused(error, found["key"])
+        if not too_large:
+            return None, "", why
+        limits = found.setdefault("context_limits", {})
+        budget = min(limits.get(model, amount), found["memory_characters"]) // 2
+        # At least both ends of each of the five sources must fit. A model
+        # that still refuses this needs a different capacity/endpoint setting.
+        if budget < 10:
+            raise ReviewError(why + "; minimal review material was refused; configure a model that accepts the"
+                              " required instructions and complete pull request explanation")
+        limits[model] = budget
+        note = ("Review material reduced after %s for %s; runtime text, saved context, diff and test bodies"
+                " now share at most %d characters. Omitted ranges are not represented as reviewed;"
+                " the proposed pull request explanation remains complete." % (why, model, budget))
+        found.setdefault("context_notes", {})[model] = note
+        say(note)
+        log(found, note + "\n\n")
+        return ask_once(found, model, prompt, diff, tests, rounds)
     except Exception as error:  # a model service hiccup is not a defect in the change
         return None, "", type(error).__name__ + ": " + scrub(str(error), found["key"])[:200]
 
 
 # What the model service says with these is about the request the operator
 # set up (a credential, a model id, a request too large), not a passing fault.
-OPERATORS_TO_FIX = (400, 401, 403, 404, 413, 422)
+OPERATORS_TO_FIX = (400, 401, 402, 403, 404, 422)
 
 
 def refused(error, key):
-    """An HTTP error from the model service as a reason: its status, what it
-    said, scrubbed and cut to about 200 characters, and whether it is the
-    operator's to fix."""
+    """Classify the service's refusal before shortening its diagnostic.
+    This is transport metadata, not a judgment of the reviewer's prose."""
     try:
         said = error.read().decode("utf-8", "replace")
     except Exception:  # what it said only informs
         said = ""
     said = " ".join(scrub(said, key).split())
-    return "HTTP %d from the model service%s%s" % (
+    too_large = error.code == 413 or error.code == 400 and bool(re.search(
+        r"context[_ -]length[_ -]exceeded|context.{0,80}(?:exceed|too (?:long|large))"
+        r"|maximum context (?:length|window)|too many (?:input |prompt )?tokens"
+        r"|(?:input|prompt).{0,40}tokens.{0,30}(?:exceed|limit)", said, re.I))
+    reason = "HTTP %d from the model service%s" % (
         error.code, ": " + (said[:200] + "..." if len(said) > 200 else said) if said else "",
-        "; this is for the operator to fix (the credential, the model id or the request), and asking again"
-        " will not mend it" if error.code in OPERATORS_TO_FIX else "")
+    )
+    if error.code in OPERATORS_TO_FIX and not too_large:
+        raise ReviewError(reason + "; this is for the operator to fix (the credential, credit, model id or request)")
+    return reason, too_large
 
 
 def keep_unclear(found, model, findings, why, unclear):
@@ -737,20 +785,30 @@ def verdict_until_given(found, prompt, diff, tests, rounds):
     told when what goes wrong changes, not on every request, and is shown
     what a model wrote without a plain verdict, since this may go on a while.
     Returns (model, blocking, findings, what was written without a verdict)."""
-    wait, told, asked, unclear, said_at = 0, None, 0, [], time.monotonic()
+    wait, told, unclear, said_at = 0, None, [], time.monotonic()
+    unavailable = {}
     while True:
         failures = []
         for model in found["models"]:
-            asked += 1
-            blocking, findings, why = ask_once(found, model, prompt, diff, tests, rounds)
+            if model in unavailable:
+                continue
+            try:
+                blocking, findings, why = ask_once(found, model, prompt, diff, tests, rounds)
+            except ReviewError as error:
+                unavailable[model] = str(error)
+                say("Review: not asking %s again: %s" % (model, error))
+                continue
             if why is None:
                 if told is not None:
+                    asked = found["requests_made"]
                     say("Review: %s gave a verdict, after %d request%s that got none."
                         % (model, asked - 1, "" if asked == 2 else "s"))
                 return model, blocking, findings, unclear
             if keep_unclear(found, model, findings, why, unclear):
                 say("Review: %s wrote, without a plain verdict: %s" % (model, findings[:2000]))
             failures.append("%s: %s" % (model, why))
+        if len(unavailable) == len(found["models"]):
+            raise ReviewError("; ".join("%s: %s" % item for item in unavailable.items()))
         wait = min(max(wait * 2, found["retry"]), found["cap"])
         if failures != told:
             say("Review: no verdict yet (%s). Asking again in %gs, then at waits growing to %gs; until a model"
@@ -760,7 +818,7 @@ def verdict_until_given(found, prompt, diff, tests, rounds):
             # Not one line for hours: the live view hears again at the hold
             # interval that the review is still waiting, and why.
             say("Review still without a verdict at %s, %d requests so far: %s."
-                % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), asked, "; ".join(failures)))
+                % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), found["requests_made"], "; ".join(failures)))
             said_at = time.monotonic()
         time.sleep(wait)
 
@@ -769,14 +827,26 @@ def verdict_or_none(found, prompt, diff, tests, rounds):
     """With REVIEW_UNAVAILABLE=pass: REVIEW_ATTEMPTS requests, the models in
     turn, then (None, None, why, ...) when none gave a verdict. The last item
     is what was written without a verdict, as for verdict_until_given."""
-    last, unclear = "", []
+    last, unclear, unavailable, position = "", [], {}, 0
+    found["attempts_left"] = found["attempts"]
     for attempt in range(found["attempts"]):
-        model = found["models"][attempt % len(found["models"])]
-        blocking, findings, why = ask_once(found, model, prompt, diff, tests, rounds)
+        while found["models"][position % len(found["models"])] in unavailable:
+            position += 1
+        model = found["models"][position % len(found["models"])]
+        position += 1
+        try:
+            blocking, findings, why = ask_once(found, model, prompt, diff, tests, rounds)
+        except ReviewError as error:
+            unavailable[model] = str(error)
+            if len(unavailable) == len(found["models"]):
+                return None, None, "; ".join("%s: %s" % item for item in unavailable.items()), unclear
+            blocking, findings, why = None, "", str(error)
         if why is None:
             return model, blocking, findings, unclear
         keep_unclear(found, model, findings, why, unclear)
         last = why if len(found["models"]) == 1 else "%s: %s" % (model, why)
+        if found["attempts_left"] == 0:
+            break
         if attempt + 1 < found["attempts"]:
             time.sleep(min(5 * (attempt + 1), 20))
     return None, None, last, unclear
@@ -837,6 +907,8 @@ def reviewed(stdin_text, unchanged, passing, ran):
         sent_back += 1
     if found.get("description_note"):
         findings = found["description_note"] + "\n" + findings
+    if found.get("context_notes"):
+        findings = "\n".join(found["context_notes"].values()) + "\n" + findings
     findings = scrub((memory_notice + "\n" if memory_notice else "") + findings, key)
     # What the reviewer wrote without a verdict stays in the record: in the
     # result printed here, and in review.md, where it was logged as written.
@@ -904,6 +976,11 @@ def main():
             else:
                 say("Review still held at %s; the reason is above." % time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
             time.sleep(interval)
+            if not isinstance(error, ReviewError) or not error.recheck:
+                while True:
+                    say("Review still held at %s; the reason is above."
+                        % time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+                    time.sleep(interval)
         except Exception as error:
             reason = "Unexpected %s: %s" % (type(error).__name__, scrub(str(error), credential())[:300])
             if passing:
