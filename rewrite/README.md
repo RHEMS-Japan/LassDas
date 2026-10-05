@@ -1225,6 +1225,9 @@ first forced exit. This bound is saved with the time cap. It is not a count of
 ordinary failed commands or model requests. Zero does not mean unlimited
 restarts. For example, `"max_active_minutes": 120, "max_hard_exits": 3` allows
 two automatic recoveries before a third forced exit requires attention.
+The shipped example leaves this optional time limit off and does not set a
+hard-exit count alone. Pause notices show measured time in ordinary units
+(for example, `0 秒` or `2 分 0 秒`), as other requester notices do.
 
 Time accumulates while the request runtime is active, across successful stages,
 failures and routing retries. Success does not reset it. Waiting for a slot,

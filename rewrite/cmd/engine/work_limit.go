@@ -172,7 +172,7 @@ func workPauseMeasured(clock *workClock, elapsed time.Duration) string {
 	if clock == nil {
 		return ""
 	}
-	return fmt.Sprintf("保存された上限は %d 分、確定済みの実稼働時間は %s です。", clock.MaxMinutes, elapsed.Round(time.Second))
+	return fmt.Sprintf("保存された上限は %d 分、確定済みの実稼働時間は %s です。", clock.MaxMinutes, spentText(elapsed))
 }
 
 type watchedOutcome struct {

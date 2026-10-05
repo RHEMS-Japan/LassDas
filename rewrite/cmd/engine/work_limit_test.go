@@ -203,8 +203,8 @@ func TestWorkLimitAccumulatesRunsAndExcludesEveryIdleGap(t *testing.T) {
 		t.Fatalf("cap relaunched: %v", err)
 	}
 	text := pausedWorkText(record.Pauses[0], record.Clock)
-	if !strings.Contains(text, "1 分") || !strings.Contains(text, "1m0s") {
-		t.Fatal(text)
+	if !strings.Contains(text, "確定済みの実稼働時間は 1 分 0 秒 です") {
+		t.Fatalf("pause does not use requester-facing time units: %s", text)
 	}
 }
 
@@ -329,6 +329,9 @@ func TestWorkLimitHardExitRecoveryRunsThenPausesAtSavedCountAndResets(t *testing
 			pauses := remote.withPrefix("この依頼の自動処理")
 			if len(pauses) != 1 || !strings.Contains(pauses[0], fmt.Sprintf("上限の %d 回", limit)) {
 				t.Fatalf("pause did not name its limit: %v", pauses)
+			}
+			if !strings.Contains(pauses[0], "確定済みの実稼働時間は "+spentText(record.Pauses[0].Elapsed)+" です") {
+				t.Fatalf("posted pause does not use requester-facing time units: %v", pauses)
 			}
 			remote.mu.Lock()
 			remote.rows = append(remote.rows, issueComment(990, 55, "再開"))
