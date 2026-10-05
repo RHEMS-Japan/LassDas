@@ -81,7 +81,7 @@ func groupLaunches(records []record) []launch {
 		case entry.Runtime:
 			note := launch{Role: entry.Role, Started: entry.Started, Finished: entry.Finished, Outcome: noted, Instruction: entry.Instruction, Records: []int{entry.Index}, Gap: entry.Gap, RuntimeFailure: true}
 			switch {
-			case entry.Interrupted || strings.HasPrefix(entry.Error, "The process stopped while this action was pending"):
+			case entry.Interrupted:
 				note.Outcome, note.Failure, note.Notes = interrupted, firstLine(entry.Error), []string{entry.Error}
 			case entry.Error != "":
 				note.Outcome, note.Failure, note.Notes = failed, firstLine(entry.Error), []string{entry.Error}

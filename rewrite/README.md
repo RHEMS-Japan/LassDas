@@ -248,11 +248,14 @@ before anyone has read it.
 
 A watch, and so the check, also refuses a configuration that still holds one
 of the shipped examples' placeholders: a URL whose host is under
-`example.invalid`, which cannot exist, or the paragraph the examples'
-`instructions` open with. It names the first one by its place, for example
+`example.invalid`, which cannot exist, a `REPLACE_WITH_` component of
+`github.repository`, or the paragraph the examples' `instructions` open with.
+It also refuses a token prefix (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
+or `github_pat_`) in `github.key_env`: that field names an environment
+variable, not the credential value. It names the first problem by its place, for example
 `roles[0].processes[0].env.TASK_REPOSITORY still holds the example's
 placeholder host under example.invalid; a watch needs your own value there`.
-Only the host of a URL is looked at, so an author's address under that name or
+For the URL placeholder check, only the host is looked at, so an author's address under that name or
 a sentence that mentions it is yours to write. A runtime started on a
 configuration with such a host would take up requests and fail each of them
 over and over, launching models every time. The commands an example expects
@@ -403,9 +406,13 @@ a person. It must name an existing role with a comment-capable process, which
 is checked before any work is accepted. Without the setting nothing waits.
 
 A successful run of that role holds the request. The run history records that
-it is waiting, and the collector records in `queue/jobs/<id>/question.json` how
-far that issue's comments had gone at the moment of the question. The request
-is then skipped until the issue's creator, or an operator listed in
+it is waiting, and the collector records the asking role's stored comment ID
+in `queue/jobs/<id>/question.json`. Replies arriving before the next poll are
+still read; recorded controller notices are not answers. If no submission
+receipt was saved, the collector instead records the latest comment ID at that
+read and waits for a later reply. It cannot reconstruct an earlier question's
+position without a receipt, but it does not hold the request forever waiting
+for one. The request is then skipped until the issue's creator, or an operator listed in
 `intake.stop_user_ids`, posts a comment with words after that point. A status
 or field change, which the tracker records as a comment without words, is not
 an answer; the collector makes such changes itself while it waits. That
@@ -1186,7 +1193,9 @@ start immediately followed by a pause. An answer received while it is low
 likewise gets one acknowledgement saying it is waiting. Those receipts replace
 the separate pause comment for that episode, including after a restart. The
 recovery comment is sent when execution starts, not merely when credit returns
-while another request still occupies the slot.
+while another request still occupies the slot. It replaces the ordinary start
+announcement rather than adding a second one. A low-allowance receipt also
+states how many requests are ahead when there are any.
 
 An authorized stop does not wait for the balance: recording it launches no
 model. A request held below the floor is still read for a stop on every tick,
@@ -1204,8 +1213,9 @@ credential value removed.
 **When nothing has completed for a long time.** `intake.stall_notice_minutes`
 is how long a running request may go without a completed step before the
 requester hears about it. Absent means 90 minutes and zero switches it off. The
-window is measured from the last history entry that finished without an error,
-so any successful role output inside it keeps the request quiet. Past the
+window is measured only from records within the current launch, or from the
+launch's start when it has no record yet. Successful output inside that window
+keeps the request quiet. Past the
 window, a request whose steps keep failing is told:
 
 > 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません（直近の失敗: <直近の失敗の1行目>）。
@@ -1218,8 +1228,9 @@ whose work is running, with no failure recorded, is told once nothing has been
 recorded for that long. The time counts only within the current launch: from
 its last record or, when there is none yet, from the moment the launch began,
 so a wait before it (for its turn, for the budget, for a stopped engine) does
-not count; a stop that cut a step short is recorded as a failure and counted
-in the form above. No time limit ends a launch, so this is the requester's
+not count; a stop that cut a step short is recorded as an interruption, not a
+failure. Interruption is read from the runtime's recorded field, not inferred
+from the wording of its diagnostic. No time limit ends a launch, so this is the requester's
 only word about a long one:
 
 > 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません。この間に工程の失敗は記録されていません。
@@ -1230,9 +1241,8 @@ steps did, and from there a launch that is working and one that waits for its
 operator look the same: a step held for a setting only the operator can
 correct has not failed and has not finished. A failure that repeats may need a
 person. A balance may come back by itself or only when someone adds to it. The
-failing form is also said while the engine itself holds the work for the
-budget; the failure it quotes then is the engine's own cancellation of the
-step it stopped, and nothing is being tried. None of the three says that no
+engine does not count its own cancellation during a budget hold as a failure.
+Only failures within the current launch can be quoted. None of the three says that no
 answer is awaited, because a question to the requester may be standing right
 above it. The stall notice repeats at most once per six hours per request. It
 is a notice and nothing else: routing, recovery and the request's goal are

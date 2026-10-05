@@ -84,6 +84,7 @@ func TestAcceptanceAndReplyDoNotAnnounceWorkWhileCreditIsLow(t *testing.T) {
 
 func TestCreditRecoveryWaitsForAnActualExecutionSlot(t *testing.T) {
 	cfg := watchConfiguration(t)
+	cfg.Intake.Announce = true
 	cfg.Intake.MinModelCredit = 5
 	holdingWorker(&cfg)
 	server := creditServer(t, func() string { return `{"data":{"limit_remaining":20}}` })
@@ -94,8 +95,9 @@ func TestCreditRecoveryWaitsForAnActualExecutionSlot(t *testing.T) {
 	queueRanSince(t, root, cfg, time.Now().Add(-time.Hour))
 	issue := announcedIssue()
 	issue.Creator.ID = 55
-	if err := requestNotices(cfg, issue, directory).post(context.Background(), pausedNotice, pausedNoticeText, time.Now()); err != nil {
-		t.Fatal(err)
+	acceptTurn(context.Background(), cfg, issue, directory, 1, true, func(message string) { t.Log(message) })
+	if got := fixture.all(); len(got) != 1 || !strings.Contains(got[0], "前に 1 件") || !strings.Contains(got[0], budgetWaitingText) {
+		t.Errorf("low-allowance acceptance lost its queue position: %q", got)
 	}
 	bound, err := bindRequestConfig(cfg, directory, issue.Key)
 	if err != nil {
@@ -149,6 +151,9 @@ func TestCreditRecoveryWaitsForAnActualExecutionSlot(t *testing.T) {
 	waitFor(t, func() bool { return fixture.readings() >= before+5 })
 	if got := fixture.all(); len(got) != 2 {
 		t.Fatalf("repeated the recovery notice: %q", got)
+	}
+	if fixture.count(startedNoticeText) != 0 {
+		t.Fatal("credit recovery was followed by an ordinary start announcement")
 	}
 }
 
