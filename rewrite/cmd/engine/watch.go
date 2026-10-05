@@ -23,14 +23,15 @@ import (
 // Intake settings are operator scope, not a format required of requesters.
 // The explicit timestamp prevents quietly starting every historical issue.
 type intakeConfig struct {
-	ProjectID           int64   `json:"project_id,omitempty"`
-	CreatedSince        string  `json:"created_since"`
-	PollIntervalSeconds int     `json:"poll_interval_seconds,omitempty"`
-	MaxRunning          int     `json:"max_running,omitempty"`
-	StopUserIDs         []int64 `json:"stop_user_ids,omitempty"`
-	StopReportRole      string  `json:"stop_report_role,omitempty"`
-	QuestionRole        string  `json:"question_role,omitempty"`
-	IssueIDs            []int64 `json:"issue_ids,omitempty"`
+	ProjectID                      int64   `json:"project_id,omitempty"`
+	CreatedSince                   string  `json:"created_since"`
+	PollIntervalSeconds            int     `json:"poll_interval_seconds,omitempty"`
+	MaxRunning                     int     `json:"max_running,omitempty"`
+	StopUserIDs                    []int64 `json:"stop_user_ids,omitempty"`
+	StopReportRole                 string  `json:"stop_report_role,omitempty"`
+	StoppedWorkspaceRetentionHours int     `json:"stopped_workspace_retention_hours,omitempty"`
+	QuestionRole                   string  `json:"question_role,omitempty"`
+	IssueIDs                       []int64 `json:"issue_ids,omitempty"`
 	// CategoryIDs narrows discovery to issues that carry one of these tracker
 	// categories, so a project shared with people's own tickets hands the
 	// runtime only what a requester marked for it. A category added to an
@@ -102,6 +103,9 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 	}
 	if err := validateStopReporter(*cfg); err != nil {
 		return fail(err)
+	}
+	if hours := cfg.Intake.StoppedWorkspaceRetentionHours; hours < 0 || uint64(hours) > uint64(time.Duration(1<<63-1)/time.Hour) || hours > 0 && cfg.Intake.StopReportRole == "" {
+		return fail(errors.New("stopped workspace retention requires nonnegative hours and a stop-report role"))
 	}
 	if err := validateQuestionRole(*cfg); err != nil {
 		return fail(err)
@@ -300,6 +304,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	// A finished request whose caches could not be removed is retried each
 	// tick and said once per reason, not once per tick.
 	trimTrouble := map[string]string{}
+	removalTrouble := map[string]string{}
 	trim := func(name, directory string, say func(string)) {
 		if err := trimFinished(directory); err != nil {
 			reason := err.Error()
@@ -399,8 +404,19 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				}
 				// The reporter may still need its home to resume. Only after
 				// it finishes (or with none configured) are its caches unused.
-				// Keep the workspace, receipts and both histories unchanged.
+				// Cache cleanup keeps source and evidence; only the separately
+				// opted-in stopped-workspace policy below may discard source.
 				trim(entry.Name(), directory, say)
+				removed, err := reclaimStoppedWorkspace(cfg, issue, directory, time.Now())
+				if err != nil {
+					if removalTrouble[entry.Name()] != err.Error() {
+						say("stopped workspace retained or removal incomplete; will retry: " + err.Error())
+						removalTrouble[entry.Name()] = err.Error()
+					}
+				} else if removed {
+					say("stopped workspace discarded under the configured retention policy; evidence retained")
+					delete(removalTrouble, entry.Name())
+				}
 				continue
 			}
 			request, err := source.RequestText(raw)

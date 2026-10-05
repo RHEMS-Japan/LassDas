@@ -615,6 +615,24 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 	dir := filepath.Join(s.runDir, "jobs", id)
 	j := &job{ID: id}
 	note := func(format string, args ...any) { j.Notes = append(j.Notes, fmt.Sprintf(format, args...)) }
+	var retained map[string][]byte
+	removalNote := workspaceRemovalNote(dir)
+	if removalNote != "" {
+		note("%s", removalNote)
+		raw, err := os.ReadFile(filepath.Join(dir, "workspace-evidence.json"))
+		if err != nil || len(raw) > 64<<20 || json.Unmarshal(raw, &retained) != nil || retained == nil {
+			note("retained workspace evidence could not be read")
+		}
+	}
+	workspaceFile := func(name string) ([]byte, error) {
+		if removalNote != "" {
+			if data, ok := retained[name]; ok {
+				return data, nil
+			}
+			return nil, os.ErrNotExist
+		}
+		return os.ReadFile(filepath.Join(dir, "workspace", name))
+	}
 	touch := func(path string) {
 		if info, err := os.Stat(path); err == nil && info.ModTime().After(j.Updated) {
 			j.Updated = info.ModTime()
@@ -718,7 +736,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 		// A finished request's card says whether anything was delivered,
 		// which only the delivery's receipt records.
 		if j.State != nil && j.State.Done {
-			if raw, err := os.ReadFile(filepath.Join(dir, "workspace", ".git", "ticket-engine", "delivery.json")); err == nil {
+			if raw, err := workspaceFile(".git/ticket-engine/delivery.json"); err == nil {
 				j.Receipt = string(raw)
 			}
 		}
@@ -787,7 +805,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		note("notices.json could not be read: %v", err)
 	}
-	if raw, err := os.ReadFile(filepath.Join(dir, "workspace", "report", "result.md")); err == nil {
+	if raw, err := workspaceFile("report/result.md"); err == nil {
 		j.Report = string(raw)
 	}
 	if names, _ := filepath.Glob(filepath.Join(dir, "homes", "*", "review.md")); len(names) > 0 {
@@ -798,7 +816,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 			}
 		}
 	}
-	if raw, err := os.ReadFile(filepath.Join(dir, "workspace", ".git", "ticket-engine", "delivery.json")); err == nil {
+	if raw, err := workspaceFile(".git/ticket-engine/delivery.json"); err == nil {
 		j.Receipt = string(raw)
 	}
 	if homes, err := os.ReadDir(filepath.Join(dir, "homes")); err == nil {
@@ -1267,7 +1285,31 @@ func gitRead(dir string, args ...string) (string, error) {
 	return out.String(), nil
 }
 
+func workspaceRemovalNote(directory string) string {
+	raw, err := os.ReadFile(filepath.Join(directory, "workspace-removal.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	var record struct {
+		Removing  bool       `json:"removing"`
+		RemovedAt *time.Time `json:"removed_at"`
+	}
+	if err != nil || json.Unmarshal(raw, &record) != nil {
+		return "workspace discard progress could not be read; inspect the saved records"
+	}
+	if record.RemovedAt != nil {
+		return "workspace discarded under the stopped-work retention policy; retained evidence does not restore unpublished work"
+	}
+	if record.Removing {
+		return "workspace discard is incomplete; retained evidence does not restore files already removed"
+	}
+	return ""
+}
+
 func (s *server) readWorkspace(id string) *workspace {
+	if note := workspaceRemovalNote(filepath.Join(s.runDir, "jobs", id)); note != "" {
+		return &workspace{Note: note}
+	}
 	rel := filepath.Join("jobs", id, "workspace")
 	dir := filepath.Join(s.runDir, rel)
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
