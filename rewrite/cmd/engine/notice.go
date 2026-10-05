@@ -27,7 +27,7 @@ import (
 const (
 	resumeNoticeText   = "自動処理は再起動後に同じ依頼を続けています。直前の工程は途中で止まった可能性があるため、確認してから進めます。"
 	pausedNoticeText   = "自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します。"
-	restoredNoticeText = "モデル利用枠が回復したため、自動処理を再開しました。"
+	restoredNoticeText = "モデル利用枠が回復し、自動処理を開始しました。"
 )
 
 const (
@@ -167,6 +167,16 @@ func noticeDue(log noticeLog, kind string, now time.Time) bool {
 	if kind == pausedNotice || kind == restoredNotice {
 		for i := len(log.Notices) - 1; i >= 0; i-- {
 			switch log.Notices[i].Kind {
+			case acceptedNotice, resumedNotice:
+				// These are the controller's fixed words, not a role's report.
+				// The receipt already told the requester why work must wait.
+				text := "受け付けました。" + budgetWaitingText
+				if log.Notices[i].Kind == resumedNotice {
+					text = "返答を受け取りました。" + budgetWaitingText
+				}
+				if !log.Notices[i].Predates && (log.Notices[i].Text == text || strings.HasPrefix(log.Notices[i].Text, text+"\n")) {
+					return kind == restoredNotice
+				}
 			case pausedNotice:
 				return kind == restoredNotice
 			case restoredNotice:
@@ -175,12 +185,18 @@ func noticeDue(log noticeLog, kind string, now time.Time) bool {
 		}
 		return kind == pausedNotice
 	}
+	if kind == startedNotice && noticeDue(log, restoredNotice, now) {
+		return false
+	}
 	interval := resumeNoticeInterval
 	if kind == stallNotice {
 		interval = stallNoticeInterval
 	}
 	once := onceNotice(kind)
 	for i := len(log.Notices) - 1; i >= 0; i-- {
+		if kind == startedNotice && log.Notices[i].Kind == restoredNotice {
+			return false
+		}
 		if log.Notices[i].Kind == kind {
 			return !once && now.Sub(log.Notices[i].WrittenAt) >= interval
 		}

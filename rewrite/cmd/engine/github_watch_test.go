@@ -303,7 +303,7 @@ func TestGitHubTurnsSetConfiguredLabelsAndAssigneesButNeverHoursOrClosure(t *tes
 	directory := t.TempDir()
 	ctx := context.Background()
 	say := func(text string) { t.Errorf("turn failed: %s", text) }
-	acceptTurn(ctx, cfg, issue, directory, 0, say)
+	acceptTurn(ctx, cfg, issue, directory, 0, false, say)
 	for _, stage := range []string{processingStatus, awaitingStatus, deliveredStatus, stoppedStatus} {
 		applyStatus(ctx, cfg, issue, directory, stage, say)
 	}

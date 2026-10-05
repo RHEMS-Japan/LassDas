@@ -1133,7 +1133,7 @@ func TestARequestInFlightIsNotToldWhatBeganBeforeTheEngine(t *testing.T) {
 	beginStage(t, directory, "verify-build")
 	observe := func(string) {}
 	issue := announcedIssue()
-	acceptTurn(context.Background(), cfg, issue, directory, 0, observe)
+	acceptTurn(context.Background(), cfg, issue, directory, 0, false, observe)
 	announceStages(context.Background(), cfg, issue, directory, observe)
 	if err := noteStall(context.Background(), cfg, requestNotices(cfg, issue, directory), directory, true, time.Now()); err != nil {
 		t.Fatal(err)

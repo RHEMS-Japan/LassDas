@@ -434,12 +434,12 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				// runtime's hands on its way to stopped.
 				stopping = !answered
 				if answered {
-					resumeTurn(ctx, cfg, issue, directory, say)
+					resumeTurn(ctx, cfg, issue, directory, creditKnown && creditLow, say)
 				}
 			}
 			if !stopping {
 				applyStatus(ctx, cfg, issue, directory, processingStatus, say)
-				acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), say)
+				acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), creditKnown && creditLow, say)
 			}
 			// Nothing else tells the requester why an accepted request sits
 			// still. These are the controller's own fixed words, posted at most
@@ -455,13 +455,11 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			if creditKnown && creditLow && !stopping {
 				stopping = stopWritten(ctx, cfg, issue, interval)
 			}
-			if creditKnown && !stopping {
+			if creditKnown && creditLow && !stopping {
 				if err := applyBudgetNotice(ctx, notice, creditLow); err != nil {
 					observe("request " + entry.Name() + ": budget notice not confirmed: " + err.Error())
 				}
-				if creditLow {
-					continue
-				}
+				continue
 			}
 			bound, err := bindRequestConfig(cfg, directory, issue.Key)
 			if err != nil {
