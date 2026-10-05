@@ -429,6 +429,12 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				trim(entry.Name(), directory, say)
 				continue
 			}
+			if held, err := holdPausedRequest(ctx, cfg, issue, directory, request, interval, say); held || err != nil {
+				if err != nil {
+					say("work remains held: " + err.Error())
+				}
+				continue
+			}
 			stopping := false
 			if state.Waiting {
 				// This request put a question to the person who filed it. Only
