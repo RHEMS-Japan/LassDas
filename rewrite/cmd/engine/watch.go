@@ -32,6 +32,10 @@ type intakeConfig struct {
 	StoppedWorkspaceRetentionHours int     `json:"stopped_workspace_retention_hours,omitempty"`
 	QuestionRole                   string  `json:"question_role,omitempty"`
 	IssueIDs                       []int64 `json:"issue_ids,omitempty"`
+	// MaxActiveMinutes limits each delegated interval of newly accepted work.
+	// Zero leaves it unlimited. Stage outcomes never reset the saved clock.
+	MaxActiveMinutes int `json:"max_active_minutes,omitempty"`
+	MaxHardExits     int `json:"max_hard_exits,omitempty"`
 	// CategoryIDs narrows discovery to issues that carry one of these tracker
 	// categories, so a project shared with people's own tickets hands the
 	// runtime only what a requester marked for it. A category added to an
@@ -112,6 +116,12 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 	}
 	if err := validateNotices(*cfg); err != nil {
 		return fail(err)
+	}
+	if !validWorkMinutes(cfg.Intake.MaxActiveMinutes) {
+		return fail(errors.New("intake.max_active_minutes must be zero or a positive duration in minutes"))
+	}
+	if cfg.Intake.MaxHardExits < 0 {
+		return fail(errors.New("intake.max_hard_exits must be zero or positive; zero selects the default of 3"))
 	}
 	if err := prepareStages(cfg); err != nil {
 		return fail(err)
@@ -628,6 +638,10 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 				}
 				if err := os.MkdirAll(directory, 0700); err != nil {
 					observe("creating request directory: " + err.Error())
+					continue
+				}
+				if err := acceptWorkLimit(directory, cfg.Intake.MaxActiveMinutes, cfg.Intake.MaxHardExits); err != nil {
+					observe("saving accepted work limit: " + err.Error())
 					continue
 				}
 				if err := writeRuntimeFile(path, raw); err != nil {

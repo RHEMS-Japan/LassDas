@@ -1369,6 +1369,95 @@ while reporting finished. Recorded child PIDs and scoped access disappeared.
 Model answers and the tracker were synthetic; this validates wiring and the
 observed access boundary, not real-model judgment or production isolation.
 
+### Active-work limits and recovery
+
+A failed attempt is not a completed request. The configured workflow decides
+the next work; the watch controller can also enforce an operator's explicit
+active-time limit. One-shot `--request` runs do not acquire an intake limit.
+
+#### Select the limit
+
+Set `intake.max_active_minutes` to a positive integer in the existing operator
+configuration. Omission or zero disables this optional feature. Negative,
+fractional and overflowing values are invalid. Check the complete configuration
+with `--check` before changing a running installation.
+
+A positive cap is saved at acceptance. Configuration changes do not silently
+change an accepted request's cap. Do not delete or edit runtime records to change
+the policy. No migration or backward-format support is provided.
+
+For these time-limited requests, `intake.max_hard_exits` sets the number of
+forced exits that pauses the request (default 3). Omission and zero both select
+3; negative and fractional values are invalid. A value of 1 pauses after the
+first forced exit. This bound is saved with the time cap. It is not a count of
+ordinary failed commands or model requests. Zero does not mean unlimited
+restarts. For example, `"max_active_minutes": 120, "max_hard_exits": 3` allows
+two automatic recoveries before a third forced exit requires attention.
+The shipped example leaves this optional time limit off and does not set a
+hard-exit count alone. Pause notices show measured time in ordinary units
+(for example, `0 秒` or `2 分 0 秒`), as other requester notices do.
+
+Time accumulates while the request runtime is active, across successful stages,
+failures and routing retries. Success does not reset it. Waiting for a slot,
+waiting after a question has returned, waiting after a credit hold has stopped
+the child and controller downtime are excluded. A running command polling a
+service is still active. This is neither CPU time nor a token or billing budget.
+
+#### At the limit
+
+The timer cancels the child independently of tracker calls and storage of its
+final record. The controller waits for the child to finish, records its actual
+elapsed time and returns the slot. The request remains unfinished, retaining its
+workflow position, question, history and workspace. No push, comment or deployment
+that already happened is undone. Cancellation is not a hard real-time guarantee
+for a hung kernel or processes outside the configured supervisor's ownership.
+
+After the pause notice, the issue creator or an account in `intake.stop_user_ids`
+can post a new comment whose first nonblank line is exactly `再開`, with further
+instructions on later lines. This grants another interval with the same saved
+cap, and resets the forced-exit count to zero. The acknowledgment means the resume was recorded, not that work started or
+finished. Slots and credit may still be unavailable. Answer an outstanding
+question separately; repeated resumes do not become answers or grant more time.
+
+To wait, do nothing. Pauses do not expire into success. To abandon the request,
+an authorized user posts a new comment beginning with `停止`. Native stop takes
+priority and uses its separate configured reporting role. Neither a stopped nor
+a delivered request is reopened by `再開`. Recovery never weakens the agreed
+delivery destination or authorizes repeating an external operation blindly.
+
+#### Restart and operator action
+
+Normal shutdown waits for the child and saves elapsed time; restart uses the
+remaining allowance. A forced exit or failed final save can leave an interval
+whose end is unknown. Recovery closes that interval without adding its unknown
+time or downtime, counts one forced exit, and continues using the saved remaining
+allowance. It posts one automatic-recovery notice with the count and saved limit.
+At the forced-exit limit it instead pauses, posts that reason and waits for the
+existing authorized resume. This never marks a request complete.
+
+The status page shows the time cap, confirmed time and forced-exit count/limit
+as ordinary information, not as an attention alert. Completed requests do not
+show those ongoing limits; an open interval is never counted as measured time.
+
+After inspecting prior external effects, use the authorized resume for a readable
+pause. Damaged records need operator inspection and a reviewed repair procedure,
+not invented replacement history. Authorized native stop remains available.
+Rollback to a binary without these limits is not supported or authorized here.
+
+Process/model failures use the configured retry or repair work. Fix an operator
+setting, permission or service when that is the actual cause. Billing and keys
+use the operator's authorized procedure, never a value pasted into a ticket.
+Check both original stopped work and its report before calling the queue idle.
+
+Question waits have no expiry added here. Pauses retain the workspace. Existing
+home-cache cleanup after stop reporting is not permission to lose source data.
+Removing source after an authorized stop requires the separate, explicit
+stopped-workspace retention policy.
+Tests use local children, controlled clocks and synthetic services. Real tracker
+permissions, model judgment, production cancellation and external-operation
+idempotence remain installation checks. Reports, branches, PRs, merges and working
+environments remain different observations.
+
 ### What the requester is told at night
 
 A request filed at eleven and stopped at two by an outage used to say nothing
