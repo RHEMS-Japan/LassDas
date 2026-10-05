@@ -199,8 +199,8 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			}
 		} else if waiting {
 			// The engine put a question to the requester and stopped there.
-			// Use the question's POST receipt, not comments arriving since it,
-			// then leave the request to the collector to await the answer.
+			// Use its POST receipt when available, otherwise the latest comment
+			// at this read, and leave later answers to the collector.
 			if err := recordQuestion(source, directory, rows, issue); err != nil {
 				turns.leave(issue.ID)
 				observe("waiting to record the question put to the requester: " + err.Error())
