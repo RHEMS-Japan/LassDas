@@ -474,6 +474,21 @@ the requester is not assigned an invisible question. An unreadable tracker
 does not establish that nothing was posted: work stays held, and the existing
 control-channel retry and pause rules apply until the read succeeds.
 
+`intake.question_no_post_limit` is a positive integer (default `2`). After
+that many successful question launches with no post, the question role is
+removed from the next choices until the issue's creator or a configured
+`intake.stop_user_ids` operator adds a new comment with words. The run records
+why and continues with the other permitted roles; reaching this limit is not
+completion or failure. The count survives restart. The new comment is carried
+into history unchanged and resets the count; empty status changes, controller
+notices and stop instructions do not reset it. With no other permitted action,
+the runtime waits without calling a decision model until a new reply is read.
+This applies to connected, free-routing and ordered runs.
+
+If a stored submission receipt names a comment missing from the next read,
+the run checks again every 10 seconds without relaunching the question role.
+It does not assume no question was posted. Stop instructions still apply.
+
 For a posted question, the run history records that
 it is waiting, and the collector records in `queue/jobs/<id>/question.json` how
 far that issue's comments had gone at the moment of the question. The request

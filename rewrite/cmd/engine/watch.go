@@ -30,6 +30,7 @@ type intakeConfig struct {
 	StopUserIDs         []int64 `json:"stop_user_ids,omitempty"`
 	StopReportRole      string  `json:"stop_report_role,omitempty"`
 	QuestionRole        string  `json:"question_role,omitempty"`
+	QuestionNoPostLimit *int    `json:"question_no_post_limit,omitempty"`
 	IssueIDs            []int64 `json:"issue_ids,omitempty"`
 	// CategoryIDs narrows discovery to issues that carry one of these tracker
 	// categories, so a project shared with people's own tickets hands the

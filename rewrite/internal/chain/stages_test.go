@@ -344,13 +344,10 @@ func TestStagesContinueWhenTheQuestionRolePostedNothing(t *testing.T) {
 	decisions := 0
 	var ran []string
 	engine := Chain{Store: store, Workflow: flow, WaitAfter: "ask_requester",
-		QuestionPosted: func(context.Context) (bool, error) { return false, nil },
+		QuestionPosted: func(context.Context) (QuestionObservation, error) { return QuestionObservation{}, nil },
 		Router: StageRouter{Entrance: testRouter(func(context.Context, State) (Assignment, error) {
 			decisions++
-			if decisions == 1 {
-				return Assignment{Role: "ask_requester"}, nil
-			}
-			return Assignment{Role: "work"}, nil
+			return Assignment{Role: "ask_requester"}, nil
 		})},
 		Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
 			ran = append(ran, a.Role)
@@ -362,7 +359,7 @@ func TestStagesContinueWhenTheQuestionRolePostedNothing(t *testing.T) {
 	if err := engine.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"elicit", "ask_requester", "elicit", "work", "verify", "deliver", "confirm"}
+	want := []string{"elicit", "ask_requester", "elicit", "ask_requester", "elicit", "work", "verify", "deliver", "confirm"}
 	if !store.state.Done || store.state.Waiting || decisions != 2 || !reflect.DeepEqual(ran, want) {
 		t.Fatalf("done=%t waiting=%t decisions=%d ran=%v", store.state.Done, store.state.Waiting, decisions, ran)
 	}
