@@ -25,6 +25,16 @@ def read_file(path):
             return source.read()
 
 
+def linked(path):
+    """True when any component of the path, the leaf included, is a symbolic link."""
+    current = Path(Path(path).anchor)
+    for part in Path(path).parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
 def run_tool(command, environment, **options):
     result = subprocess.run(command, env=environment, capture_output=True, timeout=30, **options)
     if result.returncode != 0:
@@ -60,7 +70,9 @@ def main():
         try:
             with directory(str(download)):
                 pass
-        except OSError:
+        except (OSError, QueueError):
+            if linked(download):
+                raise QueueError("--modules must be an absolute path without symbolic links, like the other inputs") from None
             raise QueueError("--modules needs a readable cache/download directory with the required archives") from None
         module_proxy = download.as_uri()
     for path in inputs:
@@ -120,8 +132,14 @@ def main():
                 process.wait()
             raise QueueError("offline rehearsal timed out") from None
     if code != 0:
-        raise QueueError("offline rehearsal failed; inspect the retained private output; "
-                         "external Go modules require --modules with all required cached archives")
+        log = read_file(str(output / "run.log"))
+        reason = "offline rehearsal failed; inspect the retained private output"
+        if b"[setup failed]" in log or b"module lookup disabled" in log:
+            if args.modules is None:
+                reason += "; the candidate did not build offline: external Go modules require --modules with all required cached archives"
+            else:
+                reason += "; the candidate did not build offline: the supplied module cache lacks a required archive (see run.log)"
+        raise QueueError(reason)
     result = json.loads(read_file(str(output / "result.json")))
     if not valid_result(result, args.seconds * 1000):
         raise QueueError("offline rehearsal lacks read coverage or normal-exit evidence")

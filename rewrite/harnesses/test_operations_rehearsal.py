@@ -27,6 +27,8 @@ if Path(sys.argv[0]).name == "fake-git":
     sys.exit(settings.get("git_rc", 0))
 (root / "go-called").write_text(json.dumps(dict(args=sys.argv[1:], env=dict(os.environ))))
 print("private fixture toolchain diagnostic")
+if settings.get("setup_failed"):
+    print("FAIL\tticket-runner/cmd/engine [setup failed]")
 if settings.get("result", True):
     result = dict(records=2, reads=4, required_reads=1, observed_ms=1000,
                   normal_exit=True, full_tick_coverage=False)
@@ -191,6 +193,41 @@ func TestRehearsalOfflineQueue(t *testing.T) {
         self.fake_git.unlink()
         self.assertEqual(self.invoke().returncode, 2)
         self.assertFalse(self.output.exists())
+
+    def test_failure_reason_names_the_offline_build_only_when_the_build_failed(self):
+        cache = self.root / "cache"
+        (cache / "cache/download").mkdir(parents=True)
+        result = self.invoke(modules=cache, go_rc=7)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("inspect the retained private output", result.stderr)
+        self.assertNotIn("--modules", result.stderr)
+        self.assertNotIn("module cache", result.stderr)
+        self.output = self.root / "output-no-cache"
+        result = self.invoke(go_rc=1, setup_failed=True, result=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("did not build offline", result.stderr)
+        self.assertIn("--modules", result.stderr)
+        self.output = self.root / "output-short-cache"
+        result = self.invoke(modules=cache, go_rc=1, setup_failed=True, result=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("module cache lacks a required archive", result.stderr)
+        self.assertNotIn("private fixture", result.stdout + result.stderr)
+
+    def test_linked_modules_path_says_it_is_a_link(self):
+        cache = self.root / "real cache"
+        (cache / "cache/download").mkdir(parents=True)
+        link = self.root / "linked cache"
+        link.symlink_to(cache, target_is_directory=True)
+        result = self.invoke(modules=link)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("symbolic links", result.stderr)
+        self.assertFalse((self.root / "git-called").exists())
+        empty = self.root / "empty cache"
+        empty.mkdir()
+        result = self.invoke(modules=empty)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("readable cache/download", result.stderr)
+        self.assertNotIn("symbolic links", result.stderr)
 
     def test_linked_queue_and_output_ancestors_are_refused(self):
         link = self.root / "linked-queue"
