@@ -1413,6 +1413,55 @@ again. A check whose cleanup fails after a passing
 observation sends the work back. The scripted report stage shows what reaches
 a report, not that a model writes it.
 
+### The project's definition of done
+
+An installation names, in the shared `instructions`, where the consumer's
+**definition of done** (完了の定義) is written: for each part of its
+repository, what must be seen before a change counts as correct, the command
+that checks it, how the change's behaviour is observed, and what only a person
+can check. It lives in the consumer's repository, in a file and form the owner
+chooses, and changes through that repository's pull requests.
+deploy/ticket-engine/SETUP.md ("What counts as done in this repository") says
+how it is settled with the owner, and how each command is run inside a role,
+once on the integration branch and once with each checked part broken, before
+the intake opens. The engine has no setting for it, looks for no file name and
+reads no format.
+
+The shipped roles of all five examples are told what to do with it:
+
+- Requirements (`elicit`) list, in the completion condition, each item that
+  applies to the request and how it will be checked: by a configured command,
+  by a person the definition names, or by nobody in this installation. A part
+  the change touches that the definition does not cover is named as a gap; the
+  build passing does not settle it, and it is not a question for the
+  requester.
+- The working role (`work`, or `implement` in the connected examples) runs the
+  checks it can, says for each item whether it checked it, and, only when the
+  instructions allow additions, adds an item the definition lacks: it adds
+  only, and never removes or weakens an item. The addition reaches the
+  consumer's repository in the same reviewed delivery pull request as the
+  change, as a knowledge change does. Without that permission the item is
+  named in its report.
+- In the ordered examples `confirm_change` reads it as well. The requester is
+  still asked only about a change to how a person operates the product, to
+  what a screen shows or does, or to the public API. A check the definition
+  leaves to a person outside those three is named, so that the report says it
+  was not checked; with `DELIVERY_MERGE_METHOD=none`, the person who merges
+  can make it before anything reaches the integration branch.
+- The report opens with each item that applies, marked `確かめた` with the
+  record that shows it, or `確かめていない` with the reason, and does not call
+  the request finished while an item is `確かめていない`. With no definition
+  named, it opens with `完了の定義: なし (導入先が定めていない)`. It names any
+  item the work added and proposes one the work found missing but did not add.
+
+These are instructions to the models, like the report's three sections above.
+No stage reads a role's account of the items, and nothing stops a model from
+marking an item that nobody checked `確かめた`; what carries a request on is
+still the configured commands' exit status. `cmd/engine/examples_test.go`
+holds the five examples to these sentences, and
+`harnesses/test_setup_done_definition.py` runs the setup guide's check against
+local stand-ins. Neither shows that a real model follows the sentences.
+
 ### A read-only status page
 
 `bin/ticket-status` serves what the queue directory holds, as it is, over

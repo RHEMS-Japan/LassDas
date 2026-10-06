@@ -335,6 +335,21 @@ requester's answer settles requirements; it does not widen permissions.
 - Used in: README.md:426, START.md:110
 - Avoid: none.
 
+### definition of done / 完了の定義
+
+What must be seen before a change to the consumer's repository counts as done
+there, written by the consumer in its own repository and form: for each part
+of the repository, what counts as correct, the command that checks it, how the
+change's behaviour is observed, and what only a person can check. The
+instructions give its location, and the engine reads neither the file nor its
+form. Requirements list the items that apply to one request; the report marks
+each as checked (`確かめた`) or not (`確かめていない`) and gives the reason.
+
+- Used in: README.md:1419, examples/operator-stages.json:111
+- Not the same as: requirements, whose completion condition belongs to one
+  request.
+- Avoid: none.
+
 ### question / 質問
 
 A comment that the question role, `intake.question_role`, posts to the issue.

@@ -69,6 +69,57 @@ func TestExamplesAskForObservedResultsSeparateFromTestsAndLiveChecks(t *testing.
 	}
 }
 
+// Every example has its roles read the project's definition of done where the
+// operator's guidance names it, and has the report open with each item it
+// applies, checked or not, without calling the request finished while one is
+// not. The engine reads no definition; these sentences are the only place the
+// shipped configuration asks for one, so this holds all five examples to them.
+func TestExamplesReadTheDefinitionOfDoneAndOpenTheReportWithWhatWasNotChecked(t *testing.T) {
+	work := []string{"definition of done at the location the shared instructions name",
+		"say for each item whether you checked it", "only when the shared instructions allow additions",
+		"never remove or weaken an existing item", "name the missing item in your report"}
+	report := []string{"definition of done at the location the shared instructions name",
+		"Open the report with each of its items", "確かめた with the observation in the records", "確かめていない with the reason",
+		"While any item is 確かめていない, do not write that the request is finished, complete or done; name those items first",
+		"open the report with 完了の定義: なし (導入先が定めていない)", "propose an addition"}
+	phrases := map[string][]string{
+		"elicit": {"definition of done at the location the shared instructions name",
+			"In the completion condition, list each of its items", "by nobody in this installation, with the reason",
+			"the build passing alone does not settle it", "not a question for the requester", "name no definition of done"},
+		"work": work, "implement": work, "report": report, "draft_report": report,
+		"confirm_change": {"definition of done", "how a person operates the product, what a screen shows or does, or the public API",
+			"no reason to ask before delivery", "the report says it was not checked"},
+	}
+	for _, name := range []string{"operator.json", "operator-gateway.json", "operator-github.json", "operator-stages.json", "operator-github-stages.json"} {
+		cfg := loadExample(t, "../../examples/"+name)
+		first, _, _ := strings.Cut(cfg.Instructions, ". ")
+		if !strings.HasPrefix(first, "Operator setup is incomplete:") || !strings.Contains(first, "where the project's definition of done is written and whether roles may add to it") {
+			t.Errorf("%s: the sentence the operator replaces does not ask where the definition of done is: %s", name, first)
+		}
+		required := []string{"elicit", "implement", "draft_report"}
+		if strings.Contains(name, "stages") {
+			required = []string{"elicit", "work", "confirm_change", "report"}
+		}
+		for _, role := range cfg.Roles {
+			want, carried := phrases[role.Name]
+			if !carried {
+				continue
+			}
+			required = slices.DeleteFunc(required, func(r string) bool { return r == role.Name })
+			for _, process := range role.Processes {
+				for _, phrase := range want {
+					if !strings.Contains(process.Instructions, phrase) {
+						t.Errorf("%s/%s/%s: instructions omit %q", name, role.Name, process.Name, phrase)
+					}
+				}
+			}
+		}
+		if len(required) != 0 {
+			t.Errorf("%s: no role %v reads the definition of done", name, required)
+		}
+	}
+}
+
 // Both shipped examples are held to the same boundaries. The expected
 // credential names are written here, not read back out of the file.
 var operatorExamples = []struct {
