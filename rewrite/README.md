@@ -2107,6 +2107,20 @@ The review command's model context limits still apply; a local process-to-review
 test checks that ordinary diagnostic output does not hide the answer from the
 model request, not that a real model will judge the resulting note correctly.
 
+The reporting roles also read the saved review history and available project
+knowledge for repeated findings. At a second independent occurrence of the same
+kind of finding, they propose a follow-up PR: a focused addition to the approved
+knowledge location or a regression check. The report names both observations,
+the common cause, the proposed location and how to check the result. A retry or
+replayed record of one finding is not a second occurrence. With only one known
+occurrence, no recurrence-based proposal is needed.
+
+This is model guidance, not a controller-owned classification or counter. The
+report does not create the follow-up PR or widen the current request's write
+permissions. It must not claim that a proposal was implemented. Other requests
+are visible only if the operator's existing knowledge sources include them;
+missing history is not evidence that a finding has never occurred before.
+
 **The bridge is not a sandbox.** The configured container/launcher must enforce
 filesystem, network and credential access. Separate environment variables alone
 do not make a host execution safe. The local experiments enforce these limits
