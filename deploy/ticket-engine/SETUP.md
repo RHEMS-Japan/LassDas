@@ -69,19 +69,21 @@ The shipped ordered configurations, `rewrite/examples/operator-stages.json`
 for Backlog and `rewrite/examples/operator-github-stages.json` for GitHub Issues,
 run every request through the same stages. A stage that runs a command is
 finished only when the command exits 0; a stage that runs a model is finished
-when its model process returns without an error. Two decisions are a model's:
-after requirements, whether to ask the requester (initially or after a failure),
-and in the review, whether the change needs rework. Beyond those two, nothing
-a model writes moves the request: writing "done" or "delivered" changes
-nothing.
+when its model process returns without an error. Three decisions are a
+model's: after requirements, whether to ask the requester (initially or after a
+failure); in the review, whether the change needs rework; and after
+`confirm_change`, whether the requester must see the change before it is
+delivered. Beyond those three, nothing a model writes moves the request:
+writing "done" or "delivered" changes nothing.
 
 | Stage | Kind | What happens |
 | --- | --- | --- |
 | `elicit` | model | Settles what the request asks for, from the request, the checkout and your instructions. Points only the requester can decide are listed with choices. |
-| (`ask_requester`) | model | Only when such points are left: posts one comment with them, and the request waits for the requester's reply. |
+| (`ask_requester`) | model | Only when such points are left: posts one comment with them, and the request waits for the requester's reply. After `confirm_change` it shows the requester the change instead. |
 | `work` | model | Investigates, changes the checkout and runs the project's checks. |
 | `verify` | command | Your build and test commands, against the changed checkout. |
 | `review` | command | A second model reviews the diff and the test output; a blocking verdict sends the work back to `elicit`, then repair or a requester-only question. Without a verdict it neither lets the work through nor sends it back: it waits and asks again ([section 4](#when-the-review-gets-no-verdict)). |
+| `confirm_change` | model | Reads the change in the checkout. When it alters how a person operates the product, a screen or the public API, or when that cannot be told, the decision asks the requester through `ask_requester`, and nothing is delivered before a comment from them; otherwise the report says `依頼者の確認: なし` and the work goes on to `deliver`. |
 | `deliver` | command | Commits, brings the ticket branch up to date with the integration branch, pushes `ticket/<ISSUE-KEY>`, opens or reuses one pull request and merges it, or leaves the merge to a person ([section 4](#leaving-the-merge-to-a-person)). |
 | `verify_merged` | command | Fetches the integration branch after the merge, or the pull request's branch when the merge is left to a person, and runs your build and tests on it. |
 | `report` | model | Writes the report and posts it on the issue. |
@@ -97,7 +99,9 @@ In this example, verification, review and delivery failures return to `elicit`.
 It reads the actual failure: an ordinary repair or an unknown cause goes to
 `work` to investigate and check. After handoff, only a newly required expansion
 of authority that the requester alone can approve goes through `ask_requester`
-with concrete alternatives. The entrance rule to ask when requirements remain
+with concrete alternatives; the one other question after handoff is the one
+about the change, after `confirm_change` (rewrite/README.md, "Confirming the
+change before delivery"). The entrance rule to ask when requirements remain
 uncertain does not apply to recovery. A reply never changes filesystem, delivery
 or credential permissions.
 If a chosen alternative needs wider access, the operator must update that setting;
@@ -855,6 +859,10 @@ A `<...>` left in place is found by the check at the end of
   `...; only issues carrying one of the categories [<id>]`.
 - `stall_notice_minutes` (default 90; 0 turns it off): rewrite/README.md,
   "What the requester is told at night".
+- `question_reminder_minutes` (1440 in the example; absent or 0 says nothing):
+  a question that has waited that long is said again, once per interval, in
+  the engine's fixed words. Neither the reminder nor the time ends the wait or
+  delivers anything: rewrite/README.md, "What the requester is told at night".
 - `min_model_credit` (default off) reads the remaining limit of the key named
   by `router.decision.key_env`, from `intake.model_credit_url` (by default
   OpenRouter's `https://openrouter.ai/api/v1/key`, asked on every poll). The
@@ -874,6 +882,7 @@ A stage can carry a sentence of yours, posted once when it first begins if
   {"name": "work", "kind": "model", "announce": "自動実装を開始しました。"},
   {"name": "verify", "kind": "command", "on_failure": "elicit"},
   {"name": "review", "kind": "command", "on_failure": "elicit"},
+  {"name": "confirm_change", "kind": "model", "confirm": true},
   {"name": "deliver", "kind": "command", "on_failure": "elicit", "announce": "納品先へのマージを始めました。マージ後の検証と報告を続けます。"},
   {"name": "verify_merged", "kind": "command", "on_failure": "elicit"},
   {"name": "report", "kind": "model"},

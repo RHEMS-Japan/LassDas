@@ -590,6 +590,7 @@ runtime, not a model, decides what runs next.
     { "name": "work", "kind": "model" },
     { "name": "verify", "kind": "command", "on_failure": "elicit" },
     { "name": "review", "kind": "command", "on_failure": "elicit" },
+    { "name": "confirm_change", "kind": "model", "confirm": true },
     { "name": "deliver", "kind": "command", "on_failure": "elicit" },
     { "name": "verify_merged", "kind": "command", "on_failure": "elicit" },
     { "name": "report", "kind": "model" },
@@ -836,6 +837,7 @@ requests are what the person merging relies on, the stage can be left out:
     { "name": "work", "kind": "model" },
     { "name": "verify", "kind": "command", "on_failure": "elicit" },
     { "name": "review", "kind": "command", "on_failure": "elicit" },
+    { "name": "confirm_change", "kind": "model", "confirm": true },
     { "name": "deliver", "kind": "command", "on_failure": "elicit" },
     { "name": "report", "kind": "model" },
     { "name": "confirm_report", "kind": "command", "on_failure": "report" }
@@ -1144,7 +1146,9 @@ for a simple repair. Existing configurations retain their selected `on_failure`
 targets until the operator edits them. `confirm_report` still returns to `report`.
 
 `examples/operator-stages.json` is the same chain as `operator.json` written
-this way, for the runtime image of `deploy/ticket-engine`. Its delivery and its
+this way, with a stage that confirms the change before delivery added between
+the review and the delivery (below), for the runtime image of
+`deploy/ticket-engine`. Its delivery and its
 check of the delivered branch are that image's fixed processes,
 `deliver_git.py` and `verify_merged.py` under `/opt/ticket-automation/scripts`
 (copied there from `harnesses/`; they are not part of this bundle). Every
@@ -1246,6 +1250,20 @@ before work is accepted. Without such a stage nothing changes, and the
 question is offered only after the first stage. Each pass through the stage
 costs one working-role launch and one decision, for an internal change too.
 Connected workflows have no such stage.
+
+The two ordered examples have this stage as `confirm_change`, with
+`workflow.confirmation_rework_limit` set to its default of 2 and
+`intake.question_reminder_minutes` set to 1440, so a question that waits a
+day is said again. Its role reads the checkout and the assigned issue's
+comments and writes nothing. It reads the checkout as the earlier stages left
+it and does not run the preparation (`git_workspace.py`) the other roles run:
+a model stage that did not exit 0 runs again, so a lost workspace prepared
+afresh at this stage would let the delivery go on as if the review had passed
+on the lost work. The delivery's own preparation finds the loss instead and
+sends the work back to requirements. The question role's instructions there give the
+question for a change a fixed closing sentence in Japanese, and the report
+says whether the requester's confirmation was asked: `依頼者の確認: なし` with
+the reason, or the question and the reply.
 
 ### A pull request description from the run's reports
 

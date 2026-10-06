@@ -82,6 +82,8 @@ func TestUnchangedStagesRoleHelper(t *testing.T) {
 			fixturePost(t, report)
 		}
 		fmt.Print(report)
+	case "confirm_change":
+		fmt.Print("The change read from the checkout alters no operation, screen or public API." + stagesNoConfirmation)
 	case "confirm_report":
 		reported, err := os.ReadFile("report/result.md")
 		if err != nil {
@@ -315,7 +317,13 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(run 
 				if options.writes {
 					env["UNCHANGED_STAGE_WRITES"] = "1"
 				}
-				p.Command = append(slices.Clone(prepare), binary, "-test.run=^TestUnchangedStagesRoleHelper$")
+				// A role prepares the checkout here exactly when the shipped
+				// example has it do so.
+				launch := []string{binary, "-test.run=^TestUnchangedStagesRoleHelper$"}
+				if slices.Contains(p.Command, "/opt/ticket-automation/bundle/harnesses/git_workspace.py") {
+					launch = append(slices.Clone(prepare), launch...)
+				}
+				p.Command = launch
 			}
 			p.Env = env
 		}
@@ -359,8 +367,9 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(run 
 				}
 				return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
 			case "/api/v1/chat/completions":
-				// The entrance carries straight on; nobody is asked anything.
-				return routingSelectionReply(r, chain.Assignment{Role: "work"}), nil
+				// Nobody is asked anything: after requirements the work goes on,
+				// and after the change was read it is delivered.
+				return routingSelectionReply(r, chain.Assignment{Role: orderedRunChoice(t, r)}), nil
 			}
 		}
 		return nil, fmt.Errorf("unexpected fixture destination %s %s", r.Method, r.URL.Path)
@@ -417,7 +426,7 @@ func TestAnOrderedRunFinishesARequestThatNeedsNoChange(t *testing.T) {
 			for range objections {
 				want = append(want, "elicit", "work", "verify", "review")
 			}
-			want = append(want, "deliver", "verify_merged", "report", "confirm_report")
+			want = append(want, "confirm_change", "deliver", "verify_merged", "report", "confirm_report")
 			var ran, reviewed []string
 			delivered, verified, receipts := "", "", 0
 			for _, result := range state.History {
@@ -536,7 +545,7 @@ func TestAnOrderedRunDoesNotEndUnchangedWithoutAVerdict(t *testing.T) {
 				sentBack := 0
 				for _, result := range state.History {
 					switch {
-					case slices.Contains([]string{"deliver", "verify_merged", "report", "confirm_report"}, result.Role):
+					case slices.Contains([]string{"confirm_change", "deliver", "verify_merged", "report", "confirm_report"}, result.Role):
 						t.Fatalf("the run went past the review without a verdict: %+v", result)
 					case result.Role == "review" && result.Speaker != "runtime" && result.Error == "":
 						t.Fatalf("a review without a verdict let the work through: %s", result.Output)
@@ -620,7 +629,7 @@ func TestALostWorkspaceSendsTheRunBackToWorkInsteadOfEndingUnchanged(t *testing.
 			lost++
 		}
 	}
-	want := []string{"elicit", "work", "verify", "review", "deliver", "elicit", "work", "verify", "review", "deliver", "verify_merged", "report", "confirm_report"}
+	want := []string{"elicit", "work", "verify", "review", "confirm_change", "deliver", "elicit", "work", "verify", "review", "confirm_change", "deliver", "verify_merged", "report", "confirm_report"}
 	if !slices.Equal(ran, want) || lost != 1 {
 		t.Fatalf("the stages ran as %v (lost workspace said %d times), not %v", ran, lost, want)
 	}
@@ -675,8 +684,8 @@ func TestARequestWhosePullRequestAPersonClosedEndsAndSaysSo(t *testing.T) {
 			nothingToCheck++
 		}
 	}
-	want := []string{"elicit", "work", "verify", "review", "deliver", "verify_merged", "elicit", "work", "verify", "review", "deliver",
-		"verify_merged", "report", "confirm_report"}
+	want := []string{"elicit", "work", "verify", "review", "confirm_change", "deliver", "verify_merged", "elicit", "work", "verify", "review",
+		"confirm_change", "deliver", "verify_merged", "report", "confirm_report"}
 	if !slices.Equal(ran, want) || closed != 1 || nothingToCheck != 1 {
 		t.Fatalf("the stages ran as %v (closed said %d times, nothing to check %d times), not %v", ran, closed, nothingToCheck, want)
 	}
