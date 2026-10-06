@@ -932,10 +932,12 @@ and then every six hours. There are three ways out: fix what keeps the verdict
 from coming (a setting, the credential, a model id) and restart the engine; a
 stop comment from the requester, which ends the run; or the model service
 coming back. A restart does not launch the review afresh: the runtime records
-the stopped review as a failure and goes on at the review's `on_failure` stage
-(`work` in the examples: the worker is launched again, with a record that the
-last step may have stopped midway), then the stages after it, the review among
-them, run again. The requester is told that the request carries on after a
+the stopped review as an interruption and goes on at the review's `on_failure`
+stage (`elicit` in the ordered examples). Requirements reads the actual
+interruption and prior answers; newly required authority can go to the question
+role, while investigation and repair within existing permission continue with
+the working roles. The later checks, including review, then run again. The
+requester is told that the request carries on after a
 restart. Each request to a model
 carries the change and the test output: once the waits reach
 `REVIEW_RETRY_CAP_SECONDS`, every model in `REVIEW_MODELS` is asked once
