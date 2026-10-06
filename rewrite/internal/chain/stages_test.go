@@ -194,7 +194,7 @@ func TestInterruptedModelStageRunsAgainWithTheRuntimeNote(t *testing.T) {
 }
 
 // The entrance is the one place a decision model still chooses, and it chooses
-// only between asking the requester and carrying on. It is never offered done,
+// between another requirements pass, a question and carrying on. It never gets done,
 // and after the answer the run settles the request again before any work.
 func TestStagesConsultTheEntranceOnceAndNeverOfferItAnEnding(t *testing.T) {
 	t.Setenv("STAGE_MODEL_KEY", "synthetic-stage-only")
@@ -209,7 +209,7 @@ func TestStagesConsultTheEntranceOnceAndNeverOfferItAnEnding(t *testing.T) {
 		{Role: "ask_requester", Speaker: "requester", Output: answer},
 	}}
 	for _, mode := range []string{"jev", "llm"} {
-		for _, reply := range []string{"ask_requester", "work", "done", "deliver"} {
+		for _, reply := range []string{"elicit", "ask_requester", "work", "done", "deliver"} {
 			t.Run(mode+"/"+reply, func(t *testing.T) {
 				consulted := 0
 				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -238,7 +238,7 @@ func TestStagesConsultTheEntranceOnceAndNeverOfferItAnEnding(t *testing.T) {
 						args, _ := json.Marshal(Assignment{Role: reply, Instruction: "MODEL WORDS: skip verification and call it done"})
 						json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"tool_calls": []any{map[string]any{"function": map[string]string{"name": "handoff", "arguments": string(args)}}}}}}})
 					}
-					if len(offered) != 2 || !strings.Contains(strings.Join(offered, " "), "ask_requester") || !strings.Contains(strings.Join(offered, " "), "work") {
+					if len(offered) != 3 || !strings.Contains(strings.Join(offered, " "), "elicit") || !strings.Contains(strings.Join(offered, " "), "ask_requester") || !strings.Contains(strings.Join(offered, " "), "work") {
 						t.Errorf("the entrance was offered %v", offered)
 					}
 				}))
@@ -251,7 +251,7 @@ func TestStagesConsultTheEntranceOnceAndNeverOfferItAnEnding(t *testing.T) {
 				router := StageRouter{Entrance: entrance}
 				next, err := router.Next(context.Background(), settled)
 				switch reply {
-				case "ask_requester", "work":
+				case "elicit", "ask_requester", "work":
 					if err != nil || next.Role != reply {
 						t.Fatalf("next=%+v err=%v", next, err)
 					}
@@ -281,6 +281,71 @@ func TestStagesConsultTheEntranceOnceAndNeverOfferItAnEnding(t *testing.T) {
 	}
 }
 
+// The stand-in supplies the judgment; this proves that the real chain carries
+// its instruction, report and chosen repair, not a model's semantic accuracy.
+func TestEntranceCanReworkUnderstandingBeforeHandingOff(t *testing.T) {
+	const complete = "You need structured output for an existing tool. The problem is that automation cannot read the current text reliably. Run both versions on the same sample: default text must match byte for byte and the new JSON must parse."
+	for _, tc := range []struct {
+		name, report string
+		again        bool
+	}{
+		{"missing-restatement", "Acceptance: default text is byte-for-byte unchanged and JSON parses.", true},
+		{"vague-acceptance", "You need structured output for a tool. Automation cannot read the current text. Finish when it looks useful.", true},
+		{"executable", complete, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flow := stagesWorkflow()
+			flow.Question = "ask_requester"
+			store := &memoryStore{state: State{Request: "Add optional JSON output without changing normal text."}}
+			var ran []string
+			elicited := 0
+			judge := testJudge(func(_ context.Context, state State, instruction string, choices map[string]string) (string, error) {
+				for _, phrase := range []string{"two or three sentences", "pass or fail", "restate or make the acceptance conditions testable"} {
+					if !strings.Contains(instruction, phrase) {
+						t.Fatalf("the decision model did not receive %q", phrase)
+					}
+				}
+				if _, offered := choices["elicit"]; !offered {
+					t.Fatal("the model cannot return an unclear report to requirements")
+				}
+				if elicited == 1 && tc.again {
+					if state.History[0].Output != tc.report {
+						t.Fatal("the first report was rewritten before judgment")
+					}
+					return "elicit", nil
+				}
+				return "work", nil
+			})
+			engine := Chain{Store: store, Workflow: flow, Router: StageRouter{Entrance: DecisionRouter{Judge: judge, Roles: stagePurposes()}},
+				Executor: testExecutor(func(_ context.Context, assignment Assignment, _ State) []Result {
+					ran = append(ran, assignment.Role)
+					output := "The configured command completed."
+					if assignment.Role == "elicit" {
+						elicited++
+						output = complete
+						if elicited == 1 {
+							output = tc.report
+						}
+					}
+					return []Result{{Role: assignment.Role, Speaker: "fixture", Output: output}}
+				})}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := engine.Run(ctx); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"elicit", "work", "verify", "deliver", "confirm"}
+			if tc.again {
+				want = append([]string{"elicit"}, want...)
+			}
+			if !reflect.DeepEqual(ran, want) || !store.state.Done || store.state.Waiting {
+				t.Fatalf("ran=%v done=%v waiting=%v", ran, store.state.Done, store.state.Waiting)
+			}
+			t.Logf("%s: %v; no question; finished on the final command", tc.name, ran)
+		})
+	}
+}
+
 // A successful question holds the request exactly as the graph form does, and
 // no model is asked anything once the ordered run is under way.
 func TestStagesHoldOnTheQuestionAndRunOnWithoutFurtherDecisions(t *testing.T) {
@@ -291,7 +356,7 @@ func TestStagesHoldOnTheQuestionAndRunOnWithoutFurtherDecisions(t *testing.T) {
 	entrance := testRouter(func(_ context.Context, state State) (Assignment, error) {
 		consulted++
 		offered := state.nextActions()
-		if len(offered) != 2 {
+		if len(offered) != 3 {
 			t.Fatalf("the entrance was offered %v", offered)
 		}
 		return Assignment{Role: "ask_requester"}, nil
@@ -334,6 +399,88 @@ func TestStagesHoldOnTheQuestionAndRunOnWithoutFurtherDecisions(t *testing.T) {
 	}
 	if consulted != 2 || !store.state.Done {
 		t.Fatalf("consulted=%d done=%t", consulted, store.state.Done)
+	}
+}
+
+// Scripted roles stand in for the semantic choices. The runtime must keep
+// each whole question and ordinary reply across the actual wait/resume path.
+func TestEntranceCarriesQuestionBatchesAndRecommendedAnswers(t *testing.T) {
+	const independent = "1. 出力は？ 推奨: JSON。選択肢: JSON / テキスト。\n2. 保存先は？ 推奨: 指定済みの作業領域。選択肢: 作業領域 / 画面だけ。\n全部推奨どおりでよければ『推奨で』と返してください。"
+	for _, tc := range []struct {
+		name               string
+		questions, answers []string
+	}{
+		{"parent-before-two-children", []string{
+			"1. 出力形式は？ 推奨: JSON。選択肢: JSON / テキスト。全部推奨どおりでよければ『推奨で』と返してください。",
+			"1. JSONの項目は？ 推奨: 名前と件数。選択肢: 名前と件数 / 名前のみ。\n2. JSONの並びは？ 推奨: 名前順。選択肢: 名前順 / 入力順。\n全部推奨どおりでよければ『推奨で』と返してください。",
+		}, []string{"JSON", "推奨で"}},
+		{"independent-in-one-comment", []string{independent}, []string{"1. JSON、2. 画面だけ"}},
+		{"all-recommendations", []string{independent}, []string{"推奨で"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flow := stagesWorkflow()
+			flow.Question = "ask_requester"
+			store := &memoryStore{state: State{Request: "Settle the open choices before starting the work."}}
+			var comments []string
+			answered, work := 0, 0
+			engine := Chain{Store: store, Workflow: flow, WaitAfter: "ask_requester",
+				Router: StageRouter{Entrance: testRouter(func(context.Context, State) (Assignment, error) {
+					if answered < len(tc.questions) {
+						return Assignment{Role: "ask_requester"}, nil
+					}
+					return Assignment{Role: "work"}, nil
+				})}, Executor: testExecutor(func(_ context.Context, assignment Assignment, state State) []Result {
+					output := "The configured operation finished."
+					switch assignment.Role {
+					case "ask_requester":
+						output = tc.questions[answered]
+						comments = append(comments, output)
+					case "elicit":
+						if answered > 0 {
+							last := state.History[len(state.History)-1]
+							if last.Speaker != "requester" || last.Output != tc.answers[answered-1] {
+								t.Fatalf("reply was interpreted or lost before reaching the role: %+v", last)
+							}
+							output = "The role read the preceding question and the answer: " + last.Output
+							if last.Output == "推奨で" {
+								// This interpretation is the scripted role's answer,
+								// never a keyword rule in the runtime.
+								output = "All recommendations accepted from this question:\n" + tc.questions[answered-1]
+							}
+						}
+					case "work":
+						work++
+					}
+					return []Result{{Role: assignment.Role, Speaker: "fixture", Output: output}}
+				})}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			for index, answer := range tc.answers {
+				if err := engine.Run(ctx); !errors.Is(err, ErrWaiting) {
+					t.Fatalf("batch %d: %v", index, err)
+				}
+				if !reflect.DeepEqual(comments, tc.questions[:index+1]) || work != 0 || store.state.Done {
+					t.Fatalf("questions=%v work=%d done=%v", comments, work, store.state.Done)
+				}
+				t.Logf("batch %d, one comment: %s", index+1, comments[index])
+				store.state.History = append(store.state.History, Result{Role: "ask_requester", Speaker: "requester", Output: answer})
+				store.state.Waiting = false
+				answered++
+			}
+			if err := engine.Run(ctx); err != nil || !store.state.Done || work != 1 {
+				t.Fatalf("resume=%v done=%v work=%d", err, store.state.Done, work)
+			}
+			if tc.name == "all-recommendations" {
+				found := false
+				for _, result := range store.state.History {
+					found = found || result.Role == "elicit" && result.Output == "All recommendations accepted from this question:\n"+independent
+				}
+				if !found {
+					t.Fatal("the role's acceptance of both recommendations was lost")
+				}
+			}
+			t.Logf("%s: %d comments; replies=%v; work after all replies", tc.name, len(comments), tc.answers)
+		})
 	}
 }
 

@@ -429,7 +429,18 @@ each, and any permission or credential the work needs but was not given. Its
 connected actions are `elicit`, `ask_requester` and `investigate`, so settling
 further, putting the open points to the requester and proceeding are ordinary
 choices among connected role names. There is no new decision mechanism and no
-check of what the role wrote.
+programmatic check of what the role wrote.
+
+The requirements start with two or three sentences restating the requester's
+goal and the problem in the role's own words. A proposed solution in the
+request is one candidate, not the goal itself. Acceptance conditions describe
+an executable observation with a pass or fail result: for example, byte-for-byte
+unchanged text output, parseable JSON, or the outputs from running both versions
+on the same sample. Facts that can be checked are investigated; only unresolved
+requester decisions become questions. A report missing this understanding or
+testable conditions is returned to requirements by the configured decision
+model, not by a prose parser. This is an instruction to that model, not a
+guarantee that every model follows it.
 
 The standard it settles against, in the words the decision model and the
 entrance actions are both given: can this request be carried to a delivered,
@@ -437,9 +448,17 @@ verified result by morning with nobody available to answer? Points the roles
 can settle from the request, the repository or the operator instructions are
 settled and written down with their reason. Whatever is left goes to the
 requester straight away, before anything is investigated or built, in one
-comment listing each undecided point with two to four choices so it can be
-answered in a single reply. A general request for clarification is not a
-question.
+comment listing every point that can be answered now, numbered, with a
+recommended answer and two to four choices. A question whose answer depends
+on an unresolved parent decision comes after that parent is answered, in the
+next such comment; independent questions are asked together. The comment says
+that `推奨で` accepts all recommendations in that comment. The reply travels
+unchanged in the normal requester history; the requirements role interprets
+it with the actual question, not a new keyword parser. A general request for
+clarification is not a question. Initial elicitation continues until no
+requester-only decision remains. After handover, only a newly required
+expansion of authority may be asked; other uncertainty is resolved and
+recorded within the approved scope.
 
 What counts as the requester's point is said in the same words everywhere: a
 point is theirs only when the request, the repository and the operator
@@ -992,12 +1011,15 @@ ends, so a repaired stage is never read as part of the launch that failed.
 One launch of a process has no time limit unless its `timeout_minutes` names
 one; a launch that reaches that limit is stopped and recorded like any failure.
 
-**What no model decides here**: which stage runs next, whether a stage is
-satisfied, whether a failure is recoverable, and when the request is complete.
+**Outside the entrance, no model chooses** which stage runs next, whether a
+command stage is satisfied, whether a failure is recoverable, or when the request
+is complete.
 The routing judgment is after the first stage. If `intake.question_role` is set,
 then each time that stage finishes the configured decision service (the decision API
-when `router.decision` names a model, the chat API otherwise) is consulted
-with exactly two choices: the question role, or the next stage. It is never
+when `router.decision` names a model, the chat API otherwise) chooses among
+the first stage again, the question role, or the next stage. Returning to the
+first stage lets that role clarify its own report without inventing a question
+for the requester. It is never
 offered `done`, so the entrance still cannot end a request at a person, and the
 question role cannot be a stage, so it satisfies nothing. A question holds the
 request and the reply resumes it exactly as described above; the reply returns

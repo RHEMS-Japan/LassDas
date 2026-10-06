@@ -732,7 +732,7 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			}
 			for _, enum := range offered {
 				slices.Sort(enum)
-				if !slices.Equal(enum, []string{"ask_requester", "work"}) {
+				if !slices.Equal(enum, []string{"ask_requester", "elicit", "work"}) {
 					t.Fatalf("the entrance was offered %v", enum)
 				}
 			}

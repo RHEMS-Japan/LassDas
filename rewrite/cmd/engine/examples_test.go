@@ -577,6 +577,26 @@ func exampleIntakeToArtifact(t *testing.T, path string) {
 // and neither of those two actions can finish the work or change the checkout.
 // Every shipped example's entrance actions carry the standard in the same
 // words; a copy that drifted would tell its decision something different.
+func TestEveryExampleAsksAnswerableQuestionsTogetherAndRestatesTheGoal(t *testing.T) {
+	for _, path := range []string{"../../examples/operator.json", "../../examples/operator-gateway.json", "../../examples/operator-stages.json", "../../examples/operator-github.json", "../../examples/operator-github-stages.json"} {
+		cfg := loadExample(t, path)
+		for _, role := range cfg.Roles {
+			var phrases []string
+			switch role.Name {
+			case "elicit":
+				phrases = []string{"two or three sentences", "pass or fail", "proposed solution is one candidate", "推奨で"}
+			case "ask_requester":
+				phrases = []string{"every question that can be answered now", "numbered", "recommended answer", "parent decision", "推奨で"}
+			}
+			for _, phrase := range phrases {
+				if !strings.Contains(routingRoleDescription(role), phrase) {
+					t.Errorf("%s: %s lacks %q", path, role.Name, phrase)
+				}
+			}
+		}
+	}
+}
+
 func TestEveryExampleCarriesTheEntranceStandard(t *testing.T) {
 	for _, path := range []string{"../../examples/operator.json", "../../examples/operator-gateway.json", "../../examples/operator-stages.json"} {
 		cfg := loadExample(t, path)

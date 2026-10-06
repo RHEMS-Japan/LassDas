@@ -11,8 +11,9 @@ import (
 // A stage is satisfied by something the runtime observed, never by what a role
 // wrote. A command stage is satisfied when its configured commands all exit 0.
 // A model stage is satisfied when its processes ran without a process error:
-// its words are not read at all, and the command stage that follows is what
-// proves the work. There is no counter and no failing end state.
+// its words do not prove completed work. At the entrance the decision model
+// reads the report before handing over; later commands prove the work.
+// There is no counter and no failing end state.
 const (
 	ModelStage   = "model"
 	CommandStage = "command"
@@ -33,8 +34,8 @@ type Stage struct {
 
 // StageRouter advances an ordered run on observed facts. It calls no model of
 // its own. The single judgment left to a model is at the entrance, where the
-// configured decision router chooses between the operator's question role and
-// the next stage; it is never offered done, so a question cannot end a request.
+// configured decision router chooses another requirements pass, the operator's
+// question role or the next stage; it is never offered done.
 type StageRouter struct {
 	Entrance Router
 }
@@ -148,7 +149,7 @@ func (s State) stageActions() []string {
 		// A model stage that could not run, or was interrupted, runs again.
 		return []string{stage.Name}
 	case index == 0 && s.Workflow.Question != "" && next != "done":
-		return []string{s.Workflow.Question, next}
+		return []string{stage.Name, s.Workflow.Question, next}
 	}
 	return []string{next}
 }
@@ -166,6 +167,8 @@ func (s State) stageInstruction(name string) string {
 	fmt.Fprintf(&text, "Stage %d of %d in the configured run: %s.\n", index+1, len(stages), stage.Name)
 	if stage.Kind == CommandStage {
 		text.WriteString("The runtime launches this stage's configured commands and records what they returned. Their exit status is the only thing that satisfies this stage.\n")
+	} else if index == 0 && s.Workflow.Question != "" {
+		text.WriteString("The configured decision model reads your requirements report and chooses another requirements pass, a question or the next stage. Use ordinary prose; the runtime does not grade its wording. A later command stage proves completed work.\n")
 	} else {
 		text.WriteString("Nothing you write is read, decoded or graded, and saying the work is done advances nothing. ")
 		if follow, ok := followingCommand(stages, index); ok {
