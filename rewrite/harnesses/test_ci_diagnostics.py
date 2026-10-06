@@ -60,6 +60,34 @@ class CIDiagnosticsTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(reason, result.stderr)
 
+    def test_onbuild_heredocs_are_not_mistaken_for_build_stages(self):
+        for instruction in ("ONBUILD RUN <<WORD", "onbuild copy <<'WORD' /out", "ONBUILD ADD <<-WORD /out"):
+            with self.subTest(instruction=instruction):
+                result = self.read_version("FROM golang:1.26.8\n" + instruction + "\nFROM golang:0.0.0\nWORD\nFROM golang:1.26.8\n")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "1.26.8\n")
+                mismatch = self.read_version("FROM golang:1.26.8\n" + instruction + "\ntext\nWORD\nFROM golang:1.25.0\n")
+                self.assertNotEqual(mismatch.returncode, 0)
+                self.assertIn("different Go versions", mismatch.stderr)
+
+    def test_unsupported_here_strings_and_separated_delimiters_fail_explicitly(self):
+        for prefix in ("RUN", "ONBUILD RUN"):
+            for shell in ("cat <<< WORD", "cat <<- WORD"):
+                with self.subTest(prefix=prefix, shell=shell):
+                    result = self.read_version("FROM golang:1.26.8\n" + prefix + " " + shell + "\n")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("unsupported heredoc delimiter", result.stderr)
+
+    def test_large_literal_marker_is_read_within_the_command_timeout(self):
+        # A shell-string scan must not require minutes for one Dockerfile line.
+        text = "FROM golang:1.26.8\nRUN echo '" + "x" * (50 * 1024) + " <<WORD'\nFROM golang:1.26.8\n"
+        try:
+            result = self.read_version(text)
+        except subprocess.TimeoutExpired:
+            self.fail("a 50 KiB literal marker exceeded the ten-second command bound")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "1.26.8\n")
+
     def test_from_variants_and_mismatches_still_fail_or_read_explicitly(self):
         for dockerfile, ok in (
             ("from --platform=linux/arm64 registry.example/library/golang:1.26.8-bookworm AS build\n", True),

@@ -477,18 +477,43 @@ request at a person.
 }
 ```
 
-`intake.question_role` names the configured role whose successful run waits for
-a person. It must name an existing role with a comment-capable process, which
+`intake.question_role` names the configured role that can ask a person. It
+must name an existing role with a comment-capable process, which
 is checked before any work is accepted. Without the setting nothing waits.
 
-A successful run of that role holds the request. The run history records that
-it is waiting, and the collector records the asking role's stored comment ID
-in `queue/jobs/<id>/question.json`. Replies arriving before the next poll are
-still read; recorded controller notices are not answers. If no submission
-receipt was saved, the collector instead records the latest comment ID at that
-read and waits for a later reply. It cannot reconstruct an earlier question's
-position without a receipt, but it does not hold the request forever waiting
-for one. The request is then skipped until the issue's creator, or an operator listed in
+A successful run holds the request only when a nonempty comment was actually
+posted by the engine account after that question launch began. Controller
+announcements and empty status-change comments do not count. If the role
+posted nothing, the history says so and the router chooses the next role;
+the requester is not assigned an invisible question. An unreadable tracker
+does not establish that nothing was posted: work stays held, and the existing
+control-channel retry and pause rules apply until the read succeeds.
+
+`intake.question_no_post_limit` is a positive integer (default `2`). After
+that many successful question launches with no post, the question role is
+removed from the next choices until the issue's creator or a configured
+`intake.stop_user_ids` operator adds a new comment with words. The run records
+why and continues with the other permitted roles; reaching this limit is not
+completion or failure. The count survives restart. The new comment is carried
+into history unchanged and resets the count; empty status changes, controller
+notices and stop instructions do not reset it. With no other permitted action,
+the runtime waits without calling a decision model until a new reply is read.
+This applies to connected, free-routing and ordered runs.
+
+If a stored submission receipt names a comment missing from the next read,
+the run checks again every 10 seconds without relaunching the question role.
+It does not assume no question was posted. Stop instructions still apply.
+
+For a posted question, the run history records that it is waiting, and the
+collector records the asking role's actual comment ID in
+`queue/jobs/<id>/question.json`. If no submission receipt survived, a nonempty
+engine-account post after the saved launch position supplies that boundary.
+Replies arriving before the next poll are still read; controller notices are
+not answers. This differs from an already-waiting request without a saved
+submission or question position: that existing recovery path records the
+latest comment and waits for a later reply. It cannot reconstruct an earlier
+question's position. New question launches do not enter that path merely
+because no post was made. The request waits until its creator, or an operator in
 `intake.stop_user_ids`, posts a comment with words after that point. A status
 or field change, which the tracker records as a comment without words, is not
 an answer; the collector makes such changes itself while it waits. That
@@ -2228,6 +2253,9 @@ Post stdin is sent unchanged as the API's form `content`; there is no success
 template, answer schema or completion mark. The native comment receipt goes to
 stdout. `comment` reads that API id back, and `comments` retrieves all pages
 after the cursor, including a possible inclusive page boundary without duplicates.
+For the scoped GitHub connection, an enumeration releases its saved list when
+it reaches the end. A later read from the last seen comment ID fetches anew,
+so a reply posted after that enumeration is not hidden by the earlier list.
 This follows the [comment API](https://developer.nulab.com/docs/backlog/api/2/add-comment/).
 
 A failed or unreadable submission response is ambiguous: the command reports
@@ -2684,3 +2712,94 @@ prove optimal routing/model selection, or validate live overnight operation.
   is buffered in memory; production resource behavior has not been exercised.
 
 Jev routing is one comparison candidate, not a settled architecture decision.
+
+## Publish only a branch
+
+Use this when the agreed destination is a Git branch, not an open pull
+request, an integration branch or a running environment. A branch push can
+still trigger your existing CI or deployment automation: check those triggers
+and permissions before choosing this option.
+
+In the existing delivery process configuration, append `--branch-only` to
+the `deliver_git.py` command. Keep the operator's repository, base branch,
+allowed paths, forbidden text and credential references. Remove explicit
+`DELIVERY_MERGE_METHOD`; it conflicts with branch-only delivery, including
+merge method `none`. Pull-request explanations are not used in this mode.
+
+For a sandboxed process, keep `linux_role.py`, every existing mount and
+permission argument, the interpreter and the read-only harness path. Append
+the single final argument `--branch-only`; do not replace the whole command
+with an unwrapped Python invocation. Do not change the other processes or
+give model tools delivery keys. No engine-level depth option or model
+response format is required.
+
+The ordinary invocation still opens and merges a pull request.
+`DELIVERY_MERGE_METHOD=none` still opens a pull request and leaves its merge
+to a person. Neither is a substitute for branch-only publication.
+
+## What it does and records
+
+The fixed command applies the existing changed-path, conflict and forbidden
+text/credential checks, commits the permitted work, and catches up from the
+configured base when necessary. It pushes `ticket/<issue>` and reads that
+branch back at the exact committed head. It does not update the base branch
+or call the pull-request REST API. The existing delivery receipt records
+the branch, published commit and confirmation time, with `branch_only: true`;
+it contains no invented PR or merge. This is the fixed command's own receipt,
+not a format requested from any model.
+
+A rerun without new work reads the remote but does not recommit or repush.
+New reviewed work continues the same branch. A saved push attempt is read
+back after a lost reply or interrupted confirmation. If it cannot be
+confirmed, the command returns nonzero and preserves what it knows; earlier
+commits or remote changes are not undone. The configured workflow handles
+that failure through its existing retry or `on_failure` destination.
+
+An already-existing branch without this request's publication record is not
+adopted. Another writer's push, rewrite or deletion is not overwritten or
+recreated. After its own recorded publication, the delivery records that a person
+took over, reports that this attempt changed nothing and exits 0. Later runs
+leave the branch alone and repeat that handoff report. This is not a claim that
+the outstanding request was fulfilled. The command requires both ancestry from its previously published
+head and an explicit Git lease for that head, including an absent-branch
+lease on first creation. The lease closes the read-to-push race; it is not
+permission to rewrite history. Recovery does not automatically restore a
+missing local receipt from a branch name alone.
+
+Do not switch a request with a PR receipt to branch-only, or a recorded
+branch-only publication to PR mode. Use a separately agreed new request for
+such a change of destination. No existing PR is closed or merged by changing
+this setting.
+
+An empty workspace is refused by default. The separate, explicit
+`DELIVERY_ALLOW_UNCHANGED=1` policy can still end with an unchanged receipt
+after reading the actual base. That reports no branch publication and does
+not establish that an unfulfilled request was satisfied.
+
+## Verification and the final report
+
+Keep the existing `verify_merged.py` process after delivery. Despite its
+historical filename, it recognizes a branch-only receipt, fetches that
+branch, requires the exact published head and runs the operator's commands
+on that fetched commit with delivery credentials removed. A changed or
+deleted branch before delivery has recorded a person's takeover, incomplete
+record, different repository/base, unreadable remote or failing verification
+returns nonzero. After that recorded handoff, verification exits 0 with a
+not-checked report and runs no verification command or remote operation. It does not verify the
+model's modified workspace, a PR merge or a deployed environment.
+
+The final report should name the branch and commit and say that no PR was
+opened, nothing was merged and no environment deployment was checked. The
+existing board's generic Delivered column means the configured destination;
+the detail view retains the receipt and verification report. It is not a
+claim that a production environment changed. Model-written reporting still
+requires the configured independent review; byte-transport tests do not
+prove that every model will describe the result correctly.
+
+`--branch-only --dry-run` checks the configuration, paths and Git reachability
+without committing, pushing or contacting the PR API. Like the existing dry
+run it deliberately returns nonzero, never evidence of a completed delivery.
+
+Tests use real local Git repositories and a local API fixture that must
+receive zero requests. Real hosting permissions, branch protection, triggered
+CI, live credentials and deployment behavior remain installation checks.

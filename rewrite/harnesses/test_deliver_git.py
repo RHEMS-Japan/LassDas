@@ -444,12 +444,13 @@ class DeliveryTests(unittest.TestCase):
         self.assertFalse((self.workspace / ".git" / "MERGE_HEAD").exists())
 
     def test_a_refusal_for_conflict_markers_shows_no_credential(self):
-        # Git's whitespace check prints a line with a whitespace error whole,
-        # and one that mentions a conflict marker is taken for one, as on main.
+        # A whitespace diagnostic prints the added source line too. Its prose
+        # is not a conflict diagnostic; the credential check still refuses it.
         self.change("main.go", "package main // a conflict marker %s \n" % TOKEN)
         refused = self.deliver()
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertIn("conflict markers in: +package main // a conflict marker [credential] ", refused.stdout)
+        self.assertIn("contains the delivery credential", refused.stderr)
+        self.assertNotIn("conflict markers in:", refused.stdout + refused.stderr)
         self.assertNotIn(TOKEN, refused.stdout + refused.stderr)
         self.assertEqual((self.remote_branches(), self.methods()), (["refs/heads/master"], []))
 
@@ -467,9 +468,41 @@ class DeliveryTests(unittest.TestCase):
                 before + "a" * (cut - len(before) - 20) + TOKEN + "a" * (2 << 20) + after + " \n")
             refused = self.deliver()
             self.assertEqual(refused.returncode, 1, refused.stderr[-2000:])
-            self.assertIn("conflict markers in: ", refused.stdout)
+            self.assertIn("contains the delivery credential", refused.stderr)
+            self.assertNotIn("conflict markers in:", refused.stdout + refused.stderr)
             output = refused.stdout + refused.stderr
             self.assertEqual([piece for piece in pieces if piece in output], [])
+
+    def test_prose_about_conflict_markers_does_not_stop_delivery(self):
+        self.git(self.workspace, "config", "color.ui", "always")
+        self.change("main.go", "package main // a conflict marker explained here \n"
+                    "// main.go:12: leftover conflict marker \n"
+                    " \tpretend.go:3: leftover conflict marker\n")
+        delivered = self.deliver()
+        self.assertEqual(delivered.returncode, 0, delivered.stdout + delivered.stderr)
+        self.assertNotIn("conflict markers in:", delivered.stdout + delivered.stderr)
+        self.assertEqual(len(self.state["pulls"]), 1)
+        self.assertTrue(self.state["pulls"][0]["merged"])
+
+    def test_real_conflict_diagnostics_keep_colons_and_leading_plus_in_names(self):
+        for relative in ("library/name:12.txt", "+notes.txt"):
+            with self.subTest(relative=relative):
+                self.change(relative, "<<<<<<< branch\nours\n=======\ntheirs\n>>>>>>> branch\n")
+                refused = self.deliver(DELIVERY_ALLOWED_PATHS=".")
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                self.assertIn("conflict markers in: " + relative, refused.stdout + refused.stderr)
+                self.assertEqual((self.remote_branches(), self.methods()), (["refs/heads/master"], []))
+                (self.workspace / relative).unlink()
+
+    def test_a_source_line_across_the_stream_cut_is_not_a_conflict_diagnostic(self):
+        # Only the first part starts with '+'. A later part ending like a Git
+        # diagnostic must not be interpreted as a fresh diagnostic line.
+        content = " \t" + "a" * (self.first_cut() + (2 << 20)) + ":12: leftover conflict marker\n"
+        self.change("main.go", content)
+        delivered = self.deliver()
+        self.assertEqual(delivered.returncode, 0, delivered.stdout + delivered.stderr)
+        self.assertNotIn("conflict markers in:", delivered.stdout + delivered.stderr)
+        self.assertTrue(self.state["pulls"][0]["merged"])
 
     def test_the_integration_branch_s_own_paths_need_no_grant(self):
         # notes.md and a non-ASCII name are outside the grant; the integration
