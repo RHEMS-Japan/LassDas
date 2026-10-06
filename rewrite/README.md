@@ -470,8 +470,10 @@ unchanged in the normal requester history; the requirements role interprets
 it with the actual question, not a new keyword parser. A general request for
 clarification is not a question. Initial elicitation continues until no
 requester-only decision remains. After handover, only a newly required
-expansion of authority may be asked; other uncertainty is resolved and
-recorded within the approved scope.
+expansion of authority may be asked, and, where the ordered run has a stage
+that confirms the change before delivery, that change (see "Confirming the
+change before delivery" below); other uncertainty is resolved and recorded
+within the approved scope.
 
 What counts as the requester's point is said in the same words everywhere: a
 point is theirs only when the request, the repository and the operator
@@ -569,8 +571,10 @@ other report. Only the first comment after the recorded point becomes the
 answer; further comments are not appended, and a later question moves the point
 past them. While a request waits, each poll reads that issue's comments inside
 the collector loop, so a slow tracker delays the loop by up to one interval for
-every waiting request, and for every request held for the model budget. Nothing notifies the requester beyond the posted comment
-itself, and an unanswered question waits indefinitely unless someone stops it.
+every waiting request, and for every request held for the model budget. Unless
+`intake.question_reminder_minutes` is set (see "What the requester is told at
+night"), nothing notifies the requester beyond the posted comment itself, and
+either way an unanswered question waits indefinitely unless someone stops it.
 
 ### Stages instead of roles
 
@@ -586,6 +590,7 @@ runtime, not a model, decides what runs next.
     { "name": "work", "kind": "model" },
     { "name": "verify", "kind": "command", "on_failure": "elicit" },
     { "name": "review", "kind": "command", "on_failure": "elicit" },
+    { "name": "confirm_change", "kind": "model", "confirm": true },
     { "name": "deliver", "kind": "command", "on_failure": "elicit" },
     { "name": "verify_merged", "kind": "command", "on_failure": "elicit" },
     { "name": "report", "kind": "model" },
@@ -832,6 +837,7 @@ requests are what the person merging relies on, the stage can be left out:
     { "name": "work", "kind": "model" },
     { "name": "verify", "kind": "command", "on_failure": "elicit" },
     { "name": "review", "kind": "command", "on_failure": "elicit" },
+    { "name": "confirm_change", "kind": "model", "confirm": true },
     { "name": "deliver", "kind": "command", "on_failure": "elicit" },
     { "name": "report", "kind": "model" },
     { "name": "confirm_report", "kind": "command", "on_failure": "report" }
@@ -1094,11 +1100,13 @@ ends, so a repaired stage is never read as part of the launch that failed.
 One launch of a process has no time limit unless its `timeout_minutes` names
 one; a launch that reaches that limit is stopped and recorded like any failure.
 
-**Outside the entrance, no model chooses** which stage runs next, whether a
+**Outside the entrance and a stage that confirms the change, no model chooses**
+which stage runs next, whether a
 command stage is satisfied, whether a failure is recoverable, or when the request
 is complete.
-The routing judgment is after the first stage. If `intake.question_role` is set,
-then each time that stage finishes the configured decision service (the decision API
+The routing judgment is after the first stage, and after a stage that confirms
+the change before delivery (below). If `intake.question_role` is set,
+then each time the first stage finishes the configured decision service (the decision API
 when `router.decision` names a model, the chat API otherwise) chooses among
 the first stage again, the question role, or the next stage. Returning to the
 first stage lets that role clarify its own report without inventing a question
@@ -1106,7 +1114,8 @@ for the requester. It is never
 offered `done`, so the entrance still cannot end a request at a person, and the
 question role cannot be a stage, so it satisfies nothing. A question holds the
 request and the reply resumes it exactly as described above; the reply returns
-the run to its first stage. Other stage transitions use the configured order.
+the run to the stage that asked, here the first stage. Other stage transitions
+use the configured order.
 
 The shipped example sends failed verification, review and delivery commands to
 `elicit`, not straight to `work`. Requirements are reconsidered using the actual
@@ -1114,7 +1123,8 @@ failure and earlier answers. A repair or an unknown failure inside the agreed
 scope continues to work: investigate and check the cause, recording choices.
 After handoff, only evidence that a newly required expansion of authority cannot
 be decided by the roles may lead to the existing question role, with concrete
-alternatives. The entrance rule to ask about an uncertain requirement does not
+alternatives; the one other way to it is the decision after a stage that
+confirms the change before delivery (below). The entrance rule to ask about an uncertain requirement does not
 apply to recovery. This also covers a worker reporting that the
 allowed paths cannot satisfy the request, followed by a failed check. Nothing
 parses that report to decide progression. A process error in a model stage still
@@ -1136,7 +1146,9 @@ for a simple repair. Existing configurations retain their selected `on_failure`
 targets until the operator edits them. `confirm_report` still returns to `report`.
 
 `examples/operator-stages.json` is the same chain as `operator.json` written
-this way, for the runtime image of `deploy/ticket-engine`. Its delivery and its
+this way, with a stage that confirms the change before delivery added between
+the review and the delivery (below), for the runtime image of
+`deploy/ticket-engine`. Its delivery and its
 check of the delivered branch are that image's fixed processes,
 `deliver_git.py` and `verify_merged.py` under `/opt/ticket-automation/scripts`
 (copied there from `harnesses/`; they are not part of this bundle). Every
@@ -1167,6 +1179,96 @@ the record, so the input grows with every stage and every repair cycle, and a
 long repair loop will eventually exceed a model's context. No session sharing
 or summarizing is implemented here on purpose: measure it first. Nothing in
 this mode has run with a live model or a real tracker.
+
+### Confirming the change before delivery
+
+A person is asked to look at a change before it is delivered only when the
+change alters how a person operates the product, what a screen shows or does,
+or the public API. A model stage marked `"confirm": true` reads the change for
+that, between the review and the delivery:
+
+```json
+{ "name": "review", "kind": "command", "on_failure": "elicit" },
+{ "name": "confirm_change", "kind": "model", "confirm": true },
+{ "name": "deliver", "kind": "command", "on_failure": "elicit" }
+```
+
+Its role reads the change actually made in the checkout, the settled
+requirements and the project's knowledge, and writes in ordinary prose what the
+change does to operation, screens and the public API, naming the material it
+read and what it could not read. The project's knowledge defines the public
+API; where it does not, the runtime's instruction to the stage takes the entry
+points used from outside: HTTP routes, command arguments and options and the
+output other programs read, exported functions and types, and configuration
+keys and file formats that others read. When none of them changes, the role
+says that the requester's confirmation is not needed and why, so that the
+report can say `依頼者の確認: なし`. A change too long to read whole is not an
+internal one.
+
+When the stage finishes, the decision service that chooses after the first
+stage chooses again: the first stage, the question role or the next stage. It
+is never offered `done`. Its instructions say to ask when the change alters one
+of the three or when the report cannot tell, and to go on only when the report
+establishes from the change it read that none is altered, or when the
+requester's reply about this same change accepts it. That is wording only:
+nothing measures what the role found, and a model that ignores the wording can
+still choose the delivery.
+
+Choosing the first stage returns the work to requirements. Every later stage
+runs again, this one included, so a new change is read and decided on again.
+That a reply given about an earlier change does not settle a later one is what
+the instructions to the stage and to the decision service say; the runtime
+reads no reply's words.
+`workflow.confirmation_rework_limit` bounds how often the first stage can be
+chosen at these decisions: omitted or zero means two, counted until a new
+requester reply. At the limit that choice is left out there and one runtime
+note says so; the question role and the next stage stay offered, so the limit
+never forces a delivery. `workflow.entrance_rework_limit` counts only the
+choices after the first stage, and this limit only the choices after a stage
+that confirms.
+
+Choosing the question role launches it with the runtime's own instruction:
+show the requester what the change does, with the choices to deliver it as it
+is, to name what to change, or not to deliver it. Whatever that launch does,
+the request then waits for the requester's comment. A question seen posted is
+waited on as described above. When no post is seen, when the launch did not
+exit 0 or when a restart cut it short, the request waits all the same, the
+history says so, and the engine posts a fixed notice asking for a comment (see
+"What the requester is told at night"). Such a launch does not count toward
+`intake.question_no_post_limit`, and a question role that this limit left out
+of the choices after the first stage is still offered here. Only a comment
+with words from the requester, or from an account in
+`intake.stop_user_ids`, ends the wait, as for any question: silence, a post
+that was not made, a tracker that cannot be read and a reached limit are none
+of them a reply. The reply returns the run to this stage, which reads it
+against the change it was given about, and the decision service chooses again.
+Nothing reads the reply's words: whether it accepts, asks for a correction or
+refuses is for the role and the decision service, and a correction or a
+refusal leads back to requirements, not to delivery.
+
+A stage marked `"confirm": true` must be a model stage and not the first
+stage, and the run needs `intake.question_role`; anything else is refused
+before work is accepted. Without such a stage nothing changes: the question
+is offered only after the first stage, and neither the decision service nor
+any role is told anything about such a stage. Each pass through the stage
+costs one working-role launch and one decision, for an internal change too.
+Connected workflows have no such stage.
+
+The two ordered examples have this stage as `confirm_change`, with
+`workflow.confirmation_rework_limit` set to its default of 2 and
+`intake.question_reminder_minutes` set to 1440, so a question that waits a
+day is said again. Its role reads the checkout and the assigned issue's
+comments and writes nothing. It reads the checkout as the earlier stages left
+it and does not run the preparation (`git_workspace.py`) the other roles run:
+a model stage that did not exit 0 runs again, so a lost workspace prepared
+afresh at this stage would let the delivery go on as if the review had passed
+on the lost work. The delivery's own preparation finds the loss instead and
+sends the work back to requirements. Until then this stage reads the empty
+directory that stands for the lost workspace, so the decision after it may ask
+the requester once about a change that could not be read. The question role's instructions there give the
+question for a change a fixed closing sentence in Japanese, and the report
+says whether the requester's confirmation was asked: `依頼者の確認: なし` with
+the reason, or the question and the reply.
 
 ### A pull request description from the run's reports
 
@@ -1714,12 +1816,47 @@ untouched by it.
 All three go out through the controller's own tracker credential, the same one
 the stop report uses. No role is given the means to post them.
 
+Two more fixed notices concern a request that waits for the requester. They
+are recorded, matched and posted in the same way, through the same credential.
+
+**When the question about the change was not seen posted.** After the decision
+that follows a stage confirming the change chose to ask the requester (see
+"Confirming the change before delivery") and no posted question was seen, the
+request waits for the requester's comment, and the controller posts once:
+
+> 納品の前に、この変更を依頼者に確認していただく必要があると判断しましたが、確認の質問を投稿できたことを確かめられませんでした。このまま納品してよいか、直してほしい点があるか、納品しないかを、このチケットにコメントしてください。コメントがあるまで納品しません。
+
+With `intake.status_page` set, a line follows it with the request's own page,
+where the change can be seen. A comment with words from the requester ends the
+wait as an answer does; this notice itself is never taken for one.
+
+**While a question waits.** `intake.question_reminder_minutes` is how long a
+request may wait for the requester's answer before the wait is said again.
+Absent or zero says nothing; it needs `intake.question_role`. The wait is
+measured from the last record before it: the question's launch, or the note
+that no posted question was seen. Each time a further interval has passed, the
+controller posts once:
+
+> この依頼は、依頼者の返答を待っています（待ち始めてから <n>）。返答があるまで、自動で納品したり、依頼を終わらせたりはしません。止める場合は、1 行目に「停止」とだけ書いてコメントしてください。
+
+The reminder for each interval is recorded as a notice of its own, so another
+tick or a restart within the same interval does not repeat it. A reminder whose
+interval ended before the queue's engines began posting reminders is not
+posted, so setting the value for the first time does not send one to every
+request already waiting: the next interval's reminder is the first. Reminders
+apply to every waiting question, the first stage's included. They leave the
+recorded point after which an answer is read where it was, and they are never
+taken for an answer, even where the controller's own account filed the issue.
+Passing an interval approves nothing and ends nothing: only an answer resumes
+the request, and a stop still stops it.
+
 What this does not do: these notices say what the engine recorded, not that
 the work is being tried at that moment or that it will succeed. They are
 posted from the collector loop, so a slow tracker delays that loop while one
 is being submitted. A request recorded as waiting for the requester's answer
-is not stalled and says nothing further; a question whose launch has not
-returned yet is not recorded as waiting, so a notice can follow it.
+is not stalled and says nothing further beyond the two notices about waiting
+above; a question whose launch has not returned yet is not recorded as
+waiting, so a notice can follow it.
 Nothing here notices a crash loop that never reaches the collector at all, a
 full disk, or a provider that answers quickly and uselessly. The budget reader
 has been exercised against a local fixture of the documented response shape,

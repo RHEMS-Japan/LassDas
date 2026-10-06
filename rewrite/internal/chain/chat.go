@@ -25,7 +25,7 @@ func (r ChatRouter) Next(ctx context.Context, state State) (Assignment, error) {
 	if err != nil {
 		return Assignment{}, err
 	}
-	instructions := routingInstructions + "\n" + r.Instructions + "\nAvailable roles: " + string(rolesJSON) + "\nInvoke handoff for the next role. Include useful instructions for that role, or choose done when the request is complete."
+	instructions := decisionInstructions(state) + "\n" + r.Instructions + "\nAvailable roles: " + string(rolesJSON) + "\nInvoke handoff for the next role. Include useful instructions for that role, or choose done when the request is complete."
 	return chatAction(ctx, r.Service, state, instructions, choices, "Invoke one configured role, or finish a completed request.")
 }
 

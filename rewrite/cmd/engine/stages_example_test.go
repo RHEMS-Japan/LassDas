@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/stagename"
 	"ticket-runner/internal/tracker"
 )
 
@@ -113,6 +114,7 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 		{Name: "work", Kind: chain.ModelStage},
 		{Name: "verify", Kind: chain.CommandStage, OnFailure: "elicit"},
 		{Name: "review", Kind: chain.CommandStage, OnFailure: "elicit"},
+		{Name: "confirm_change", Kind: chain.ModelStage, Confirm: true},
 		{Name: "deliver", Kind: chain.CommandStage, OnFailure: "elicit"},
 		{Name: "verify_merged", Kind: chain.CommandStage, OnFailure: "elicit"},
 		{Name: "report", Kind: chain.ModelStage},
@@ -120,6 +122,17 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 	}
 	if !slices.Equal(cfg.Workflow.Stages, want) {
 		t.Fatalf("the shipped run is %+v", cfg.Workflow.Stages)
+	}
+	// The requester and the status page name each shipped stage in Japanese.
+	for _, stage := range cfg.Workflow.Stages {
+		if _, named := stagename.Japanese(stage.Name); !named {
+			t.Fatalf("stage %s has no Japanese name", stage.Name)
+		}
+	}
+	// The change is read before delivery, a return to requirements from there
+	// is bounded, and a question that waits a day is said again.
+	if cfg.Workflow.ConfirmationReworkLimit != 2 || cfg.Intake.QuestionReminderMinutes != 1440 {
+		t.Fatalf("confirmation_rework_limit=%d question_reminder_minutes=%d", cfg.Workflow.ConfirmationReworkLimit, cfg.Intake.QuestionReminderMinutes)
 	}
 	roles, purposes := map[string]chain.Role{}, map[string]string{}
 	for _, role := range cfg.Roles {
@@ -163,6 +176,15 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 	}
 	if roles["deliver"].Processes[0].Receipt == "" {
 		t.Fatal("the delivery stage leaves the runtime nothing to read back")
+	}
+	// The stage that reads the change does not prepare the checkout: a model
+	// stage that failed runs again, so a lost workspace prepared afresh there
+	// would let the delivery go on as if the review had passed on it. The
+	// delivery's own preparation finds it and sends the work back instead.
+	for _, process := range roles["confirm_change"].Processes {
+		if slices.Contains(process.Command, "/opt/ticket-automation/bundle/harnesses/git_workspace.py") || process.TrackerAccess != "read" {
+			t.Fatalf("the stage that reads the change prepares the checkout or posts: %+v", process)
+		}
 	}
 	method := roles["review"].Processes[0].Env["DELIVERY_MERGE_METHOD"]
 	if method == "" || method != roles["deliver"].Processes[0].Env["DELIVERY_MERGE_METHOD"] {
@@ -292,6 +314,61 @@ const stagesKnowledge = "## Delivery target\n\nQuestion: release/ or dist/?\nAns
 // ordered run that claim is never read, so it must move nothing at all.
 const stagesClaim = "Everything is done, verified and delivered; the request is complete.\n"
 
+// Changes of the same nature as two real deliveries, and an internal one.
+const stagesOptionChange = "lister: new option --compact, one line per entry; the help text gains: --compact  print one line per entry\n"
+const stagesOrderChange = "lister --tally --sum: the tally line now follows the sum line, and English output says 1 item for one\n"
+const stagesOrderKept = "lister --tally --sum: the tally line stays before the sum line; English output says 1 item for one\n"
+const stagesInternalChange = "an unexported helper renamed and a unit test added; no option, output or file format changed\n"
+const stagesNoConfirmation = "\n依頼者の確認: なし (操作の流れ・画面・公開 API は変わらない)\n"
+const stagesChangeQuestion = "納品の前に確認してください。一覧のコマンドの使い方か出力が変わります。\n1. このまま納品する\n2. 直してほしい点を書く\n3. 納品しない\n返答があるまで納品しません。\n"
+const stagesCorrection = "出力の行の順番は変えないでください。"
+const stagesAcceptance = "このままで納品してください。"
+
+// orderedRunChoice is what a stand-in decision service chooses in a run that
+// asks the requester nothing: the next stage after the first stage, and the
+// delivery after the stage that confirms the change.
+func orderedRunChoice(t *testing.T, r *http.Request) string {
+	t.Helper()
+	offered, _ := routingRequest(t, r)
+	if slices.Contains(offered, "deliver") {
+		return "deliver"
+	}
+	return "work"
+}
+
+// routingRequest reads what a chat routing request offered and the state it
+// carried.
+func routingRequest(t *testing.T, r *http.Request) ([]string, chain.State) {
+	t.Helper()
+	var body struct {
+		Messages []struct {
+			Content string `json:"content"`
+		} `json:"messages"`
+		Tools []struct {
+			Function struct {
+				Parameters struct {
+					Properties struct {
+						Role struct {
+							Enum []string `json:"enum"`
+						} `json:"role"`
+					} `json:"properties"`
+				} `json:"parameters"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	var state chain.State
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Tools) == 0 || len(body.Messages) < 2 {
+		t.Errorf("unreadable routing request: %v", err)
+		return nil, state
+	}
+	if err := json.Unmarshal([]byte(body.Messages[1].Content), &state); err != nil {
+		t.Errorf("the routing request carried no state: %v", err)
+	}
+	offered := slices.Clone(body.Tools[0].Function.Parameters.Properties.Role.Enum)
+	slices.Sort(offered)
+	return offered, state
+}
+
 // Actual subprocess fixture for the ordered run. The command stages are real
 // child processes whose exit status the runtime observes; no model runs here.
 func TestStagesRoleHelper(t *testing.T) {
@@ -330,13 +407,20 @@ func TestStagesRoleHelper(t *testing.T) {
 	switch action {
 	case "elicit":
 		entries, err := os.ReadDir(".")
-		if err != nil || len(entries) != 0 && !bytes.Contains(prompt, []byte("stage did not exit 0")) && !bytes.Contains(prompt, []byte(stagesScopeAnswer)) {
+		if err != nil || len(entries) != 0 && !bytes.Contains(prompt, []byte("stage did not exit 0")) && !bytes.Contains(prompt, []byte(stagesScopeAnswer)) && !bytes.Contains(prompt, []byte(stagesCorrection)) {
 			t.Fatal("the entrance prepared or changed project work", err)
 		}
 		if repairQuestion && len(entries) != 0 && !bytes.Contains(prompt, []byte(stagesScopeFailure)) {
 			t.Fatal("requirements lost the worker's actual scope problem")
 		}
 	case "ask_requester":
+		if bytes.Contains(prompt, []byte("the stage that confirms the change chose to ask")) {
+			// The question about the change. A silent one posts nothing.
+			if os.Getenv("EXAMPLE_QUESTION_SILENT") == "" {
+				post(stagesChangeQuestion)
+			}
+			break
+		}
 		question := stagesQuestion
 		if repairQuestion {
 			if !bytes.Contains(prompt, []byte(stagesScopeFailure)) {
@@ -355,6 +439,20 @@ func TestStagesRoleHelper(t *testing.T) {
 			break
 		}
 		write("src/greeting.txt", stagesArtifact)
+		// Changes of the same nature as two real deliveries, written fresh:
+		// a new option with its help line, and two output lines in a new order.
+		switch os.Getenv("EXAMPLE_CHANGE") {
+		case "option":
+			write("src/change.txt", stagesOptionChange)
+		case "order":
+			change := stagesOrderChange
+			if bytes.Contains(prompt, []byte(stagesCorrection)) {
+				change = stagesOrderKept
+			}
+			write("src/change.txt", change)
+		case "internal":
+			write("src/change.txt", stagesInternalChange)
+		}
 		if os.Getenv("EXAMPLE_KNOWLEDGE") == "answered" {
 			if !bytes.Contains(prompt, []byte(stagesAnswer)) || !bytes.Contains(prompt, []byte(stagesKnowledgePath)) {
 				t.Fatal("work lost the answer or the configured knowledge destination")
@@ -408,6 +506,18 @@ func TestStagesRoleHelper(t *testing.T) {
 			os.Exit(1)
 		}
 		fmt.Print("Review by fixture/reviewer: PASSED. Send-backs so far: 1 of at most 2.\n(no findings)\n")
+	case "confirm_change":
+		// The stage reads the change the work left in the checkout and says
+		// what it does, in ordinary prose. The decision after it is the test's.
+		read("src/greeting.txt", stagesArtifact)
+		change, err := os.ReadFile("src/change.txt")
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		fmt.Printf("The change read from the checkout: %s", change)
+		if kind := os.Getenv("EXAMPLE_CHANGE"); kind == "" || kind == "internal" {
+			fmt.Print(stagesNoConfirmation)
+		}
 	case "deliver":
 		read("src/greeting.txt", stagesArtifact)
 		write("release/greeting.txt", stagesArtifact)
@@ -630,6 +740,7 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			if repairQuestion {
 				want = []string{"work", "ask_requester", "work", "work"}
 			}
+			want = append(want, "deliver") // after the change was read: nothing a person must see
 			add := func(user int, content string) map[string]any {
 				stored++
 				row := map[string]any{"id": stored, "issueId": issue, "projectId": 17, "content": content, "createdUser": map[string]any{"id": user}}
@@ -788,10 +899,14 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			if routes != len(want) {
 				t.Fatalf("a model was asked to decide %d times", routes)
 			}
-			for _, enum := range offered {
+			for i, enum := range offered {
 				slices.Sort(enum)
-				if !slices.Equal(enum, []string{"ask_requester", "elicit", "work"}) {
-					t.Fatalf("the entrance was offered %v", enum)
+				choices := []string{"ask_requester", "elicit", "work"}
+				if i == len(offered)-1 {
+					choices = []string{"ask_requester", "deliver", "elicit"}
+				}
+				if !slices.Equal(enum, choices) {
+					t.Fatalf("decision %d was offered %v, not %v", i+1, enum, choices)
 				}
 			}
 			questions := 0
@@ -898,7 +1013,7 @@ func TestTheRuntimesWordsAfterTheReportDoNotHoldTheShippedCheck(t *testing.T) {
 						}
 						return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
 					case "/api/v1/chat/completions":
-						return routingSelectionReply(r, chain.Assignment{Role: "work"}), nil
+						return routingSelectionReply(r, chain.Assignment{Role: orderedRunChoice(t, r)}), nil
 					}
 				}
 				return nil, fmt.Errorf("unexpected fixture destination %s %s", r.Method, r.URL.Path)
@@ -1029,5 +1144,269 @@ func TestStoppedOrderedRunReportsWithoutWalkingItsStages(t *testing.T) {
 	defer mu.Unlock()
 	if posts != 1 || routes != 0 {
 		t.Fatalf("stopped-report posts=%d routes=%d", posts, routes)
+	}
+}
+
+// changeDecision stands in for the decision after the change was read: it
+// asks about a change that has no reply yet, delivers what the reply accepts
+// and sends a correction back to requirements. The runtime reads none of it.
+func changeDecision(change string, state chain.State) string {
+	if change == "internal" {
+		return "deliver"
+	}
+	lastWork, lastReply := -1, -1
+	for i, result := range state.History {
+		if result.Role == "work" && result.Speaker != "runtime" {
+			lastWork = i
+		}
+		if result.Speaker == "requester" {
+			lastReply = i
+		}
+	}
+	switch {
+	case lastReply < lastWork:
+		return "ask_requester"
+	case strings.Contains(state.History[lastReply].Output, "このまま"):
+		return "deliver"
+	}
+	return "elicit"
+}
+
+// The shipped run reads the change before it is delivered. Changes of the
+// same nature as two real deliveries, a new option with its help line and two
+// output lines in a new order, are shown to the requester and delivered only
+// after their reply; a correction is made and asked about again. An internal
+// change is delivered with 依頼者の確認: なし. A question that reaches nobody
+// holds the request, across a restart, until the requester comments. What is
+// judged is how often the delivery ran and where it sits in the record.
+func TestStagesExampleConfirmsTheChangeBeforeDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name, change         string
+		silent               bool
+		replies              []string
+		questions, decisions int
+	}{
+		{"new-option", "option", false, []string{stagesAcceptance}, 1, 2},
+		{"output-order-corrected-then-accepted", "order", false, []string{stagesCorrection, stagesAcceptance}, 2, 4},
+		{"internal-only", "internal", false, nil, 0, 1},
+		{"question-reached-nobody-across-a-restart", "option", true, []string{stagesAcceptance}, 0, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := stagesFixtureConfig(t)
+			for i := range cfg.Roles {
+				for j := range cfg.Roles[i].Processes {
+					cfg.Roles[i].Processes[j].Env["EXAMPLE_CHANGE"] = tc.change
+					if tc.silent {
+						cfg.Roles[i].Processes[j].Env["EXAMPLE_QUESTION_SILENT"] = "1"
+					}
+				}
+			}
+			issue := 71
+			key := fmt.Sprintf("EXAMPLE-%d", issue)
+			root := t.TempDir()
+			var mu sync.Mutex
+			var comments []any
+			var contents []string
+			stored, answered, decisions, catalogs := 0, 0, 0, 0
+			allowAnswer, lastAnswered := !tc.silent, ""
+			add := func(user int, content string) map[string]any {
+				stored++
+				row := map[string]any{"id": stored, "issueId": issue, "projectId": 17, "content": content, "createdUser": map[string]any{"id": user}}
+				comments = append(comments, row)
+				return row
+			}
+			useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				if r.URL.Host == "tracker.example.invalid" {
+					switch r.Method + " " + r.URL.Path {
+					case "GET /api/v2/issues":
+						return selectionReply(r, 200, []any{watchedIssue(issue, stagesRequest, "2026-01-03T00:00:00Z")}), nil
+					case "GET /api/v2/issues/" + key + "/comments":
+						// The requester answers each recorded question once.
+						boundary, err := os.ReadFile(filepath.Join(root, "jobs", fmt.Sprint(issue), "question.json"))
+						if err == nil && allowAnswer && answered < len(tc.replies) && string(boundary) != lastAnswered {
+							lastAnswered = string(boundary)
+							add(55, tc.replies[answered])
+							answered++
+						}
+						return selectionReply(r, 200, append([]any{}, comments...)), nil
+					case "POST /api/v2/issues/" + key + "/comments":
+						if err := r.ParseForm(); err != nil {
+							return nil, err
+						}
+						contents = append(contents, r.Form.Get("content"))
+						return selectionReply(r, 201, add(99, r.Form.Get("content"))), nil
+					}
+				}
+				if r.URL.Host == "openrouter.ai" {
+					switch r.URL.Path {
+					case "/api/v1/models":
+						catalogs++
+						return selectionReply(r, 200, map[string]any{"data": []any{selectionModel(fmt.Sprintf("qwen/fixture-%d", catalogs))}}), nil
+					case "/api/alpha/decisions":
+						return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": fmt.Sprintf("qwen/fixture-%d", catalogs)}}}), nil
+					case "/api/v1/chat/completions":
+						offered, state := routingRequest(t, r)
+						choice := "work"
+						if slices.Contains(offered, "deliver") {
+							decisions++
+							if want := []string{"ask_requester", "deliver", "elicit"}; !slices.Equal(offered, want) {
+								t.Errorf("after the change was read the decision was offered %v", offered)
+							}
+							choice = changeDecision(tc.change, state)
+						}
+						return routingSelectionReply(r, chain.Assignment{Role: choice}), nil
+					}
+				}
+				return nil, fmt.Errorf("unexpected fixture destination %s %s", r.Method, r.URL.Path)
+			})
+			var log bytes.Buffer
+			finish := startStopQueue(t, cfg, root, 30*time.Millisecond, &log)
+			delivered := func(state chain.State) int {
+				count := 0
+				for _, result := range state.History {
+					if result.Role == "deliver" && result.Speaker != "runtime" {
+						count++
+					}
+				}
+				return count
+			}
+			noticesPosted := func() int {
+				mu.Lock()
+				defer mu.Unlock()
+				count := 0
+				for _, content := range contents {
+					if strings.HasPrefix(content, unseenQuestionText) {
+						count++
+					}
+				}
+				return count
+			}
+			if tc.silent {
+				// The question posted nothing: the engine says so once and the
+				// request waits, with nothing delivered, also after a restart.
+				deadline := time.Now().Add(60 * time.Second)
+				for {
+					state, err := loadWatchState(root, issue)
+					if err == nil && state.Waiting && state.WaitingWithoutQuestion && noticesPosted() == 1 {
+						break
+					}
+					if time.Now().After(deadline) {
+						finish()
+						t.Fatalf("the request did not wait with the notice: step=%s err=%v\n%s", state.Step, err, log.String())
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				finish()
+				finish = startStopQueue(t, cfg, root, 30*time.Millisecond, &log)
+				time.Sleep(300 * time.Millisecond)
+				state, err := loadWatchState(root, issue)
+				if err != nil || !state.Waiting || delivered(state) != 0 || noticesPosted() != 1 {
+					t.Fatalf("after the restart: waiting=%v delivered=%d notices=%d err=%v", state.Waiting, delivered(state), noticesPosted(), err)
+				}
+				mu.Lock()
+				allowAnswer = true
+				mu.Unlock()
+			}
+			deadline := time.Now().Add(60 * time.Second)
+			for {
+				state, err := loadWatchState(root, issue)
+				if err == nil && state.Done {
+					break
+				}
+				if time.Now().After(deadline) {
+					finish()
+					t.Fatalf("the run did not finish: step=%s waiting=%v err=%v\n%s", state.Step, state.Waiting, err, log.String())
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			finish()
+			state, err := loadWatchState(root, issue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstDelivery, acceptance := -1, -1
+			var read []string
+			for i, result := range state.History {
+				switch {
+				case result.Role == "deliver" && result.Speaker != "runtime" && firstDelivery < 0:
+					firstDelivery = i
+				case result.Speaker == "requester" && result.Output == stagesAcceptance:
+					acceptance = i
+				case result.Role == "confirm_change" && result.Speaker != "runtime":
+					read = append(read, result.Output)
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			questions, notices, wantNotices := 0, 0, 0
+			for _, content := range contents {
+				switch {
+				case content == stagesChangeQuestion:
+					questions++
+				case strings.HasPrefix(content, unseenQuestionText):
+					notices++
+				}
+			}
+			if tc.silent {
+				wantNotices = 1
+			}
+			if delivered(state) != 1 || questions != tc.questions || decisions != tc.decisions || notices != wantNotices {
+				t.Fatalf("delivered=%d questions=%d decisions=%d notices=%d", delivered(state), questions, decisions, notices)
+			}
+			if len(tc.replies) > 0 && (acceptance < 0 || firstDelivery < acceptance) {
+				t.Fatalf("the change was delivered before the requester accepted it: delivery at %d, acceptance at %d", firstDelivery, acceptance)
+			}
+			switch tc.change {
+			case "internal":
+				if acceptance >= 0 || len(read) != 1 || !strings.Contains(read[0], stagesInternalChange) || !strings.Contains(read[0], stagesNoConfirmation) {
+					t.Fatalf("the internal change was not read and passed with 依頼者の確認: なし: %q", read)
+				}
+			case "order":
+				// The correction was made, read again and asked about again.
+				if len(read) != 4 || !strings.Contains(read[0], stagesOrderChange) || !strings.Contains(read[len(read)-1], stagesOrderKept) {
+					t.Fatalf("the corrected change was not read again: %q", read)
+				}
+			default:
+				if len(read) != 2 || !strings.Contains(read[0], stagesOptionChange) {
+					t.Fatalf("the stage did not read the actual change: %q", read)
+				}
+			}
+			if _, err := os.ReadFile(filepath.Join(root, "jobs", fmt.Sprint(issue), "workspace", "release", "greeting.txt")); err != nil {
+				t.Fatal("nothing was delivered", err)
+			}
+			t.Logf("%s: %d deliveries, %d questions about the change, %d decisions after it was read, %d notices", tc.name, delivered(state), questions, decisions, notices)
+		})
+	}
+}
+
+// What the shipped roles are told about the change before delivery. These are
+// instructions to models; the test pins the words, not what a model makes of
+// them.
+func TestOrderedExampleSaysWhatTheConfirmationReadsAndAsks(t *testing.T) {
+	cfg := stagesExample(t)
+	roles := map[string]chain.Role{}
+	for _, role := range cfg.Roles {
+		roles[role.Name] = role
+	}
+	const carveOut = "after the stage that confirms the change before delivery, about that change"
+	if !strings.Contains(cfg.Instructions, carveOut) || !strings.Contains(cfg.Instructions, "nothing is delivered before their reply") {
+		t.Error("the shared instructions do not allow the question about the change or say that it holds the delivery")
+	}
+	for name, phrases := range map[string][]string{
+		"elicit":        {carveOut, "On a return from the stage that confirms the change"},
+		"ask_requester": {carveOut, "deliver it as it is", "name what to change", "do not deliver it", "返答があるまで納品しません。このまま納品してよいか、直してほしい点があるか、納品しないかを返答してください。"},
+		"confirm_change": {"git diff", "The project's knowledge decides what its public API is", "HTTP routes", "command arguments and options and the output other programs read",
+			"exported functions and types", "configuration keys and file formats", "Name the material you read and what you could not read",
+			"too long to read whole is not an internal one", "依頼者の確認: なし", "or you cannot tell", "covers only the change it was given about"},
+		"report": {"依頼者の確認: なし", "quote the question about the change and the requester's reply"},
+	} {
+		description := routingRoleDescription(roles[name])
+		for _, phrase := range phrases {
+			if !strings.Contains(description, phrase) {
+				t.Errorf("%s does not say %q", name, phrase)
+			}
+		}
 	}
 }

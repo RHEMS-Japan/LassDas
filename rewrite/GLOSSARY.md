@@ -157,6 +157,9 @@ workspace's current changes. Its overview, the board, shows the requests in
 columns by stage. The page holds no credential and changes nothing.
 
 - Used in: README.md:1240, START.md:131
+- Other uses: START.md also says 画面 for the screens of the product a change
+  alters, in 操作の流れ・画面・公開 API, which decides whether the requester
+  sees a change before delivery.
 - Avoid: none.
 
 ## Roles and how they run
@@ -269,11 +272,13 @@ and every stage after that one runs again.
 
 Choosing the next role, made by the decision service or by a chat model; with
 connections, only among the connected roles. In an ordered run with a question
-role, the only such choice comes each time the first stage finishes: the first
-stage again, the question role or the next stage, never done.
-`workflow.entrance_rework_limit` bounds how often the first stage can be chosen
-again straight away, twice unless it is set, and a new answer from the
-requester starts that count over.
+role, such a choice comes each time the first stage finishes, and each time a
+stage marked `confirm` finishes: the first stage, the question role or the
+next stage, never done. `workflow.entrance_rework_limit` bounds how often the
+first stage can be chosen again straight away, twice unless it is set, and
+`workflow.confirmation_rework_limit` how often it can be chosen after a stage
+marked `confirm`, also twice; a new answer from the requester starts both
+counts over.
 
 - Used in: README.md:82, README.md:1087, START.md:78
 - Avoid: none.
@@ -337,8 +342,10 @@ It lists every point that only the requester can decide and that can be
 answered now, numbered, each with a recommended answer and concrete choices; a
 point that depends on one not yet answered comes in a later comment, and a
 reply of `推奨で` accepts every recommendation in that comment. A general
-request for clarification is not a question. The request waits until it is
-answered or stopped.
+request for clarification is not a question. After a stage marked `confirm`,
+the question instead shows the requester what the change does, with the
+choices to deliver it as it is, to name what to change, or not to deliver it.
+The request waits until it is answered or stopped.
 
 - Used in: README.md:539, START.md:122
 - Avoid: `打ち返`
@@ -494,7 +501,8 @@ later stage compares the stored comment with the file.
 What a launch returns: what each process wrote on standard output and standard
 error, and its exit status. The engine adds it to the history, where later
 roles and routing read it. In an ordered run no stage is satisfied by what a
-role wrote; the only choice that reads it is the routing after the first stage.
+role wrote; the only choices that read it are the routing after the first stage
+and after a stage marked `confirm`.
 
 - Used in: README.md:600, START.md:133
 - Avoid: none.
@@ -506,7 +514,10 @@ tracker account: on acceptance, start and resume when `intake.announce` is
 on, when a stage with an `announce` sentence begins, after a restart, when
 work pauses and resumes, when no stage has completed for a long time (the
 stall notice, 停滞通知), and the declarations and the list of the models
-used. No model writes them, and none of them ends a request.
+used. While a request waits for its requester, the engine also says when the
+question about a change was not seen posted, and again after each interval set
+by `intake.question_reminder_minutes`. No model writes them, and none of them
+ends a request.
 
 - Used in: README.md:1581, START.md:133
 - Avoid: `announcement`

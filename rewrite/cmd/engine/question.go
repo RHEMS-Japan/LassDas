@@ -448,7 +448,7 @@ func appendAnswer(directory, request, role, answer string) error {
 	state.History = append(state.History, chain.Result{
 		Role: role, Speaker: "requester", Output: answer, FinishedAt: time.Now().UTC(),
 	})
-	state.Waiting = false
+	state.Waiting, state.WaitingWithoutQuestion = false, false
 	state.QuestionsWithoutPost, state.QuestionUnavailable, state.QuestionReplyAfter = 0, "", 0
 	saveErr := store.Save(state)
 	closeErr := store.Close()

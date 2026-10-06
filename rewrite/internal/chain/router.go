@@ -3,6 +3,7 @@ package chain
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -30,6 +31,37 @@ The requested independent reviews apply to the work actually delivered, not an e
 Errors, silence and unsuccessful attempts are reasons to choose a useful recovery action, not to end the request. A pending action interrupted by a crash may already have changed external state: have a role inspect what happened before repeating it. Repeating an unsuccessful approach needs new information or a changed approach.
 Choose done only when the reports and actual observations establish all of the original request, the independent reviews, the required delivery and post-delivery verification, and a readable result report at the agreed destination. Missing evidence is not proof of completion. Do not expand permissions, change spending limits or weaken the request to finish.`
 
+// confirmationRouting is what the decision service is told about the choice
+// after a stage that confirms the change. Only a run with such a stage is told
+// it, together with the one question it allows after handoff; every other run
+// receives routingInstructions as it was.
+const confirmationRouting = `After a stage that confirms the change before delivery, read its report of the change actually made. The requester sees the change before delivery only when it changes how a person operates the product, what a screen shows or does, or the public API. The project's knowledge defines the public API; without such a definition it is the entry points used from outside: HTTP routes, command arguments and options and the output other programs read, exported functions and types, and configuration keys and file formats that others read. Choose the question role when the change alters one of the three, or when the report cannot tell, including when the change could not be read whole. Choose the first stage when the change does not meet the settled requirements, or when the requester's reply asks for a correction or refuses the change. Choose the next stage only when the report establishes from the change it read that none of the three is altered, or when the requester's reply about this same change accepts it. A reply given about an earlier change does not accept a later one, and silence, a question that was not posted, a tracker that could not be read or a reached limit is not a reply.`
+
+// The rule for questions after handoff, as every run is told it and as a run
+// with a stage that confirms the change is told it. The process prompt uses
+// the same pair.
+const (
+	authorityAfterHandoff         = "After handoff, ask only about a newly required expansion of authority that the requester alone can approve, supported by the actual failure."
+	authorityOrChangeAfterHandoff = "After handoff, ask only about a newly required expansion of authority that the requester alone can approve, supported by the actual failure, or, after a stage that confirms the change before delivery, about that change."
+)
+
+// confirms reports a run with a stage that confirms the change before
+// delivery. Only such a run is told about that stage and its question.
+func (s State) confirms() bool {
+	return s.Workflow != nil && slices.ContainsFunc(s.Workflow.Stages, func(stage Stage) bool { return stage.Confirm })
+}
+
+// decisionInstructions is what a decision is told: the shared standard, and,
+// only in a run with a stage that confirms the change, that stage's rule.
+func decisionInstructions(state State) string {
+	if !state.confirms() {
+		return routingInstructions
+	}
+	text := strings.Replace(routingInstructions, "afterwards ask only about newly needed authority, never routine recovery choices.", "afterwards ask only about newly needed authority or, after a stage that confirms the change before delivery, about that change, never routine recovery choices.", 1)
+	text = strings.Replace(text, authorityAfterHandoff, authorityOrChangeAfterHandoff, 1)
+	return text + "\n" + confirmationRouting
+}
+
 func (r DecisionRouter) Next(ctx context.Context, state State) (Assignment, error) {
 	choices, err := routingChoices(state, r.Roles)
 	if err != nil {
@@ -38,7 +70,7 @@ func (r DecisionRouter) Next(ctx context.Context, state State) (Assignment, erro
 	if r.Judge == nil {
 		return Assignment{}, errors.New("no routing model is configured")
 	}
-	next, err := r.Judge.Choose(ctx, state, routingInstructions+"\n"+r.Instructions, choices)
+	next, err := r.Judge.Choose(ctx, state, decisionInstructions(state)+"\n"+r.Instructions, choices)
 	if err != nil {
 		return Assignment{}, err
 	}
