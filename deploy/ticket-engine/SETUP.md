@@ -978,12 +978,15 @@ neither; it waits:
   a reply without a plain verdict) is waited out: the models are asked again
   in their order, round after round, with the wait between rounds growing
   from `REVIEW_RETRY_SECONDS` to `REVIEW_RETRY_CAP_SECONDS` for transient
-  failures. HTTP 400 (unless it explicitly names excessive context), 401,
-  402, 403, 404 and 422 stop further attempts to that model. Other configured
-  models are still tried; if none remains, fix the credential, available
-  credit, model id or request setting and restart. Waiting alone does not
+  failures, including HTTP 402: restored credit lets the same review continue
+  without restarting. Repeated unrecognized 400 responses, 401, 403, 404 and
+  422 stop further attempts to that model. Other configured models are still
+  tried; if none remains, fix the credential, model id or request setting and
+  restart. Waiting alone does not
   make the same refused request run again.
 - HTTP 413 and context-length 400 reduce the supplied material and retry.
+  An unrecognized 400 also gets one reduced retry per model; another such 400
+  then stops that model's attempts rather than repeating indefinitely.
   The reason and omitted ranges reach the model, live diagnostics and final
   review result. The combined runtime/history/diff/test body budget is
   halved below `REVIEW_MEMORY_CHARACTERS`; headings and omission notices are
@@ -2341,9 +2344,10 @@ or a conflict (below). Stop the request (`停止`) while you fix the cause.
 
 The review has no verdict and waits
 ([section 4](#when-the-review-gets-no-verdict)); the `review` record's live
-output on the status page says why. A permanent HTTP refusal (400 without a
-context-length reason, 401, 402, 403, 404 or 422) is not polled: fix the setting
-or the Secret and restart the Pod. A transient service failure is retried.
+output on the status page says why. A permanent HTTP refusal (an unrecognized
+400 repeated after reduction, 401, 403, 404 or 422) is not polled: fix the setting
+or the Secret and restart the Pod. A transient service failure is retried,
+including HTTP 402; restoring credit does not require a restart.
 HTTP 413 and context-length 400 automatically reduce runtime text, history,
 diff and test output, stating the omission, but keep the complete proposed
 pull request explanation. If even minimal material is refused by all

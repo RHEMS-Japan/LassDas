@@ -1206,13 +1206,13 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertEqual(service.models_asked(), ["maker-a/first", "maker-b/second", "maker-b/second"])
 
     def test_permanent_http_refusals_are_not_rechecked_or_disguised_as_verdicts(self):
-        for status in (400, 401, 402, 403, 422):
+        for status in (400, 401, 403, 422):
             with self.subTest(status=status):
                 service = ModelStandIn({"fixture/reviewer": {"status": status, "error": "invalid setting " + KEY}})
                 self.addCleanup(service.close)
                 running, stdout, stderr = self.held_review(service, intervals=3)
                 self.assertTrue(running, stderr)
-                self.assertEqual(len(service.requests), 1, stderr)
+                self.assertEqual(len(service.requests), 2 if status == 400 else 1, stderr)
                 self.assertIn("fix the setting and restart the engine", stderr)
                 self.assertNotIn("looked at again", stderr)
                 self.assertEqual(stdout, "")
@@ -1230,6 +1230,55 @@ class AdversarialReviewTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1 if unchanged else 0, result.stdout + result.stderr)
             self.assertIn("NOT REVIEWED", result.stdout)
             self.assertEqual(len(service.requests), 1)
+
+    def test_credit_recovery_continues_the_same_review_without_restart(self):
+        service = ModelStandIn([{"status": 402, "error": "credit exhausted"},
+                                {"verdict": (False, "Credit returned; the change was reviewed.")}])
+        self.addCleanup(service.close)
+        running, stdout, stderr = self.held_review(service, intervals=3)
+        self.assertFalse(running, stderr)
+        self.assertIn("PASSED", stdout)
+        self.assertEqual(service.models_asked(), ["fixture/reviewer", "fixture/reviewer"])
+        self.assertNotIn("fix the setting and restart", stderr)
+        print("credit restored: two requests, same review PASSED without restart")
+
+    def test_unrecognized_bad_requests_get_one_smaller_attempt(self):
+        for reason in ("prompt is too long", "Request too large for model", "invalid setting"):
+            with self.subTest(reason=reason):
+                service = ModelStandIn([{"status": 400, "error": reason}, {"verdict": (False, "checked")}])
+                self.addCleanup(service.close)
+                result = self.run_review(service, stdin_text=self.STDIN + "material " * 4000,
+                                         REVIEW_ATTEMPTS="2", **self.PASS)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("PASSED", result.stdout)
+                sent = [r["body"]["messages"][1]["content"] for r in service.requests]
+                self.assertEqual(len(sent), 2)
+                self.assertLess(len(sent[1]), len(sent[0]))
+                self.assertIn("omitted", sent[1])
+                print("unrecognized 400: smaller second request passed, characters=%s" % [len(x) for x in sent])
+
+    def test_long_runtime_material_marks_the_omitted_middle_before_any_refusal(self):
+        service = ModelStandIn([{"verdict": (False, "checked")}])
+        self.addCleanup(service.close)
+        result = self.run_review(service, stdin_text=self.STDIN + "begin " * 2000 + "MIDDLE_ONLY" + "end " * 2000)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sent = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertTrue("[...]" in sent, "the runtime's omitted middle was not disclosed")
+        self.assertNotIn("MIDDLE_ONLY", sent)
+
+    def test_pass_skips_a_permanently_refused_model_on_later_attempts(self):
+        service = ModelStandIn({"maker-a/first": {"status": 401}, "maker-b/second": {"status": 503}})
+        self.addCleanup(service.close)
+        # Exercise real HTTP requests without spending fifteen seconds in
+        # the pass policy's fixed waits; the request order is the assertion.
+        with mock.patch("time.sleep", return_value=None):
+            code, stdout, stderr = self.review_in_process(service, lambda command: None,
+                                                          REVIEW_MODELS="maker-a/first,maker-b/second",
+                                                          REVIEW_ATTEMPTS="3", **self.PASS)
+        self.assertEqual(code, 0, stdout + stderr)
+        self.assertIn("NOT REVIEWED", stdout)
+        self.assertEqual(service.models_asked(), ["maker-a/first", "maker-b/second", "maker-b/second"])
+        print("pass attempts: first, second, second; refused model not repeated")
 
     def test_context_http_refusals_reduce_material_and_keep_the_full_explanation(self):
         path = self.home / "history.json"

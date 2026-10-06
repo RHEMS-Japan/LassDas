@@ -35,10 +35,12 @@ in the operator's order, a model named twice once a round, round after
 round, the wait between rounds growing from REVIEW_RETRY_SECONDS to
 REVIEW_RETRY_CAP_SECONDS, and the printed result names the model that gave
 the verdict. An HTTP error is said with what the service answered, scrubbed
-and cut to about 200 characters. Permanent request, authentication, credit
+and cut to about 200 characters. Permanent request, authentication
 and model-setting refusals remove that model from further attempts; other
-configured models are still asked. HTTP 413 and context-length 400 reduce
-the supplied material and retry, with the omission stated to the model and
+configured models are still asked. HTTP 402 stays retryable when credit returns.
+HTTP 413 and context-length 400 reduce
+the supplied material and retry; an unrecognized 400 gets one reduced attempt
+before that model is refused. The omission is stated to the model and
 in the result. The proposed PR explanation remains complete. When every
 model requires an operator correction, no model is called again until restart.
 What asking
@@ -656,8 +658,11 @@ def review_memory(state_directory, key, limit):
 def review_material(found, model, prompt, diff, tests):
     """Keep each source identifiable when a service requires less context.
     The separately reviewed PR explanation is never cut by this budget."""
+    recent = prompt[-TAIL:] if len(prompt) > HEAD else ""
+    if len(prompt) > HEAD + TAIL:
+        recent = "[...]\n" + recent
     parts = [("Where this stage sits, the original request and the settled requirements (from the runtime)", prompt[:HEAD]),
-             ("The most recent reports", prompt[-TAIL:] if len(prompt) > HEAD else ""),
+             ("The most recent reports", recent),
              ("Saved review context", found.get("memory") or "(no additional saved context available)"),
              ("Diff of the change", diff or "(no change)"),
              ("Test output", tests or "(no test command configured)")]
@@ -708,9 +713,12 @@ def ask_once(found, model, prompt, diff, tests, rounds):
             return None, said_in(message), "the reviewer returned no verdict"
         return read_verdict(calls)
     except urllib.error.HTTPError as error:
-        why, too_large = refused(error, found["key"])
+        shortened = found.setdefault("shortened_400", set())
+        why, too_large = refused(error, found["key"], model not in shortened)
         if not too_large:
             return None, "", why
+        if error.code == 400:
+            shortened.add(model)
         limits = found.setdefault("context_limits", {})
         budget = min(limits.get(model, amount), found["memory_characters"]) // 2
         # At least both ends of each of the five sources must fit. A model
@@ -732,10 +740,10 @@ def ask_once(found, model, prompt, diff, tests, rounds):
 
 # What the model service says with these is about the request the operator
 # set up (a credential, a model id, a request too large), not a passing fault.
-OPERATORS_TO_FIX = (400, 401, 402, 403, 404, 422)
+OPERATORS_TO_FIX = (400, 401, 403, 404, 422)
 
 
-def refused(error, key):
+def refused(error, key, may_shorten_400):
     """Classify the service's refusal before shortening its diagnostic.
     This is transport metadata, not a judgment of the reviewer's prose."""
     try:
@@ -743,15 +751,16 @@ def refused(error, key):
     except Exception:  # what it said only informs
         said = ""
     said = " ".join(scrub(said, key).split())
-    too_large = error.code == 413 or error.code == 400 and bool(re.search(
+    context_reason = bool(re.search(
         r"context[_ -]length[_ -]exceeded|context.{0,80}(?:exceed|too (?:long|large))"
         r"|maximum context (?:length|window)|too many (?:input |prompt )?tokens"
         r"|(?:input|prompt).{0,40}tokens.{0,30}(?:exceed|limit)", said, re.I))
+    too_large = error.code == 413 or error.code == 400 and (context_reason or may_shorten_400)
     reason = "HTTP %d from the model service%s" % (
         error.code, ": " + (said[:200] + "..." if len(said) > 200 else said) if said else "",
     )
     if error.code in OPERATORS_TO_FIX and not too_large:
-        raise ReviewError(reason + "; this is for the operator to fix (the credential, credit, model id or request)")
+        raise ReviewError(reason + "; this is for the operator to fix (the credential, model id or request)")
     return reason, too_large
 
 

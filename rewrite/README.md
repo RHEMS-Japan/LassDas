@@ -899,17 +899,22 @@ without it, `REVIEW_MODEL` is the only model. Whichever model answers first
 reviews, so every model in the list should come from a different publisher
 than the worker, as the first one does. An HTTP error is said with what the
 service answered, the credential scrubbed and cut to about 200 characters;
-400 (except an explicit context-length refusal), 401, 402, 403, 404 and 422
+Repeated unrecognized 400 responses, 401, 403, 404 and 422
 remove that model from this review's attempts: the operator must fix the
-credential, available credit, model id or request settings. Other configured
+credential, model id or request settings. Other configured
 models are still tried. If none remains, the review holds without further
 model calls until the operator fixes the setting and restarts the engine.
-Transient failures and replies without a verdict still use the growing waits.
+Transient failures, including HTTP 402 while credit is unavailable, and replies
+without a verdict still use the growing waits. Restoring credit lets the same
+review continue on its next attempt without restarting the engine.
 
 On HTTP 413 or a 400 explicitly naming excessive context or token length,
 the command retries with less runtime text, saved context, diff and test
-output. Their combined body budget is halved from the smaller of the previous
-body amount and `REVIEW_MEMORY_CHARACTERS`, retaining each part's beginning
+output. An unrecognized 400 gets one reduced retry per model too, before being
+treated as an operator correction; a repeated explicit context-length refusal
+continues reducing to the minimum. The first combined body budget is half the
+smaller of the body amount and `REVIEW_MEMORY_CHARACTERS`; later reductions halve
+the preceding budget, retaining each part's beginning
 and end. The model sees why and where material was omitted; the same reason
 is printed with the final result and saved in `review.md`. The reduced size
 is kept for later attempts to that model. Headings, omission notices and the
@@ -917,7 +922,9 @@ complete proposed pull request explanation are outside this body budget:
 the explanation is never silently shortened. If even minimal context is
 refused, another configured model is tried; with none available, the operator
 must configure one that can accept the required instructions and explanation.
-Omitted material is not represented as reviewed. There is no default
+Even before service-driven reduction, runtime text longer than the normal
+head/tail window visibly marks its omitted middle. Omitted material is not
+represented as reviewed. There is no default
 unreviewed success or new send-back for these service refusals.
 
 What asking again cannot get past, a setting
