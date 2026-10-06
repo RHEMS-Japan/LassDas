@@ -1294,6 +1294,23 @@ Three facts of the engine decide how such a command writes and prints:
 `127.0.0.1`, with the project's service and its Feature Map. It is not part of
 the bundle; `harnesses/test_live_check_example.py` runs it on its own.
 
+`cmd/engine/live_check_test.go` runs requests through the shipped ordered
+example with the real queue, processes and workspace preparation, every stage
+but the live check scripted. A request with no check reaches its report with
+`なし (導入先に検証の手段が無い)`. A check that fails, whatever it prints, sends
+the work back to elicitation every time, and no report is posted. With the
+example check, a request whose first change breaks the feature goes back once
+and then reaches its report: the report stage is given the failed launch, the
+failed launch's record is the same at the end as when it was saved, and what
+the scripted report stage stores under ライブ確認 is the observation the check
+printed, the request it sent and the answer it got, which the service's own
+log also has. In these tests, which run without bubblewrap, stopping the
+engine while the check waits for an answer leaves no service and no test user
+behind and is recorded as an interruption; after a restart the check runs
+again. A check whose cleanup fails after a passing
+observation sends the work back. The scripted report stage shows what reaches
+a report, not that a model writes it.
+
 ### A read-only status page
 
 `bin/ticket-status` serves what the queue directory holds, as it is, over

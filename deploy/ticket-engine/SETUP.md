@@ -1113,8 +1113,10 @@ session of its own and kills it when bubblewrap ends, so the SIGTERM probably
 reaches only bubblewrap and the check ends without cleaning up. This has not
 been tried on a cluster. So let each `run` first look for the directories of
 earlier launches that have no record of a finished `stop`, and run `stop` on
-them. Processes inside the sandbox end with it; test data in a database or on
-another host does not, and only that next `run` removes it.
+them. Processes inside the sandbox end with it, since Linux ends every
+process of the sandbox's PID namespace when its first process ends; test data
+in a database or on another host does not, and only that next `run` removes
+it.
 
 **Add it to your copy.** Append this process to the `verify` role's
 `processes`, with your own values in place of the example's:
@@ -1169,8 +1171,9 @@ recorded before that stay in the history.
 **After the merge.** This checks the change before it is merged. To check the
 integration branch after the merge as well, add the same command as one more
 line of `VERIFY_COMMANDS` in `verify_merged` (each line runs without a shell).
-That is a separate run against a different state, and the report says which
-state each observation came from.
+That is a separate run against a different state; the shipped report
+instructions ask for the checked revision and environment of each
+observation.
 
 **A working example.** `rewrite/examples/live-check/` checks a fictional
 project on `127.0.0.1`: `verify_feature.py` has `run` and the five
@@ -1183,8 +1186,8 @@ since what it prints is quoted in the report. Its tests
 (`rewrite/harnesses/test_live_check_example.py`) run it through a pass, a
 feature that does not work, SIGTERM while it waits for an answer, a killed
 launch whose leftovers the next launch removes, a cleanup that fails, a
-process it did not start, a missing preparation, and a run by the merged
-check.
+process it did not start, a missing preparation, and a run through the
+merged check's command runner.
 
 ### With a gateway in front of the models
 

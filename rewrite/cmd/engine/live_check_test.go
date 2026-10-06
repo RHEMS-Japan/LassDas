@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -303,7 +305,7 @@ func startLiveCheckRun(t *testing.T, options liveCheckOptions) *liveCheckRun {
 				}
 				return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
 			case "/api/v1/chat/completions":
-				// After requirements the entrance always goes on to the work.
+				// After elicitation the decision always goes on to the work.
 				return routingSelectionReply(r, chain.Assignment{Role: "work"}), nil
 			}
 		}
@@ -324,7 +326,7 @@ func (run *liveCheckRun) state() (chain.State, error) {
 // waitFor polls the saved history until the condition holds.
 func (run *liveCheckRun) waitFor(what string, condition func(chain.State) bool) chain.State {
 	run.t.Helper()
-	deadline := time.Now().Add(90 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for {
 		state, err := run.state()
 		if err == nil && condition(state) {
@@ -333,7 +335,7 @@ func (run *liveCheckRun) waitFor(what string, condition func(chain.State) bool) 
 		// A request that has ended changes no more.
 		if err == nil && state.Done || time.Now().After(deadline) {
 			run.finish()
-			run.t.Fatalf("%s did not happen: step=%s done=%t error=%v\n%s", what, state.Step, state.Done, err, run.log.String())
+			run.t.Fatalf("%s did not happen: stage=%s done=%t error=%v\n%s", what, state.Step, state.Done, err, run.log.String())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -583,5 +585,372 @@ func TestTheDocumentedLiveCheckJoinsTheShippedVerifyStage(t *testing.T) {
 				t.Fatal("adding the live check changed the ordered run")
 			}
 		})
+	}
+}
+
+const liveCheckTestUser = "live-check-user"
+const liveCheckMethod = "Live verification method: the verify stage's live-check process starts server.py from the checkout on 127.0.0.1, uses the greeting as the test user live-check-user following docs/FEATURES.md, and prints the request, the response and the result. It checks the change before merge, not production."
+
+// liveCheckExample is the guide's live check with rewrite/examples/live-check
+// as its program, and the project that example checks: the fictional service
+// and its Feature Map, where they sit in the project's repository.
+func liveCheckExample(t *testing.T, env map[string]string) (*chain.Process, map[string]string) {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("the example live check needs Python")
+	}
+	example, err := filepath.Abs("../../examples/live-check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := documentedLiveCheck(t)
+	program := -1
+	for i, argument := range process.Command {
+		if argument == "--" {
+			program = i + 1
+		}
+	}
+	if program < 0 || program >= len(process.Command) {
+		t.Fatalf("no program in the guide's command: %q", process.Command)
+	}
+	// The launcher stays out (it needs Linux namespaces); the arguments after
+	// the guide's program are passed to the example as written.
+	process.Command = append([]string{python, "-B", filepath.Join(example, "verify_feature.py")}, process.Command[program+1:]...)
+	process.Env = map[string]string{"LIVE_CHECK_TEST_USER": liveCheckTestUser}
+	for name, value := range env {
+		process.Env[name] = value
+	}
+	project := map[string]string{}
+	for path, name := range map[string]string{"server.py": "server.py", "docs/FEATURES.md": "FEATURES.md"} {
+		content, err := os.ReadFile(filepath.Join(example, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		project[path] = string(content)
+	}
+	return &process, project
+}
+
+func liveCheckWaitForPath(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not appear", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// liveCheckLaunchDirectories are the directories the example check made in
+// its home, one per launch, oldest first.
+func liveCheckLaunchDirectories(t *testing.T, home string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(home, "logs", "live-check"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var directories []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			directories = append(directories, filepath.Join(home, "logs", "live-check", entry.Name()))
+		}
+	}
+	return directories
+}
+
+func liveCheckRecord(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return record
+}
+
+// liveCheckLeftNothing reads one launch's directory: its stop is recorded as
+// complete, the service it started is gone, and its evidence is still there.
+func liveCheckLeftNothing(t *testing.T, launch string) {
+	t.Helper()
+	if stopped := liveCheckRecord(t, filepath.Join(launch, "stopped.json")); stopped["ok"] != true {
+		t.Fatalf("%s: the stop is not recorded as complete: %v", launch, stopped)
+	}
+	pid, ok := liveCheckRecord(t, filepath.Join(launch, "state.json"))["pid"].(float64)
+	if !ok || pid <= 0 {
+		t.Fatalf("%s: no process recorded", launch)
+	}
+	if err := syscall.Kill(int(pid), 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("%s: the service %d the check started is still there (%v)", launch, int(pid), err)
+	}
+	for _, name := range []string{"request.txt", "service.log", "observation.json"} {
+		if _, err := os.Stat(filepath.Join(launch, name)); err != nil {
+			t.Fatalf("%s: evidence %s is gone: %v", launch, name, err)
+		}
+	}
+}
+
+// liveCheckUsers are the test users left in the fictional service's store; a
+// store already removed with the finished request's home holds none.
+func liveCheckUsers(t *testing.T, home string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(home, "live-check-store", "users"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var users []string
+	for _, entry := range entries {
+		users = append(users, entry.Name())
+	}
+	return users
+}
+
+func liveCheckReportSections(run *liveCheckRun) []string {
+	var sections []string
+	for _, comment := range run.comments() {
+		if section := liveCheckSection(comment); section != "" {
+			sections = append(sections, section)
+		}
+	}
+	return sections
+}
+
+// liveCheckFailuresGoBack holds the order of the run: every verify launch
+// whose live check did not exit 0 is followed by elicitation, and every
+// launch of a later stage follows a verify launch whose check exited 0.
+func liveCheckFailuresGoBack(t *testing.T, launches []stageLaunch) (checks []chain.Result) {
+	t.Helper()
+	passed := false
+	for i, launch := range launches {
+		switch launch.role {
+		case "verify":
+			check, found := launch.result("live-check")
+			if !found {
+				t.Fatal("a verify launch ran without the live check")
+			}
+			checks = append(checks, check)
+			passed = check.Error == ""
+			if !passed && i+1 < len(launches) && launches[i+1].role != "elicit" {
+				t.Fatalf("after a live check that did not exit 0 the run went to %s, not elicitation", launches[i+1].role)
+			}
+		case "review", "deliver", "verify_merged", "report", "confirm_report":
+			if !passed {
+				t.Fatalf("the %s stage ran after a live check that did not exit 0", launch.role)
+			}
+		}
+	}
+	return checks
+}
+
+// One request through the shipped ordered run with the example live check
+// (rewrite/examples/live-check) in its verify stage. The work leaves the
+// greeting empty the first time: the service answers 500, the check cleans
+// up and ends 1, and the work goes back to elicitation. The second time the
+// check sends its request over HTTP and observes the greeting, and the report
+// stage puts that observation, with the request and the answer, under
+// ライブ確認. The report stage is scripted (liveCheckReport): this shows what
+// reaches it, not that a model copies it.
+func TestALiveCheckObservationReachesTheReportAsObserved(t *testing.T) {
+	live, project := liveCheckExample(t, nil)
+	run := startLiveCheckRun(t, liveCheckOptions{issue: 73, work: "fixed-second", live: live, project: project, instructions: liveCheckMethod})
+	// The failed launch as it was saved when it happened.
+	failedAt, failed := -1, chain.Result{}
+	run.waitFor("a live check that did not exit 0", func(s chain.State) bool {
+		for i, result := range s.History {
+			if result.Speaker == "live-check" && result.Error != "" {
+				failedAt, failed = i, result
+				return true
+			}
+		}
+		return false
+	})
+	state := run.waitFor("the request ending", func(s chain.State) bool { return s.Done })
+	// Once the request has ended the queue trims its homes.
+	liveCheckWaitForPath(t, filepath.Join(run.root, "jobs", fmt.Sprint(run.issue), "homes", ".trimmed"))
+	run.finish()
+
+	if !reflect.DeepEqual(state.History[failedAt], failed) {
+		t.Fatalf("the failed live check's record changed after it was saved:\nthen %+v\nnow  %+v", failed, state.History[failedAt])
+	}
+	for _, phrase := range []string{"要求: GET http://127.0.0.1:", "観測: 状態 500", "合否: 不合格", "後始末: サービス", "結果: 1 で終わる"} {
+		if !strings.Contains(failed.Output, phrase) {
+			t.Fatalf("the failed live check does not say %q:\n%s", phrase, failed.Output)
+		}
+	}
+	checks := liveCheckFailuresGoBack(t, stageLaunches(state.History))
+	if len(checks) != 2 || checks[0].Error == "" || checks[1].Error != "" {
+		t.Fatalf("live checks: %+v", checks)
+	}
+	observation := liveCheckObservation(checks[1].Output)
+	for _, phrase := range []string{"要求: GET http://127.0.0.1:", "観測: 状態 200、本文「Hello 日本語, " + liveCheckTestUser + "」", "合否: 合格", "結果: 0 で終わる"} {
+		if !strings.Contains(observation, phrase) {
+			t.Fatalf("the passing live check does not say %q:\n%s", phrase, observation)
+		}
+	}
+	// The report carries exactly what the check observed, not なし.
+	if sections := liveCheckReportSections(run); len(sections) != 1 || sections[0] != observation {
+		t.Fatalf("ライブ確認 in the stored report is not what the check observed:\nreport: %q\ncheck:  %q", sections, observation)
+	}
+	// The report stage was given the failed launch as well.
+	inputs, err := filepath.Glob(filepath.Join(run.home("report", "reporter"), "logs", "input-*.txt"))
+	if err != nil || len(inputs) != 1 {
+		t.Fatalf("report inputs: %v %v", inputs, err)
+	}
+	input, err := os.ReadFile(inputs[0])
+	if err != nil || !bytes.Contains(input, []byte(failed.Output)) || !bytes.Contains(input, []byte("Process live-check did not exit 0")) {
+		t.Fatal("the report stage was not given the failed live check", err)
+	}
+	// The request reached the service: the service's own log has it.
+	_, request, _ := strings.Cut(observation, "要求: GET http://127.0.0.1:")
+	request, _, _ = strings.Cut(request, "\n")
+	_, path, found := strings.Cut(request, "/")
+	home := run.home("verify", "live-check")
+	directories := liveCheckLaunchDirectories(t, home)
+	if !found || len(directories) != 2 {
+		t.Fatalf("request %q, launches %v", request, directories)
+	}
+	served, err := os.ReadFile(filepath.Join(directories[1], "service.log"))
+	if err != nil || !bytes.Contains(served, []byte(`"GET /`+path+` HTTP/1.1" 200`)) {
+		t.Fatalf("the service did not log the check's request /%s: %s %v", path, served, err)
+	}
+	for _, directory := range directories {
+		liveCheckLeftNothing(t, directory)
+	}
+	// The finished request's home kept the evidence under logs and lost the
+	// rest, the fictional service's store with it.
+	if _, err := os.Stat(filepath.Join(home, "live-check-store")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the check's store outlived the trim: %v", err)
+	}
+	t.Logf("ライブ確認 as stored:\n%s", observation)
+}
+
+// The engine stops while the check waits for the service's answer: the
+// check's process group gets SIGTERM, the example check cleans up before it
+// ends, and its launch is recorded as interrupted. Started again, the engine
+// sends the stopped verify stage back to elicitation as it does a failure,
+// the check runs again, and the request reaches its report.
+func TestALiveCheckStoppedWithTheEngineCleansUpAndRunsAgain(t *testing.T) {
+	hold := filepath.Join(t.TempDir(), "hold")
+	if err := os.WriteFile(hold, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	live, project := liveCheckExample(t, map[string]string{"GREETING_HOLD_FILE": hold})
+	run := startLiveCheckRun(t, liveCheckOptions{issue: 74, work: "fixed", live: live, project: project, instructions: liveCheckMethod})
+	liveCheckWaitForPath(t, hold+".waiting")
+	stopping := time.Now()
+	run.finish()
+	t.Logf("the engine stopped %v after it was told to", time.Since(stopping).Round(time.Millisecond))
+	home := run.home("verify", "live-check")
+	directories := liveCheckLaunchDirectories(t, home)
+	if len(directories) != 1 {
+		t.Fatalf("launches: %v", directories)
+	}
+	liveCheckLeftNothing(t, directories[0])
+	if users := liveCheckUsers(t, home); len(users) != 0 {
+		t.Fatalf("test users left behind: %v", users)
+	}
+	state, err := run.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stopped chain.Result
+	for _, result := range state.History {
+		if result.Speaker == "live-check" {
+			stopped = result
+		}
+	}
+	if !stopped.Interrupted || !strings.Contains(stopped.Output, "観測: 応答なし (中断された") || !strings.Contains(stopped.Output, "後始末: サービス") {
+		t.Fatalf("the stopped check's record: %+v", stopped)
+	}
+	if state.Pending == nil || state.Pending.Role != "verify" {
+		t.Fatalf("the stopped verify stage is not left pending: %+v", state.Pending)
+	}
+	if err := os.Remove(hold); err != nil {
+		t.Fatal(err)
+	}
+	run.start()
+	state = run.waitFor("the request ending after the restart", func(s chain.State) bool { return s.Done })
+	run.finish()
+	checks := liveCheckFailuresGoBack(t, stageLaunches(state.History))
+	if len(checks) != 2 || !checks[0].Interrupted || checks[1].Error != "" {
+		t.Fatalf("live checks: %+v", checks)
+	}
+	if sections := liveCheckReportSections(run); len(sections) != 1 || sections[0] != liveCheckObservation(checks[1].Output) {
+		t.Fatalf("ライブ確認 in the stored report: %q", sections)
+	}
+	directories = liveCheckLaunchDirectories(t, home)
+	if len(directories) != 2 {
+		t.Fatalf("launches: %v", directories)
+	}
+	for _, directory := range directories {
+		liveCheckLeftNothing(t, directory)
+	}
+}
+
+// The check's cleanup fails after a passing observation: the test makes the
+// fictional service's user store read-only while the check waits for its
+// answer. The check ends 1 although the feature worked, the work goes back to
+// elicitation, and the next launch removes what the earlier one left before
+// it passes.
+func TestALiveCheckWhoseCleanupFailsSendsTheWorkBack(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes files from a directory it may not write")
+	}
+	hold := filepath.Join(t.TempDir(), "hold")
+	if err := os.WriteFile(hold, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	live, project := liveCheckExample(t, map[string]string{"GREETING_HOLD_FILE": hold})
+	run := startLiveCheckRun(t, liveCheckOptions{issue: 75, work: "fixed", live: live, project: project, instructions: liveCheckMethod})
+	liveCheckWaitForPath(t, hold+".waiting")
+	home := run.home("verify", "live-check")
+	users := filepath.Join(home, "live-check-store", "users")
+	if err := os.Chmod(users, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(users, 0700) })
+	if err := os.Remove(hold); err != nil {
+		t.Fatal(err)
+	}
+	var failed chain.Result
+	run.waitFor("the check to fail on its cleanup", func(s chain.State) bool {
+		for _, result := range s.History {
+			if result.Speaker == "live-check" && result.Error != "" {
+				failed = result
+				return true
+			}
+		}
+		return false
+	})
+	if err := os.Chmod(users, 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := run.waitFor("the request ending", func(s chain.State) bool { return s.Done })
+	run.finish()
+	for _, phrase := range []string{"合否: 合格", "後始末: 失敗", "結果: 1 で終わる"} {
+		if !strings.Contains(failed.Output, phrase) {
+			t.Fatalf("the check whose cleanup failed does not say %q:\n%s", phrase, failed.Output)
+		}
+	}
+	checks := liveCheckFailuresGoBack(t, stageLaunches(state.History))
+	last := checks[len(checks)-1]
+	if len(checks) < 2 || checks[0].Error == "" || last.Error != "" || !strings.Contains(last.Output, "前の起動の後始末") {
+		t.Fatalf("live checks: %+v", checks)
+	}
+	if left := liveCheckUsers(t, home); len(left) != 0 {
+		t.Fatalf("test users left behind: %v", left)
+	}
+	for _, directory := range liveCheckLaunchDirectories(t, home) {
+		liveCheckLeftNothing(t, directory)
 	}
 }
