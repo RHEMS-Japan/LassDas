@@ -34,12 +34,16 @@ type rehearsalRead struct {
 }
 
 type rehearsalTransport struct {
-	mu       sync.Mutex
-	reads    map[string]rehearsalRead
-	counts   map[string]int
-	writes   int
-	unknown  int
-	attempts []rehearsalAttempt
+	mu          sync.Mutex
+	reads       map[string]rehearsalRead
+	counts      map[string]int
+	writes      int
+	unknown     int
+	attempts    []rehearsalAttempt
+	beforeRead  func()
+	observed    chan struct{}
+	requiredLog string
+	logObserved bool
 }
 
 type rehearsalAttempt struct {
@@ -101,8 +105,19 @@ func newRehearsalTransport(data []byte) (*rehearsalTransport, error) {
 }
 
 func (transport *rehearsalTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if transport.beforeRead != nil {
+		transport.beforeRead()
+	}
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
+	defer func() {
+		if transport.observed != nil {
+			select {
+			case transport.observed <- struct{}{}:
+			default:
+			}
+		}
+	}()
 	if request.Method != http.MethodGet {
 		transport.writes++
 		transport.attempts = append(transport.attempts, rehearsalAttempt{"write", request.Method, rehearsalURL(request.URL)})
@@ -143,6 +158,21 @@ func (transport *rehearsalTransport) verifiedReads() (int, error) {
 		total += transport.counts[key]
 	}
 	return total, nil
+}
+
+// Native controller diagnostics are observable events in the active-work
+// fixture too; a refused restart notice precedes the actual launch.
+func (transport *rehearsalTransport) Write(data []byte) (int, error) {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	if transport.requiredLog != "" && bytes.Contains(data, []byte(transport.requiredLog)) {
+		transport.logObserved = true
+		select {
+		case transport.observed <- struct{}{}:
+		default:
+		}
+	}
+	return len(data), nil
 }
 
 // Remove commands independently of recorded work state. If a regression
@@ -334,6 +364,12 @@ func observeRehearsalLoop(duration time.Duration, run func(context.Context) erro
 }
 
 func observeRehearsal(cfg config, root string, transport *rehearsalTransport, duration time.Duration) (result rehearsalResult, observedErr error) {
+	return observeRehearsalUsing(cfg, root, transport, func(run func(context.Context) error) (int64, error) {
+		return observeRehearsalLoop(duration, run)
+	})
+}
+
+func observeRehearsalUsing(cfg config, root string, transport *rehearsalTransport, observe func(func(context.Context) error) (int64, error)) (result rehearsalResult, observedErr error) {
 	var log bytes.Buffer
 	defer func() { result.log = log.String() }()
 	if !rehearsalDisarmed(cfg) {
@@ -350,8 +386,8 @@ func observeRehearsal(cfg config, root string, transport *rehearsalTransport, du
 	previous := http.DefaultTransport
 	http.DefaultTransport = transport
 	defer func() { http.DefaultTransport = previous }()
-	result.ObservedMS, err = observeRehearsalLoop(duration, func(ctx context.Context) error {
-		return pollRequests(ctx, cfg, filepath.Join(root, "jobs"), since, 25*time.Millisecond, capacity, &serialLog{writer: &log})
+	result.ObservedMS, err = observe(func(ctx context.Context) error {
+		return pollRequests(ctx, cfg, filepath.Join(root, "jobs"), since, 25*time.Millisecond, capacity, &serialLog{writer: io.MultiWriter(&log, transport)})
 	})
 	if err != nil {
 		return result, err
@@ -403,6 +439,18 @@ func retainRehearsalObservation(directory string, transport *rehearsalTransport,
 }
 
 func TestRehearsalOfflineQueue(t *testing.T) {
+	rehearsalOfflineQueue(t, "")
+}
+
+// The fixture uses the same input/copy/output path, but ends observation on
+// actual reads. The operational entry above always uses its requested time.
+func TestRehearsalFixtureOfflineQueue(t *testing.T) {
+	for _, kind := range []string{"done", "status-write", "missing-read", "waiting", "active"} {
+		t.Run(kind, func(t *testing.T) { rehearsalOfflineQueue(t, kind) })
+	}
+}
+
+func rehearsalOfflineQueue(t *testing.T, fixture string) {
 	queue, configPath, snapshotPath, output := os.Getenv("REHEARSAL_QUEUE"), os.Getenv("REHEARSAL_CONFIG"), os.Getenv("REHEARSAL_READS"), os.Getenv("REHEARSAL_RESULT")
 	if queue == "" && configPath == "" && snapshotPath == "" && output == "" {
 		t.Skip("opt-in offline operational check; use the rehearsal helper")
@@ -456,7 +504,15 @@ func TestRehearsalOfflineQueue(t *testing.T) {
 	if err := copyRehearsalQueue(queue, copied); err != nil {
 		t.Fatal("cannot make a new private queue copy")
 	}
-	result, err := observeRehearsal(disarmRehearsal(cfg), copied, transport, time.Duration(duration)*time.Millisecond)
+	var result rehearsalResult
+	if fixture != "" {
+		if fixture == "active" {
+			transport.requiredLog = "starting accepted request "
+		}
+		result, err = observeRehearsalReads(disarmRehearsal(cfg), copied, transport, 0)
+	} else {
+		result, err = observeRehearsal(disarmRehearsal(cfg), copied, transport, time.Duration(duration)*time.Millisecond)
+	}
 	if writeErr := retainRehearsalObservation(filepath.Dir(output), transport, result); writeErr != nil {
 		t.Fatal("cannot retain private observation details")
 	}
@@ -489,15 +545,62 @@ func rehearsalFixtureReads(t *testing.T, reads ...rehearsalRead) *rehearsalTrans
 	return transport
 }
 
+// required == 0 waits for the snapshot's counts. A positive value stops at
+// that many reads, including a deliberately insufficient-coverage fixture.
+// Rejected requests are observed events too. The deadline only fails a test;
+// it never supplies evidence that a read happened.
+func observeRehearsalReads(cfg config, root string, transport *rehearsalTransport, required int) (rehearsalResult, error) {
+	transport.observed = make(chan struct{}, 1)
+	return observeRehearsalUsing(cfg, root, transport, func(run func(context.Context) error) (int64, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		started := time.Now()
+		outcome := make(chan error, 1)
+		go func() { outcome <- run(ctx) }()
+		for {
+			select {
+			case err := <-outcome:
+				return 0, fmt.Errorf("observation ended before required read events: %v", err)
+			case <-ctx.Done():
+				<-outcome
+				return 0, errors.New("required read events were not observed")
+			case <-transport.observed:
+				transport.mu.Lock()
+				total, covered := 0, true
+				for key, read := range transport.reads {
+					total += transport.counts[key]
+					covered = covered && transport.counts[key] >= read.MinReads
+				}
+				if required > 0 {
+					covered = total >= required
+				}
+				ready := (covered || transport.writes != 0 || transport.unknown != 0) &&
+					(transport.requiredLog == "" || transport.logObserved)
+				transport.mu.Unlock()
+				if !ready {
+					continue
+				}
+				cancel()
+				if err := <-outcome; !errors.Is(err, context.Canceled) {
+					return 0, fmt.Errorf("observation did not cancel normally: %v", err)
+				}
+				return time.Since(started).Milliseconds(), nil
+			}
+		}
+	})
+}
+
 func TestRehearsalTerminalObservationRequiresReadCoverageAndNormalExit(t *testing.T) {
 	for _, minimum := range []int{2, 1000} {
 		t.Run(fmt.Sprint(minimum), func(t *testing.T) {
 			cfg := disarmRehearsal(watchConfiguration(t))
 			root, _ := noticeJob(t, chain.State{Done: true})
 			transport := rehearsalFixtureReads(t, rehearsalRead{URL: rehearsalDiscovery, Body: json.RawMessage(`[]`), MinReads: minimum})
-			result, err := observeRehearsal(cfg, root, transport, 100*time.Millisecond)
+			var delayed sync.Once
+			transport.beforeRead = func() { delayed.Do(func() { time.Sleep(150 * time.Millisecond) }) }
+			result, err := observeRehearsalReads(cfg, root, transport, 2)
 			if minimum == 2 {
-				if err != nil || !result.NormalExit || result.FullTickCoverage || result.ObservedMS < 100 || result.Records != 2 || result.Reads < 2 {
+				if err != nil || !result.NormalExit || result.FullTickCoverage || result.Records != 2 || result.Reads < 2 {
 					t.Fatalf("observation=%+v error=%v", result, err)
 				}
 			} else if err == nil {
@@ -556,7 +659,7 @@ func TestRehearsalUsesNativeGitHubRecordsAndExplicitReads(t *testing.T) {
 	}
 	address := cfg.GitHub.APIURL + "/repos/example/project/issues?direction=asc&labels=automation&per_page=100&sort=created&state=open"
 	transport := rehearsalFixtureReads(t, rehearsalRead{URL: address, Body: json.RawMessage(`[]`), MinReads: 2})
-	if _, err := observeRehearsal(disarmRehearsal(cfg), root, transport, 100*time.Millisecond); err != nil {
+	if _, err := observeRehearsalReads(disarmRehearsal(cfg), root, transport, 0); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -569,8 +672,24 @@ func TestRehearsalUnknownReadsAndEmptySnapshotsCannotPass(t *testing.T) {
 	}
 	cfg := disarmRehearsal(watchConfiguration(t))
 	root, _ := noticeJob(t, chain.State{Done: true})
-	transport := rehearsalFixtureReads(t, rehearsalRead{URL: rehearsalDiscovery + "&unexpected=1", Body: json.RawMessage(`[]`), MinReads: 1})
-	if _, err := observeRehearsal(cfg, root, transport, 60*time.Millisecond); err == nil || transport.unknown == 0 {
+	transport := rehearsalFixtureReads(t, rehearsalRead{URL: rehearsalDiscovery, Body: json.RawMessage(`[]`), MinReads: 1})
+	// Observe both reads before starting the timed poll. A busy runner need
+	// not schedule its first poll inside the observation window. Satisfy the
+	// required read first so a missing read cannot mask an ignored unknown.
+	request, err := http.NewRequest(http.MethodGet, rehearsalDiscovery, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := transport.RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	request.URL.RawQuery += "&unexpected=1"
+	if _, err := transport.RoundTrip(request); err == nil || transport.unknown != 1 {
+		t.Fatal("unknown read was not refused and observed")
+	}
+	if _, err := observeRehearsalReads(cfg, root, transport, 0); err == nil {
 		t.Fatal("an unknown read was treated as observed coverage")
 	}
 }
@@ -626,7 +745,7 @@ func TestRehearsalDisarmingIsIndependentOfRecordedState(t *testing.T) {
 	}
 	root, _ := noticeJob(t, chain.State{Done: true})
 	transport := rehearsalFixtureReads(t, rehearsalRead{URL: rehearsalDiscovery, Body: json.RawMessage(`[]`), MinReads: 1})
-	if _, err := observeRehearsal(cfg, root, transport, 100*time.Millisecond); err == nil || err.Error() != "rehearsal commands were not all removed" || len(transport.counts) != 0 {
+	if _, err := observeRehearsalReads(cfg, root, transport, 0); err == nil || err.Error() != "rehearsal commands were not all removed" || len(transport.counts) != 0 {
 		t.Fatal("observation did not check disarming before it ran")
 	}
 	// Positive control: the same harmless fixture command really would leave
@@ -713,7 +832,7 @@ func TestRehearsalKeepsFinishedStopReportingUnchanged(t *testing.T) {
 		t.Fatal("the stopped request's unfinished run lost its unchanged-record check")
 	}
 	transport := rehearsalFixtureReads(t, rehearsalRead{URL: rehearsalDiscovery, Body: json.RawMessage(`[]`), MinReads: 2})
-	if _, err := observeRehearsal(disarmRehearsal(cfg), root, transport, 100*time.Millisecond); err != nil {
+	if _, err := observeRehearsalReads(disarmRehearsal(cfg), root, transport, 0); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -769,7 +888,7 @@ func TestRehearsalOptInEntryUsesOnlySyntheticInputsAndKeepsSource(t *testing.T) 
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			command := exec.CommandContext(ctx, binary, "-test.run=^TestRehearsalOfflineQueue$", "-test.timeout=5s")
+			command := exec.CommandContext(ctx, binary, "-test.run=^TestRehearsalFixtureOfflineQueue$/^"+kind+"$", "-test.timeout=5s")
 			command.Env = []string{"REHEARSAL_QUEUE=" + root, "REHEARSAL_CONFIG=" + configPath, "REHEARSAL_READS=" + readsPath, "REHEARSAL_RESULT=" + resultPath, "REHEARSAL_MS=100", "TMPDIR=" + private}
 			output, runErr := command.CombinedOutput()
 			failed := kind == "status-write" || kind == "missing-read" || kind == "active"

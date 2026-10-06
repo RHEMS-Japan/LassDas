@@ -1,11 +1,13 @@
-"""Offline rehearsal entry-point checks; toolchain executables are fakes only."""
+"""Offline rehearsal checks; one module-cache pair uses installed Go offline."""
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 
 HELPER = Path(__file__).resolve().parents[2] / "deploy/ticket-engine/operations/rehearse.py"
@@ -57,16 +59,69 @@ class OperationsRehearsalTests(unittest.TestCase):
         self.settings = self.root / "settings.json"
         self.settings.write_text("{}")
 
-    def invoke(self, **settings):
+    def invoke(self, modules=None, real_go=None, timeout=10, **settings):
         self.settings.write_text(json.dumps(settings))
-        # Both executable paths are absolute fixtures. Missing fakes fail;
-        # neither test is permitted to fall back to installed git or Go.
+        # The default paths are absolute fixtures. Only the explicit offline
+        # build pair supplies real_go; a missing fake never falls back.
         command = [sys.executable, "-B", str(HELPER), "--source", str(self.source),
                    "--commit", "a" * 40, "--queue", str(self.queue), "--config", str(self.config),
                    "--reads", str(self.reads), "--output", str(self.output), "--seconds", "1",
-                   "--git", str(self.fake_git), "--go", str(self.fake_go)]
+                   "--git", str(self.fake_git), "--go", str(real_go or self.fake_go)]
+        if modules is not None:
+            command += ["--modules", str(modules)]
         environment = dict(os.environ, FIXTURE_PRIVATE_KEY="must-not-reach-toolchain", GOFLAGS="unsafe fixture")
-        return subprocess.run(command, env=environment, capture_output=True, text=True, timeout=10)
+        return subprocess.run(command, env=environment, capture_output=True, text=True, timeout=timeout)
+
+    def test_external_module_build_needs_cached_archives_and_leaves_them_unchanged(self):
+        go = shutil.which("go")
+        self.assertIsNotNone(go, "the offline module build requires installed Go")
+        module = "dependency.example/feature"
+        module_text = "module " + module + "\n\ngo 1.22\n"
+        archive = self.root / "proxy" / module / "@v"
+        archive.mkdir(parents=True)
+        (archive / "v1.0.0.mod").write_text(module_text)
+        (archive / "v1.0.0.info").write_text('{"Version":"v1.0.0","Time":"2026-01-01T00:00:00Z"}')
+        with zipfile.ZipFile(archive / "v1.0.0.zip", "w") as package:
+            package.writestr(module + "@v1.0.0/go.mod", module_text)
+            package.writestr(module + "@v1.0.0/feature.go", "package feature\nconst Answer = 42\n")
+        rewrite = self.source / "rewrite"
+        (rewrite / "go.mod").write_text("module rehearsal.example/candidate\n\ngo 1.22\n\nrequire " + module + " v1.0.0\n")
+        support = rewrite / "cmd/engine/rehearsal_test.go"
+        support.write_text('''package main
+import ("os"; "testing"; "dependency.example/feature")
+func TestRehearsalOfflineQueue(t *testing.T) {
+    if feature.Answer != 42 { t.Fatal("external module was not used") }
+    // Fixture observations only: this test exercises the offline build.
+    result := []byte(`{"records":1,"reads":1,"required_reads":1,"observed_ms":1000,"normal_exit":true,"full_tick_coverage":false}`)
+    if err := os.WriteFile(os.Getenv("REHEARSAL_RESULT"), result, 0600); err != nil { t.Fatal(err) }
+}
+''')
+        modules = self.root / "module cache"
+        environment = dict(PATH=os.environ.get("PATH", ""), HOME=str(self.root),
+                           GOENV="off", GOTOOLCHAIN="local", GOSUMDB="off", GOWORK="off",
+                           GOPROXY=(self.root / "proxy").as_uri(), GOMODCACHE=str(modules),
+                           GOMAXPROCS="2", GOFLAGS="-p=1")
+        # Retain the module's checksum before building with -mod=readonly.
+        seed = subprocess.run([go, "mod", "download", module], cwd=rewrite, env=environment,
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(seed.returncode, 0, seed.stderr)
+        before = {str(path.relative_to(modules)): path.read_bytes()
+                  for path in modules.rglob("*") if path.is_file()}
+        source_before = (rewrite / "go.mod").read_bytes(), (rewrite / "go.sum").read_bytes()
+        with self.subTest(cache="present"):
+            result = self.invoke(modules=modules, real_go=go, timeout=210)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertTrue((self.output / "modules" / (module + "@v1.0.0")).is_dir())
+        self.output = self.root / "without-cache"
+        with self.subTest(cache="absent"):
+            result = self.invoke(real_go=go, timeout=210)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--modules", result.stderr)
+            self.assertNotIn("No write was observed", result.stdout)
+        after = {str(path.relative_to(modules)): path.read_bytes()
+                 for path in modules.rglob("*") if path.is_file()}
+        self.assertEqual(after, before)
+        self.assertEqual(((rewrite / "go.mod").read_bytes(), (rewrite / "go.sum").read_bytes()), source_before)
 
     def test_success_is_scoped_and_uses_private_isolated_output(self):
         before = self.config.read_bytes(), self.reads.read_bytes()

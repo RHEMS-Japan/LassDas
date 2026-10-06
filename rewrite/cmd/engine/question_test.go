@@ -396,6 +396,20 @@ func TestQuestionRoleIsRefusedBeforeIntakeUnlessItCanComment(t *testing.T) {
 	}
 }
 
+func TestQuestionNoPostLimitNeedsAPositiveSettingAndAQuestionRole(t *testing.T) {
+	for _, limit := range []int{-1, 0, 1, 3} {
+		cfg := questionConfiguration(t)
+		cfg.Intake.QuestionNoPostLimit = &limit
+		if err := validateQuestionRole(cfg); (err == nil) != (limit > 0) {
+			t.Fatalf("limit %d: %v", limit, err)
+		}
+		cfg.Intake.QuestionRole = ""
+		if err := validateQuestionRole(cfg); err == nil {
+			t.Fatal("a limit without a question role was accepted")
+		}
+	}
+}
+
 // The tracker records a status or field change as a comment with no words,
 // and the runtime makes such changes itself while it waits. Words from the
 // creator or an operator are the answer; a stop line is not.
