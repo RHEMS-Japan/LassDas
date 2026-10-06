@@ -215,6 +215,14 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		return errors.New("--check reads --config and starts nothing; do not combine it with anything else")
 	}
 	if *logFile != "" {
+		// The shipped manifests put this file in the queue directory, which
+		// a first start on a fresh volume does not have yet: the watch
+		// creates the queue only after the configuration is read, and the
+		// status page reads both. Create the file's directory here, as the
+		// queue is created later, instead of failing to start at all.
+		if err := os.MkdirAll(filepath.Dir(*logFile), 0700); err != nil {
+			return fmt.Errorf("creating the directory of --log-file: %w", err)
+		}
 		file, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			return fmt.Errorf("opening --log-file: %w", err)
