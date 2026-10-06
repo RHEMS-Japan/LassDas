@@ -337,6 +337,34 @@ func TestStagesHoldOnTheQuestionAndRunOnWithoutFurtherDecisions(t *testing.T) {
 	}
 }
 
+func TestStagesContinueWhenTheQuestionRolePostedNothing(t *testing.T) {
+	flow := stagesWorkflow()
+	flow.Question = "ask_requester"
+	store := &memoryStore{state: State{Request: "Use what already exists."}}
+	decisions := 0
+	var ran []string
+	engine := Chain{Store: store, Workflow: flow, WaitAfter: "ask_requester",
+		QuestionPosted: func(context.Context) (QuestionObservation, error) { return QuestionObservation{}, nil },
+		Router: StageRouter{Entrance: testRouter(func(context.Context, State) (Assignment, error) {
+			decisions++
+			return Assignment{Role: "ask_requester"}, nil
+		})},
+		Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+			ran = append(ran, a.Role)
+			return []Result{{Role: a.Role, Speaker: "worker", Output: "No question was needed."}}
+		}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := engine.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"elicit", "ask_requester", "elicit", "ask_requester", "elicit", "work", "verify", "deliver", "confirm"}
+	if !store.state.Done || store.state.Waiting || decisions != 2 || !reflect.DeepEqual(ran, want) {
+		t.Fatalf("done=%t waiting=%t decisions=%d ran=%v", store.state.Done, store.state.Waiting, decisions, ran)
+	}
+}
+
 func TestOrderedRunRejectsConfigurationThatWouldLetWordsDecide(t *testing.T) {
 	if err := stagesWorkflow().Validate(stagePurposes()); err != nil {
 		t.Fatal(err)

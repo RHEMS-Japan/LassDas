@@ -31,6 +31,7 @@ type intakeConfig struct {
 	StopReportRole                 string  `json:"stop_report_role,omitempty"`
 	StoppedWorkspaceRetentionHours int     `json:"stopped_workspace_retention_hours,omitempty"`
 	QuestionRole                   string  `json:"question_role,omitempty"`
+	QuestionNoPostLimit            *int    `json:"question_no_post_limit,omitempty"`
 	IssueIDs                       []int64 `json:"issue_ids,omitempty"`
 	// MaxActiveMinutes limits each delegated interval of newly accepted work.
 	// Zero leaves it unlimited. Stage outcomes never reset the saved clock.

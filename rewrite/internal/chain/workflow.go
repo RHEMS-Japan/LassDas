@@ -123,6 +123,9 @@ func (w *Workflow) clone() *Workflow {
 }
 
 func (s State) nextActions() []string {
+	if s.Workflow == nil {
+		return nil
+	}
 	if len(s.Workflow.Stages) > 0 {
 		return s.stageActions()
 	}
@@ -180,6 +183,9 @@ func (s State) atLaunchLimit(role string) bool {
 // cap. When every connected role is at its cap they all stay offered, so a cap
 // never leaves a decision without a role to choose and never ends a request.
 func (s State) offered(action string) bool {
+	if action == s.QuestionUnavailable {
+		return false
+	}
 	if !s.permits(action) {
 		return false
 	}
@@ -187,7 +193,7 @@ func (s State) offered(action string) bool {
 		return true
 	}
 	for _, other := range s.nextActions() {
-		if other != "done" && !s.atLaunchLimit(other) {
+		if other != "done" && other != s.QuestionUnavailable && !s.atLaunchLimit(other) {
 			return false
 		}
 	}

@@ -147,7 +147,7 @@ func (s State) stageActions() []string {
 	case index >= 0 && !last.satisfied:
 		// A model stage that could not run, or was interrupted, runs again.
 		return []string{stage.Name}
-	case index == 0 && s.Workflow.Question != "" && next != "done":
+	case index == 0 && s.Workflow.Question != "" && s.Workflow.Question != s.QuestionUnavailable && next != "done":
 		return []string{s.Workflow.Question, next}
 	}
 	return []string{next}
