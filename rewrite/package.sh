@@ -19,7 +19,7 @@ done
 for harness in git_workspace hermes raven linux_role adversarial_review delivery_support; do
   cp "$source_dir/harnesses/$harness.py" "$output_dir/harnesses/$harness.py"
 done
-for guide in START RUNTIME README OPERATING; do
+for guide in START RUNTIME README OPERATING WORKSPACE-RETENTION; do
   cp "$source_dir/$guide.md" "$output_dir/$guide.md"
 done
 cp "$source_dir/THIRD-PARTY-NOTICES.txt" "$output_dir/THIRD-PARTY-NOTICES.txt"

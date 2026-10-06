@@ -19,6 +19,8 @@ Kubernetes に導入する場合は、[設定を写す前の a / b / c の選択
 - `examples/operator-gateway.json`: モデルの接続を gateway 経由にした例。
 - `RUNTIME.md`: SDK、隔離、ネットワーク、監督機能の前提と未検証事項。
 - `OPERATING.md`: 質問への回答、コメント編集、分割回答、代理回答、停止の扱い。
+- [WORKSPACE-RETENTION.md](WORKSPACE-RETENTION.md): 停止後に作業場所を保持する期間と、削除対象・残す記録。
+- `THIRD-PARTY-NOTICES.txt`: 同梱ソフトウェアのライセンスと通知。
 - `README.md`: 設定詳細と実験記録。
 
 判断はモデルに任せ、回答は普通の文章のまま次へ渡します。工程接続は、回答に印を付けて合格させる仕組みではありません。

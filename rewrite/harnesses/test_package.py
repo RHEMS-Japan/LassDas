@@ -63,7 +63,7 @@ class PackageTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             expected = ["bin/ticket-engine", "bin/ticket-tracker", "bin/ticket-status", "START.md", "THIRD-PARTY-NOTICES.txt",
-                        "RUNTIME.md", "README.md", "OPERATING.md", "examples/operator.json",
+                        "RUNTIME.md", "README.md", "OPERATING.md", "WORKSPACE-RETENTION.md", "examples/operator.json",
                         "examples/operator-gateway.json",
                         "examples/operator-stages.json",
                         "examples/operator-github.json",
@@ -75,6 +75,7 @@ class PackageTests(unittest.TestCase):
             for relative in expected:
                 if not relative.startswith("bin/"):
                     self.assertEqual((bundle / relative).read_bytes(), (SOURCE / relative).read_bytes())
+            self.assertIn("](WORKSPACE-RETENTION.md)", (bundle / "START.md").read_text())
             imported = subprocess.run([sys.executable, "-B", "-c",
                                        "import sys; sys.path.insert(0, sys.argv[1]); import adversarial_review",
                                        str(bundle / "harnesses")], cwd=root, capture_output=True, text=True, timeout=10)
