@@ -1439,6 +1439,17 @@ entry. `PROJECT_ID` must equal the selected configuration's intake project.
 The first version accepts summary/description only: projects with mandatory
 custom fields are not supported, and no field value is guessed.
 
+This helper creates the issue using the engine's configured tracker account.
+It is not a test of normal requester intake: section 2 requires requester
+issues to come from a different account. If such an issue meets the intake
+settings, it can run with the engine recorded as its requester; the person
+who asked is not its creator, so their answers and stop comments are not
+authorized unless they are a configured operator. Engine comments can then
+be mistaken for requester answers. To check intake through delivery, create
+the request from the intended requester account using the tracker's normal
+UI or that account's approved tooling. Do not open intake for a helper-created
+issue as a substitute for this check.
+
 Prepare ordinary single-link UTF-8 `SUMMARY_FILE` and `DESCRIPTION_FILE` on
 the workstation. The summary must be nonempty; an empty description is
 allowed. The file contents travel as JSON data over stdin, not shell code,
@@ -1633,15 +1644,31 @@ the endpoints your installation should reach and refuse, for example:
 ```json
 [
   {"name": "model", "url": "https://allowed.example:8443", "expect": "connected"},
-  {"name": "restricted", "url": "https://denied.example", "expect": "refused"}
+  {"name": "restricted", "url": "https://denied.example", "expect": "refused"},
+  {"name": "metadata", "url": "http://169.254.169.254:80", "expect": "refused"},
+  {"name": "cluster-api", "url": "https://CLUSTER_API_IP:443", "expect": "refused"}
 ]
 ```
+
+`metadata` is the cloud metadata service. `cluster-api` is the cluster's own
+API: put the cluster IP of the `kubernetes` Service in the `default`
+namespace in place of `CLUSTER_API_IP` (read it with
+`kubectl -n default get service kubernetes -o jsonpath='{.spec.clusterIP}'`),
+not the public API endpoint, which the shipped policy does not refuse.
 
 Replace these example endpoints. Include the tracker, model/gateway and delivery
 endpoints actually used, and destinations your network operator expects to be
 refused. Both expectations must be present; URLs must contain no credentials,
 query or fragment. URL paths are not tested. No target is inferred from prose
 inside the configuration. Explicit ports and IPv6 URLs are supported.
+
+Run this observation from the **engine container**, not just from a model
+role's sandbox. Include the installation's cloud metadata endpoint and
+Kubernetes API endpoint as explicit `refused` targets in the private targets
+file. Use the actual endpoints for that installation; no credentials are
+needed for this TCP observation. A role sandbox's refusal does not prove
+that the engine itself cannot connect. Do not open intake until both engine
+connections are refused, alongside the required allowed connections.
 
 ```sh
 sh deploy/ticket-engine/operations/egress-check.sh \
