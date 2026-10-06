@@ -1172,6 +1172,20 @@ line of `VERIFY_COMMANDS` in `verify_merged` (each line runs without a shell).
 That is a separate run against a different state, and the report says which
 state each observation came from.
 
+**A working example.** `rewrite/examples/live-check/` checks a fictional
+project on `127.0.0.1`: `verify_feature.py` has `run` and the five
+subcommands, `server.py` is the project's service it starts, and
+`FEATURES.md` is the project's Feature Map, one table whose columns are the
+feature, how to reach it, how to use it, what shows it working and the
+pitfalls. The check finds its row by the first column and reads nothing else
+of the table, so a map needs no fixed form. The example writes in Japanese,
+since what it prints is quoted in the report. Its tests
+(`rewrite/harnesses/test_live_check_example.py`) run it through a pass, a
+feature that does not work, SIGTERM while it waits for an answer, a killed
+launch whose leftovers the next launch removes, a cleanup that fails, a
+process it did not start, a missing preparation, and a run by the merged
+check.
+
 ### With a gateway in front of the models
 
 `rewrite/examples/operator-gateway.json` shows the gateway settings for the

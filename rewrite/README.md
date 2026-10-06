@@ -1290,6 +1290,10 @@ Three facts of the engine decide how such a command writes and prints:
   sandbox has to remove what an earlier, stopped launch recorded before it
   uses the service again.
 
+`examples/live-check/` is such a command for a fictional project on
+`127.0.0.1`, with the project's service and its Feature Map. It is not part of
+the bundle; `harnesses/test_live_check_example.py` runs it on its own.
+
 ### A read-only status page
 
 `bin/ticket-status` serves what the queue directory holds, as it is, over
