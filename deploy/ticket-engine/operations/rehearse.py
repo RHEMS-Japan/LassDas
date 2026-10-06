@@ -48,16 +48,28 @@ def main():
     parser.add_argument("--seconds", type=int, default=2, help="observation duration, 1 to 60 seconds")
     parser.add_argument("--git", default="git", help="git executable, never a shell command")
     parser.add_argument("--go", default="go", help="installed Go executable; no automatic download")
+    parser.add_argument("--modules", help="existing Go module cache, read through its local cache/download proxy")
     args = parser.parse_args()
     if not re.fullmatch(r"[a-fA-F0-9]{40}|[a-fA-F0-9]{64}", args.commit) or not 1 <= args.seconds <= 60:
         raise QueueError("name an exact commit and a duration from one to sixty seconds")
-    for path in (args.source, args.queue):
+    inputs = [args.source, args.queue]
+    module_proxy = "off"
+    if args.modules is not None:
+        inputs.append(args.modules)
+        download = Path(args.modules) / "cache/download"
+        try:
+            with directory(str(download)):
+                pass
+        except OSError:
+            raise QueueError("--modules needs a readable cache/download directory with the required archives") from None
+        module_proxy = download.as_uri()
+    for path in inputs:
         with directory(path):
             pass
     if not os.path.isabs(args.output) or ".." in Path(args.output).parts:
         raise QueueError("output must be a new absolute directory")
-    if any(Path(args.output).is_relative_to(Path(path)) for path in (args.source, args.queue)):
-        raise QueueError("output must be outside the source checkout and input queue")
+    if any(Path(args.output).is_relative_to(Path(path)) for path in inputs):
+        raise QueueError("output must be outside the source checkout, input queue and supplied module cache")
     parent, name = os.path.split(args.output)
     with directory(parent):
         if not name or os.path.lexists(args.output):
@@ -86,7 +98,7 @@ def main():
             target.write(data)
     environment.update(HOME=str(output / "home"), GOCACHE=str(output / "cache"), TMPDIR=str(output / "tmp"),
                        GOPATH=str(output / "home"), GOMODCACHE=str(output / "modules"), GOENV="off",
-                       GOTOOLCHAIN="local", GOPROXY="off", GOSUMDB="off", GOWORK="off", CGO_ENABLED="0",
+                       GOTOOLCHAIN="local", GOPROXY=module_proxy, GOSUMDB="off", GOWORK="off", CGO_ENABLED="0",
                        GOMAXPROCS="2", GOFLAGS="-p=1", REHEARSAL_QUEUE=args.queue,
                        REHEARSAL_CONFIG=str(output / "config.json"), REHEARSAL_READS=str(output / "reads.json"),
                        REHEARSAL_RESULT=str(output / "result.json"), REHEARSAL_MS=str(args.seconds * 1000))
@@ -108,7 +120,8 @@ def main():
                 process.wait()
             raise QueueError("offline rehearsal timed out") from None
     if code != 0:
-        raise QueueError("offline rehearsal failed; inspect the retained private output")
+        raise QueueError("offline rehearsal failed; inspect the retained private output; "
+                         "external Go modules require --modules with all required cached archives")
     result = json.loads(read_file(str(output / "result.json")))
     if not valid_result(result, args.seconds * 1000):
         raise QueueError("offline rehearsal lacks read coverage or normal-exit evidence")

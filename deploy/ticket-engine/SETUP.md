@@ -2151,8 +2151,17 @@ what it tried to do.
    does not fetch, switch commits, create/remove worktrees or inject a test
    from a different version. Keep it beside `queue_helper.py`. It needs Python
    3, Git and an already installed Go toolchain meeting the candidate's module
-   requirement. Toolchain/module downloads are disabled. The output must be
-   new, outside the checkout and input queue, with a real existing parent.
+   requirement. Network and toolchain downloads are disabled. For a candidate
+   with external Go modules, also pass `--modules /absolute/path/to/module-cache`
+   naming a pre-populated Go module cache. Its `cache/download` directory must
+   contain the required module archives and metadata; extracted source alone
+   is not enough. Go reads that directory through a local file proxy and
+   copies only the needed modules into the new private output's module cache.
+   The supplied cache is not changed, and there is no network fallback.
+   Without it, a candidate needing external modules cannot be built offline;
+   the helper reports a failed rehearsal, not a successful observation.
+   The output must be new, outside the checkout, input queue and supplied
+   module cache, with a real existing parent.
    Input paths must be absolute without symbolic links.
 
    Supply the GET responses you intend to assume in `offline-reads.json`.
