@@ -37,10 +37,12 @@ workflows and free routing are kept for comparison.
 
 ## Source
 
-Line numbers refer to commit 579970b.
+Line numbers refer to commit 2088b5a.
 
 - [`rewrite/README.md`](../../README.md), "Stages instead of roles", lines
-  545-547, 565-582, 1020-1021 and 1058-1059.
+  545-547, 565-582 and 1084-1096.
+- [`rewrite/README.md`](../../README.md), "Settling the request at the
+  entrance", lines 445-453.
 - [`rewrite/README.md`](../../README.md), "Configured action connections",
   lines 142-145 and 163-164.
 - [`rewrite/README.md`](../../README.md), "Isolated live observations", lines

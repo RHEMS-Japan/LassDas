@@ -45,12 +45,12 @@ Accepted.
 
 ## Source
 
-Line numbers refer to commit 579970b.
+Line numbers refer to commit 2088b5a.
 
 - [`rewrite/README.md`](../../README.md), "Settling the request at the
-  entrance", lines 423-472.
+  entrance", lines 445-453 and 460-474.
 - [`rewrite/README.md`](../../README.md), "Stages instead of roles", lines
-  1020-1027 and 1031-1038.
+  1084-1096.
 - [`rewrite/README.md`](../../README.md), "Automatic intake experiment", lines
   249, 259-260 and 331-332, and "Direct operator-configured tracker tool", lines
   2291-2292.
