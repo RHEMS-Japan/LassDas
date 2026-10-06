@@ -7,8 +7,9 @@ request is refused for its wording; only input that cannot be processed may be
 refused. The first stage settles what the request, the repository and the
 operator instructions can settle, writes each choice down with its reason, and
 sends what only the requester can decide straight away, before anything is
-investigated or built, in one comment with two to four choices per point so that
-a single reply answers it. Wording, naming, language, level of detail and style
+investigated or built: every question that can be answered now goes in one
+numbered comment with choices and a recommended answer, and a question that
+depends on an earlier answer follows as soon as that answer arrives. Wording, naming, language, level of detail and style
 are never asked. The role that asks is not a stage, satisfies nothing and cannot
 end a request. In an ordered run with a question role configured, the question
 is offered only after the first stage, beside the stages the run may take next; when a
@@ -33,7 +34,8 @@ them.
 The work is meant to reach a delivered and verified result by morning with
 nobody available to answer. Proceeding with an open point costs a night's work
 while asking costs one reply, so the points only the requester can decide are
-asked once, at the start, in a form one reply settles. After that, a failure is
+asked at the start, in as few comments as the dependencies between them allow,
+in a form one reply settles. After that, a failure is
 for the roles to resolve, and a person is asked only for authority the roles do
 not have.
 

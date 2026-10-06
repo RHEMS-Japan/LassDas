@@ -7,10 +7,12 @@ A command stage is satisfied only when all of its processes exit 0. A model
 stage is satisfied when its processes ran without a process error; nothing it
 wrote is read, so writing "done", "verified" or "delivered" advances nothing.
 The last stage must be a command, so an observed exit status finishes the run.
-No model decides which stage runs next, whether a stage is satisfied, whether a
-failure is recoverable or when the request is complete. The one routing
-decision left to a model, when a question role is configured, is whether to
-ask the requester after the first stage ([0006](0006-request-as-written-questions-at-the-entrance.md)).
+Outside the entrance, no model decides which stage runs next, whether a stage is
+satisfied, whether a failure is recoverable or when the request is complete.
+The one routing decision left to a model, when a question role is configured,
+comes after the first stage: another requirements pass, a question to the
+requester, or the next stage. That choice is bounded by an operator setting and
+is never completion ([0006](0006-request-as-written-questions-at-the-entrance.md)).
 
 ## Alternatives compared
 
