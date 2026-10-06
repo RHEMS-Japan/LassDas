@@ -536,7 +536,10 @@ breaks each such part once.
 **Write it down in the repository.** The owner chooses the file and its form;
 the engine requires no file name and reads no format. Put it in through the
 repository's ordinary pull request, so that later changes to it are reviewed
-the same way. The engine is given only its location, in the project guidance
+the same way, and merge that pull request into the integration branch before
+the intake opens (section 8): the roles read the definition from a checkout of
+that branch, so a location whose file is not there yet gives them nothing to
+read. The engine is given only its location, in the project guidance
 ([section 4](#finish-the-project-guidance-either-tracker)). Its commands
 become the operator's `build` and `test` (section 6) and, if there is one, the
 live check's process. Change a command and the definition together, and run
@@ -2141,21 +2144,38 @@ notes:
 | Run | `COMMAND` | `BREAK` | Must print |
 | --- | --- | --- | --- |
 | Each command the verify stage runs | `/opt/ticket-automation/operator/build`, then `/opt/ticket-automation/operator/test`, then the live check's command line if you added one | empty | `inside a role exit: 0` |
-| Each part that the definition of done says a command checks | the command that checks it | one change that breaks that part, for example `printf 'not source\n' >> crates/parser/src/lib.rs` for a crate the definition says the tests compile | `inside a role exit:` with a status other than 0 |
+| Each part that the definition of done says a command checks | the verify stage's command that checks it (`build`, `test` or the live check), not a command that only the definition names | one change that breaks that part, for example `printf 'not source\n' >> crates/parser/src/lib.rs` for a crate the definition says the tests compile | `inside a role exit:` with a status other than 0 |
 
 A command that does not exit 0 here fails every request at `verify`, and the
 request goes round without end
 ([section 11](#a-request-goes-round-without-end)): a test that only passes
 with a writable checkout, or a tool the image lacks, does that. Make each
 break one that the part's own tools reject: a line that happens to be valid in
-that language breaks nothing. A broken part whose command still exits 0 is
-then not checked by that command: fix the command or the image, or change the
-definition of done to say that no machine checks that part, so that the
-report says `確かめていない` for it. A line that says the break did not apply
-or changed nothing is no result; correct `BREAK` and run it again. A live
-check that needs values from its process's `env` gets them as `NAME=value` on
-the `env -i` line. Do not open the intake (section 8) until every run prints
-what the table says.
+that language breaks nothing. A command that the verify stage does not run
+proves nothing here, even when the definition names it. A broken part whose
+command still exits 0 is then not checked by that command: fix the command or
+the image, or change the definition of done to say that no machine checks
+that part, so that the report says `確かめていない` for it. A line that says
+the break did not apply or changed nothing is no result; correct `BREAK` and
+run it again. Do not open the intake (section 8) until every run prints what
+the table says.
+
+A live check that needs values from its process's `env` gets them on the
+`env -i` line inside the script, as `NAME=value` with the value its
+configuration has. A value that its process's `secrets` fills is a credential:
+write it there as `NAME="$SOURCE"`, where `SOURCE` is the engine container's
+variable that `secrets` names for `NAME`, so that the shell inside the
+container fills it in. Never write the value itself, there or on the command
+line. For a process with
+`"secrets": {"LIVE_CHECK_PASSWORD": "LIVE_CHECK_USER_PASSWORD"}`, the start of
+that line becomes:
+
+<!-- setup-done-check-secret -->
+```sh
+env -i PATH=/runtime-policy/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin \
+  LIVE_CHECK_TEST_USER='<agreed-test-user>' LIVE_CHECK_PASSWORD="$LIVE_CHECK_USER_PASSWORD" \
+  TASK_WORKSPACE="$d/work" TASK_HOME="$d/home" \
+```
 
 **The queue survives a restart.** Delete the Pod once and look again:
 
