@@ -332,6 +332,31 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertEqual(sent["tool_choice"]["function"]["name"], "verdict")
         self.assertIn("PASS", self.review_log())
 
+    def test_finding_actions_and_design_signals_remain_ordinary_text(self):
+        for name in ("alpha", "beta", "gamma"):
+            (self.workspace / "src" / (name + ".py")).write_text(
+                "def read(value):\n    return value.replace('missing', '')  # repeated workaround\n")
+        cases = (
+            (True, "Act on: correct the lost input.\nConsider: a shared reader.\nNoted: retained behavior.\nDismissed: renaming is outside scope."),
+            (False, "Consider: consolidate later.\nNoted: tests cover input.\nDismissed: style is not a defect."),
+            (True, "src/tool.py returns the wrong result; no category is supplied."),
+            (True, "Act on: the same workaround in src/alpha.py, src/beta.py and src/gamma.py loses valid input; callers must know internal rules."),
+        )
+        for blocking, findings in cases:
+            with self.subTest(findings=findings):
+                service = ModelStandIn([{"verdict": (blocking, findings)}])
+                self.addCleanup(service.close)
+                finished = self.run_review(service)
+                self.assertEqual(finished.returncode, int(blocking), finished.stderr)
+                sent = service.requests[0]["body"]["messages"]
+                for phrase in ("Act on", "Consider", "Noted", "Dismissed", "unrelated places", "callers must know internal"):
+                    self.assertIn(phrase, sent[0]["content"])
+                for name in ("alpha", "beta", "gamma"):
+                    self.assertIn("src/" + name + ".py", sent[1]["content"])
+                self.assertIn(findings, finished.stdout)
+                self.assertIn(findings, self.review_log())
+                print("blocking=%s exit=%d findings=%s" % (blocking, finished.returncode, findings))
+
     PASS = {"REVIEW_UNAVAILABLE": "pass"}  # the operator's opt-in for the old behaviour
 
     def test_service_trouble_is_waited_out_and_the_verdict_decides(self):

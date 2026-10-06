@@ -894,6 +894,17 @@ for as long as it finds a blocking defect, the count so far is printed with
 each verdict, and a run that will not converge is ended by the requester's
 stop comment, not by a limit.
 
+The reviewer is asked to label findings in ordinary prose as **Act on**
+(must fix before delivery), **Consider**, **Noted** or **Dismissed**, with a
+reason. Only a must-fix defect justifies a blocking verdict; the other labels
+are not reasons to block. It should examine two signs of a design problem:
+the same workaround repeated in unrelated places, and callers having to know
+an implementation's internal rules to use it safely. Explain the concrete
+defect rather than demanding a speculative redesign. The engine neither
+requires nor parses these labels: findings without labels remain readable,
+and the existing verdict still determines the command's exit status. Findings
+reach stdout, saved review history and the later roles as ordinary text.
+
 The fixed reviewer reads saved material itself: its model has the verdict
 tool, not a file-reading tool. With `TASK_HISTORY`, it adds the canonical
 original request, the latest report from each process of each model stage,
