@@ -147,7 +147,8 @@ SYSTEM = ("You are an adversarial reviewer of one code change. Your job is to fi
           " dispositions are not reasons to block. Look for design problems where the same workaround"
           " appears in unrelated places, or callers must know internal rules to use an implementation"
           " safely. Explain the concrete defect; do not demand a speculative redesign. These labels"
-          " guide the reader, not an additional response schema. Answer with the verdict tool.")
+          " guide the reader, not an additional response schema. Write the Act on findings first. Answer"
+          " with the verdict tool.")
 
 # Handed in place of the diff when there is none at all.
 NO_CHANGE = ("No file was changed. Judge whether the request and the settled requirements are satisfied with the"
