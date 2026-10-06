@@ -415,7 +415,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 			}
 		}
 	}
-	questionAware, err := questionExecutor(cfg, assigned, *directory, executor)
+	questionAware, questionMonitor, err := questionExecutor(cfg, assigned, *directory, executor)
 	if err != nil {
 		return err
 	}
@@ -425,8 +425,15 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		Workflow: cfg.Workflow,
 		Observe:  observe,
 	}
+	if questionMonitor != nil {
+		engine.QuestionPosted = questionMonitor.posted
+		engine.RequesterReply = questionMonitor.reply
+	}
 	if cfg.Intake != nil {
 		engine.WaitAfter = cfg.Intake.QuestionRole
+		if cfg.Intake.QuestionNoPostLimit != nil {
+			engine.QuestionNoPostLimit = *cfg.Intake.QuestionNoPostLimit
+		}
 	}
 	// A question put to the requester is not a failure and not a completion.
 	// A single run has nobody watching the issue for the answer, so say which

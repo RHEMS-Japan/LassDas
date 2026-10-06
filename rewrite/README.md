@@ -496,18 +496,43 @@ request at a person.
 }
 ```
 
-`intake.question_role` names the configured role whose successful run waits for
-a person. It must name an existing role with a comment-capable process, which
+`intake.question_role` names the configured role that can ask a person. It
+must name an existing role with a comment-capable process, which
 is checked before any work is accepted. Without the setting nothing waits.
 
-A successful run of that role holds the request. The run history records that
-it is waiting, and the collector records the asking role's stored comment ID
-in `queue/jobs/<id>/question.json`. Replies arriving before the next poll are
-still read; recorded controller notices are not answers. If no submission
-receipt was saved, the collector instead records the latest comment ID at that
-read and waits for a later reply. It cannot reconstruct an earlier question's
-position without a receipt, but it does not hold the request forever waiting
-for one. The request is then skipped until the issue's creator, or an operator listed in
+A successful run holds the request only when a nonempty comment was actually
+posted by the engine account after that question launch began. Controller
+announcements and empty status-change comments do not count. If the role
+posted nothing, the history says so and the router chooses the next role;
+the requester is not assigned an invisible question. An unreadable tracker
+does not establish that nothing was posted: work stays held, and the existing
+control-channel retry and pause rules apply until the read succeeds.
+
+`intake.question_no_post_limit` is a positive integer (default `2`). After
+that many successful question launches with no post, the question role is
+removed from the next choices until the issue's creator or a configured
+`intake.stop_user_ids` operator adds a new comment with words. The run records
+why and continues with the other permitted roles; reaching this limit is not
+completion or failure. The count survives restart. The new comment is carried
+into history unchanged and resets the count; empty status changes, controller
+notices and stop instructions do not reset it. With no other permitted action,
+the runtime waits without calling a decision model until a new reply is read.
+This applies to connected, free-routing and ordered runs.
+
+If a stored submission receipt names a comment missing from the next read,
+the run checks again every 10 seconds without relaunching the question role.
+It does not assume no question was posted. Stop instructions still apply.
+
+For a posted question, the run history records that it is waiting, and the
+collector records the asking role's actual comment ID in
+`queue/jobs/<id>/question.json`. If no submission receipt survived, a nonempty
+engine-account post after the saved launch position supplies that boundary.
+Replies arriving before the next poll are still read; controller notices are
+not answers. This differs from an already-waiting request without a saved
+submission or question position: that existing recovery path records the
+latest comment and waits for a later reply. It cannot reconstruct an earlier
+question's position. New question launches do not enter that path merely
+because no post was made. The request waits until its creator, or an operator in
 `intake.stop_user_ids`, posts a comment with words after that point. A status
 or field change, which the tracker records as a comment without words, is not
 an answer; the collector makes such changes itself while it waits. That

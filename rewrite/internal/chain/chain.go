@@ -52,6 +52,11 @@ type State struct {
 	// answer; only the caller that owns the conversation can clear it.
 	Waiting    bool `json:"waiting,omitempty"`
 	Recovering bool `json:"recovering,omitempty"`
+	// These count successful launches observed to have posted no question.
+	// A new requester comment clears the count, not a role's claim of a reply.
+	QuestionsWithoutPost int    `json:"questions_without_post,omitempty"`
+	QuestionUnavailable  string `json:"question_unavailable,omitempty"`
+	QuestionReplyAfter   int64  `json:"question_reply_after,omitempty"`
 	// PendingSince is when the pending action's launch began. A launch cut
 	// by a restart leaves no record of its own, and the note written for it
 	// afterwards says when it began from this; a state saved before there
@@ -82,18 +87,30 @@ type Store interface {
 	Save(State) error
 }
 
+type QuestionObservation struct {
+	Posted      bool
+	LastComment int64
+}
+
 type Chain struct {
 	Router   Router
 	Executor Executor
 	Store    Store
 	Workflow *Workflow
-	// RetryDelay spaces unavailable-router calls. It does not limit attempts
+	// RetryDelay spaces unavailable routing and question reads. It does not limit attempts
 	// or turn an outage into a completed delivery.
 	RetryDelay time.Duration
-	// WaitAfter names the configured role whose successful run hands the
-	// request to a person. The chain only stops there and reports it; the
+	// WaitAfter names the configured role that may hand the request to a
+	// person after QuestionPosted confirms its post. The chain reports it; the
 	// caller decides what counts as a reply and appends it to the history.
 	WaitAfter string
+	// QuestionPosted checks the external conversation, not the role's prose.
+	// An unavailable read holds routing until it succeeds or work is paused.
+	QuestionPosted      func(context.Context) (QuestionObservation, error)
+	QuestionNoPostLimit int
+	// RequesterReply reads native conversation metadata while the question
+	// role is unavailable. An empty string means no new authorized reply.
+	RequesterReply func(context.Context, int64) (string, error)
 	// Observe shows progress/errors without making the observer a judge.
 	Observe func(string)
 }
@@ -145,9 +162,65 @@ func (c Chain) Run(ctx context.Context) error {
 			return err
 		}
 	}
+	checkQuestion := c.WaitAfter != "" && state.Step == c.WaitAfter && !state.Recovering
+	if len(state.History) > 0 {
+		last := state.History[len(state.History)-1]
+		checkQuestion = checkQuestion && last.Role == c.WaitAfter && last.Speaker != "requester"
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if checkQuestion {
+			question := QuestionObservation{Posted: true}
+			if c.QuestionPosted != nil {
+				var err error
+				question, err = c.QuestionPosted(ctx)
+				if err != nil {
+					c.observe("checking whether the question was posted: " + err.Error())
+					if err := c.wait(ctx); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			checkQuestion = false
+			if question.Posted {
+				state.Waiting = true
+				if err := c.save(ctx, state); err != nil {
+					return err
+				}
+				c.observe("waiting for an answer to " + c.WaitAfter)
+				return ErrWaiting
+			}
+			message := "質問役は質問を投稿しなかったので、そのまま進める"
+			state.QuestionsWithoutPost++
+			limit := c.QuestionNoPostLimit
+			if limit <= 0 {
+				limit = 2
+			}
+			if state.QuestionsWithoutPost >= limit {
+				state.QuestionUnavailable = c.WaitAfter
+				state.QuestionReplyAfter = question.LastComment
+				message = fmt.Sprintf("質問役を %d 回起動したが質問は無かった。次の依頼者のコメントまで質問役は使わない", state.QuestionsWithoutPost)
+			}
+			state.History = append(state.History, Result{Role: "router", Speaker: "runtime", Output: message, FinishedAt: time.Now().UTC()})
+			if err := c.save(ctx, state); err != nil {
+				return err
+			}
+			c.observe(message)
+		}
+		if state.QuestionUnavailable != "" && c.RequesterReply != nil {
+			answer, err := c.RequesterReply(ctx, state.QuestionReplyAfter)
+			if err != nil {
+				c.observe("checking for a new requester comment: " + err.Error())
+			} else if answer != "" {
+				state.History = append(state.History, Result{Role: c.WaitAfter, Speaker: "requester", Output: answer, FinishedAt: time.Now().UTC()})
+				state.QuestionsWithoutPost, state.QuestionUnavailable, state.QuestionReplyAfter = 0, "", 0
+				if err := c.save(ctx, state); err != nil {
+					return err
+				}
+			}
 		}
 		started := time.Now().UTC()
 		if notes := state.launchLimitNotes(); len(notes) > 0 {
@@ -233,17 +306,9 @@ func (c Chain) Run(ctx context.Context) error {
 				return err
 			}
 		}
-		// A successful question hands the request to a person, so there is
-		// nothing to route until the reply is in the history. An errored or
-		// missing answer is ordinary recovery, not a question that was asked.
-		if c.WaitAfter != "" && next.Role == c.WaitAfter && !state.Recovering {
-			state.Waiting = true
-			if err := c.save(ctx, state); err != nil {
-				return err
-			}
-			c.observe("waiting for an answer to " + next.Role)
-			return ErrWaiting
-		}
+		// A successful command may have posted nothing. Check before routing;
+		// a pause during the check resumes here from the saved step above.
+		checkQuestion = c.WaitAfter != "" && next.Role == c.WaitAfter && !state.Recovering
 	}
 }
 
