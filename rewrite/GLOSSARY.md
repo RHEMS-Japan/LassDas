@@ -56,7 +56,7 @@ The person who sets up an installation: its configuration, credentials,
 commands, permissions, network and delivery target. A requester's answer does
 not change any of them.
 
-- Used in: README.md:1076, START.md:105
+- Used in: README.md:1111, START.md:105
 - Avoid: `管理者`
 
 ### requester / 依頼者
@@ -83,7 +83,7 @@ The project that uses the engine and receives its work. Changes and knowledge
 changes are delivered to its repository, and its existing knowledge stays
 there.
 
-- Used in: README.md:1136, ../CLAUDE.md:17
+- Used in: README.md:1189, ../CLAUDE.md:17
 - Not the same as: installation, the place where the engine runs.
 - Avoid: `対象プロジェクト`
 
@@ -156,7 +156,7 @@ state and stage, its history, the notices, the delivery receipt and the
 workspace's current changes. Its overview, the board, shows the requests in
 columns by stage. The page holds no credential and changes nothing.
 
-- Used in: README.md:1187, START.md:131
+- Used in: README.md:1240, START.md:131
 - Avoid: none.
 
 ## Roles and how they run
@@ -177,7 +177,7 @@ A role whose processes run a model agent on the request: investigating,
 changing the checkout, reviewing or writing the report. A command stage is not
 a working role, even one that asks a model, such as the adversarial review.
 
-- Used in: README.md:1804, START.md:78
+- Used in: README.md:1857, START.md:78
 - Other uses: README.md also says the worker, mostly for the working role that
   changes the checkout. RUNTIME.md says workers for the processes that roles
   run.
@@ -200,7 +200,7 @@ One start of a role's processes for one assignment, ending when all of them
 have exited. `workflow.launch_limit` counts launches, and a launch has no
 time limit unless `timeout_minutes` sets one.
 
-- Used in: README.md:1049, START.md:108
+- Used in: README.md:1081, START.md:108
 - Avoid: none.
 
 ### rerun / やり直し
@@ -210,7 +210,7 @@ later stage sent the work back or because the stage's own launch did not
 exit 0. With `declare_models`, the engine's declaration for a rerun reads,
 for example, 要件確定をやり直します.
 
-- Used in: README.md:658, README.md:1302
+- Used in: README.md:690, README.md:1355
 - Not the same as: retry.
 - Avoid: `再実行`
 
@@ -220,7 +220,7 @@ Repeating one operation that failed, such as posting a comment, reading the
 tracker, saving the history or asking a model service, without launching a
 role again.
 
-- Used in: README.md:1531, START.md:128
+- Used in: README.md:1584, START.md:128
 - Not the same as: rerun.
 - Avoid: none.
 
@@ -231,7 +231,7 @@ ordered run the stages are the configured list: a model stage is satisfied
 when its processes end without a process error, a command stage when every
 process exits 0, and the last stage must be a command stage.
 
-- Used in: README.md:565, START.md:104
+- Used in: README.md:597, START.md:104
 - Avoid: `step`; `ステージ`; `ステップ`; `段` except in `段階`, `手段`, `段落`
 
 ### workflow
@@ -268,10 +268,13 @@ and every stage after that one runs again.
 
 Choosing the next role, made by the decision service or by a chat model; with
 connections, only among the connected roles. In an ordered run with a question
-role, the only such choice comes after the first stage: the question role or
-the next stage.
+role, the only such choice comes each time the first stage finishes: the first
+stage again, the question role or the next stage, never done.
+`workflow.entrance_rework_limit` bounds how often the first stage can be chosen
+again straight away, twice unless it is set, and a new answer from the
+requester starts that count over.
 
-- Used in: README.md:82, START.md:78
+- Used in: README.md:82, README.md:1087, START.md:78
 - Avoid: none.
 
 ### decision service / 判断サービス
@@ -280,7 +283,7 @@ The model service the engine asks for a choice through a decisions API, such
 as Jev: the next role, with `router.decision`, and the working model, with
 `model_selection.judge`.
 
-- Used in: README.md:1055, START.md:79
+- Used in: README.md:1088, START.md:79
 - Avoid: none.
 
 ### model selection / 選定
@@ -290,7 +293,7 @@ current model catalog and has a model choose a working model from the
 publishers the operator approved, unless `model_selection.fixed` names one
 model. With `declare_models`, the engine posts which model it chose.
 
-- Used in: README.md:1678, README.md:1301
+- Used in: README.md:1731, README.md:1354
 - Avoid: `選定役`
 
 ### gateway / ゲートウェイ
@@ -300,7 +303,7 @@ the engine, set in `model_selection.gateway`, so that their use is billed to
 the gateway's account. A prefixed model id is a route to the same model. A
 gateway is a way to connect, not a check.
 
-- Used in: README.md:1789, START.md:76
+- Used in: README.md:1842, START.md:76
 - Avoid: none.
 
 ## From request to delivery
@@ -314,7 +317,7 @@ four choices. Its standard is whether the request could be delivered and
 verified by morning with nobody available to answer. In the ordered examples,
 a failed verification, review or delivery returns here.
 
-- Used in: examples/operator-stages.json:34, README.md:1286
+- Used in: examples/operator-stages.json:34, README.md:1339
 - Avoid: `entrance`; `要件詰め`; `要件確認`
 
 ### requirements / 要件
@@ -323,7 +326,7 @@ What the request is to be carried out as, settled at elicitation: the target,
 the behaviour, the delivery and the condition that counts as finished. A
 requester's answer settles requirements; it does not widen permissions.
 
-- Used in: README.md:426, README.md:1286
+- Used in: README.md:426, START.md:110
 - Avoid: none.
 
 ### question / 質問
@@ -333,7 +336,7 @@ listing the points only the requester can decide, each with concrete choices,
 so that one comment can answer them all. A general request for clarification
 is not a question. The request waits until it is answered or stopped.
 
-- Used in: README.md:507, START.md:122
+- Used in: README.md:539, START.md:122
 - Avoid: `打ち返`
 
 ### answer / 返答
@@ -344,7 +347,7 @@ history unchanged, as the requester's own words, and the request resumes.
 Beyond having words, its text is not checked, and a stop comment is never an
 answer.
 
-- Used in: README.md:522, START.md:124
+- Used in: README.md:554, START.md:124
 - Other uses: README.md also says reply for an answer, and answer for what a
   role returns at the end of a launch.
 - Avoid: `回答`; `返事`; `返信`
@@ -367,7 +370,7 @@ repository, or, when it exists only outside the repository, the text itself in
 the instructions. Passing knowledge in (渡す、取り込み) means giving this
 location, so the engine keeps no copy of what the repository holds.
 
-- Used in: README.md:2032, START.md:62, ../CLAUDE.md:34
+- Used in: README.md:2085, START.md:62, ../CLAUDE.md:34
 - Avoid: none.
 
 ### knowledge change / 知識の追記
@@ -378,7 +381,7 @@ role together with the requested change, and delivered in the same reviewed
 pull request. This is how knowledge accumulates (溜める、蓄積). The ordered
 examples ask for it.
 
-- Used in: README.md:2043, ../CLAUDE.md:66
+- Used in: README.md:2096, ../CLAUDE.md:66
 - Avoid: none.
 
 ### workspace / 作業場所
@@ -397,7 +400,7 @@ Examining the change against the request before delivery. In the connected
 examples it is a role whose two reviewers inspect the source and tests
 independently; in the ordered examples it is the adversarial review.
 
-- Used in: README.md:834, START.md:104
+- Used in: README.md:866, START.md:104
 - Avoid: none.
 
 ### reviewer
@@ -407,30 +410,34 @@ role run in parallel from the same history and do not see each other's output
 from the same launch. The Japanese documents have no word for it; START.md
 says 2者レビュー for a review by two of them.
 
-- Used in: README.md:105, README.md:1782
+- Used in: README.md:105, README.md:1835
 - Avoid: `review seat`
 
 ### adversarial review / 敵対レビュー
 
 The `review` stage of the ordered examples. The command
 `harnesses/adversarial_review.py` hands the request, the settled requirements,
-the diff and the test output to a model from a different publisher than the
-working role's, and exits 1 on a blocking verdict and 0 on a verdict that does
-not object. Without a verdict it keeps asking or waits; it lets work
-through unreviewed only when the operator sets `REVIEW_UNAVAILABLE=pass`.
+the diff and the test output to a model the operator names, normally from a
+different publisher than the working role's; the command does not check the
+publisher. It exits 1 on a blocking verdict and 0 on a verdict that does not
+object. Without a verdict it keeps asking or waits; it lets work through
+unreviewed only when the operator sets `REVIEW_UNAVAILABLE=pass`.
 
-- Used in: README.md:834, START.md:110, ../CLAUDE.md:86
+- Used in: README.md:866, START.md:110, ../CLAUDE.md:86
 - Avoid: none.
 
 ### send-back / 差し戻し
 
 Sending the work back to an earlier stage to be repaired. In an ordered run, a
 blocking verdict or a failed command stage sends it to the stage named by
-`on_failure`, and every stage after that one runs again. There is no limit on
-send-backs; a request that does not converge is ended by the requester's
-stop.
+`on_failure`, and every stage after that one runs again. An ordered run has no
+limit on send-backs; a request that does not converge is ended by the
+requester's stop. With connections, `workflow.launch_limit` can cap how often
+a role is launched for one request: a role at its cap is no longer offered,
+unless every role connected at that point is at its cap, and the cap never
+ends a request.
 
-- Used in: README.md:860, START.md:108
+- Used in: README.md:892, START.md:108
 - Avoid: none.
 
 ### verification / 検証
@@ -441,7 +448,7 @@ the build and tests, and `verify_merged` checks the delivered branch or pull
 request after delivery. There the exit status is the observation, and the
 stage returns no report and no approval.
 
-- Used in: README.md:1063, START.md:104
+- Used in: README.md:1098, START.md:104
 - Avoid: none.
 
 ### delivery / 納品
@@ -453,7 +460,7 @@ merges a pull request, leaves an open pull request for a person to merge, or
 publishes the branch alone. Its receipt records what happened, and the engine
 reads the receipt back.
 
-- Used in: README.md:587, START.md:104
+- Used in: README.md:619, START.md:104
 - Avoid: none.
 
 ### delivery target / 納品先
@@ -471,7 +478,7 @@ The text for the requester at the end of a request: written to
 `report/result.md` from the records, posted as one comment and read back. A
 later stage compares the stored comment with the file.
 
-- Used in: README.md:810, START.md:104
+- Used in: README.md:842, START.md:104
 - Other uses: README.md also says report for what a role returns at the end of
   a launch; this glossary calls that the output.
 - Avoid: none.
@@ -479,10 +486,11 @@ later stage compares the stored comment with the file.
 ### output / 出力
 
 What a launch returns: what each process wrote on standard output and standard
-error, and its exit status. The engine adds it to the history. In an ordered
-run nothing reads the written text to decide what runs next.
+error, and its exit status. The engine adds it to the history, where later
+roles and routing read it. In an ordered run no stage is satisfied by what a
+role wrote; the only choice that reads it is the routing after the first stage.
 
-- Used in: README.md:568, START.md:133
+- Used in: README.md:600, START.md:133
 - Avoid: none.
 
 ### notice / 通知
@@ -494,7 +502,7 @@ work pauses and resumes, when no stage has completed for a long time (the
 stall notice, 停滞通知), and the declarations and the list of the models
 used. No model writes them, and none of them ends a request.
 
-- Used in: README.md:1528, START.md:133
+- Used in: README.md:1581, START.md:133
 - Avoid: `announcement`
 
 ### stop / 停止
@@ -505,19 +513,21 @@ running role and keeps the request stopped across restarts; when
 `intake.stop_report_role` is set, that role reports what happened. A stop does
 not undo anything that already reached the outside.
 
-- Used in: README.md:1224, START.md:121
+- Used in: README.md:1277, START.md:121
 - Not the same as: pause.
 - Avoid: none.
 
 ### pause / 一時停止
 
 The engine holding a request by itself: when the model credit falls below
-`intake.min_model_credit`, when the active-work limit is reached, or after
-three failed reads of the tracker in a row. Work continues when the credit
-returns or the tracker can be read again; after the active-work limit, an
-authorized `再開` comment continues it.
+`intake.min_model_credit`; when a request with an active-work limit,
+`intake.max_active_minutes`, reaches that limit or its number of forced exits,
+`intake.max_hard_exits`; or after three failed reads of the tracker in a row.
+Work continues by itself when the credit returns or the tracker can be read
+again. After either of the two limits, an authorized `再開` comment continues
+it.
 
-- Used in: README.md:1381, README.md:1580
+- Used in: README.md:1434, README.md:1546, README.md:1633
 - Not the same as: stop.
 - Avoid: none.
 
