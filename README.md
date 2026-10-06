@@ -59,3 +59,8 @@ layers. Update the documentation first, write a meaningful failing test, impleme
 the smallest change, and remove obsolete code and conflicting documentation.
 Existing installations and their data require separately authorized operational
 changes. No claim of arbitrary unattended completion follows from local tests.
+
+CI also reads every tracked file, and the messages and added lines of the pushed commits, for the shapes of credentials: GitHub tokens, Slack tokens and webhook URLs, OpenRouter and Anthropic keys, AWS access key IDs, private key blocks, and `apiKey` or `api_key` values with the name in any letter case ([the scan](.github/scripts/scan-credential-shapes.py)).
+A match is named by file or commit and line, never by its text; `python3 .github/scripts/scan-credential-shapes.py tree` runs the same check before a push.
+A push to the default branch with no usable base, such as a forced push, has the whole history as its range, where earlier tests added made-up keys, so its added lines are not read and a value added and removed within that push is not found.
+On a match, remove the value and rewrite the commits that carry it, then revoke the key and create a new one: a key that was pushed counts as exposed even after the history is rewritten.
