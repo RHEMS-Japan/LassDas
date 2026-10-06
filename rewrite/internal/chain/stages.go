@@ -27,15 +27,21 @@ type Stage struct {
 	Name      string `json:"name"`
 	Kind      string `json:"kind"`
 	OnFailure string `json:"on_failure,omitempty"`
+	// Confirm marks a model stage whose role reads the change before it is
+	// delivered. When it finishes, the decision service chooses as after the
+	// first stage: the first stage, the question role or the next stage. A
+	// question chosen there holds the request until the requester comments.
+	Confirm bool `json:"confirm,omitempty"`
 	// Announce is the operator's own sentence for the requester, posted once
 	// when this stage first begins; empty says nothing.
 	Announce string `json:"announce,omitempty"`
 }
 
 // StageRouter advances an ordered run on observed facts. It calls no model of
-// its own. The single judgment left to a model is at the entrance, where the
-// configured decision router chooses another requirements pass, the operator's
-// question role or the next stage; it is never offered done.
+// its own. The judgment left to a model comes after the first stage and after
+// a stage that confirms the change: there the configured decision router
+// chooses the first stage, the operator's question role or the next stage; it
+// is never offered done. Entrance is that decision router, at both places.
 type StageRouter struct {
 	Entrance Router
 }
@@ -47,13 +53,13 @@ func (r StageRouter) Next(ctx context.Context, state State) (Assignment, error) 
 	actions := state.stageActions()
 	if len(actions) > 1 {
 		if r.Entrance == nil {
-			return Assignment{}, errors.New("asking the requester at the entrance needs a configured decision router")
+			return Assignment{}, errors.New("a choice that can ask the requester needs a configured decision router")
 		}
 		next, err := r.Entrance.Next(ctx, state)
 		if err != nil {
 			return Assignment{}, err
 		}
-		// The entrance router only chooses which stage runs; what the stage
+		// The decision router only chooses which stage runs; what the stage
 		// is told comes from the runtime, never from the model's own words.
 		next.Instruction = state.stageInstruction(next.Role)
 		return next, nil
@@ -111,24 +117,87 @@ func stageAt(stages []Stage, name string) (Stage, int) {
 	return Stage{}, -1
 }
 
-// Count immediate re-selection of a successful entrance, not the initial
-// pass, returns from a question, or required recovery after a failed launch.
-func (s State) entranceReworks() int {
-	first := s.Workflow.Stages[0].Name
+// sinceReply is the state with only the history after the requester's latest
+// comment: the limits on choices start over at each reply.
+func (s State) sinceReply() State {
 	for i := len(s.History) - 1; i >= 0; i-- {
 		if s.History[i].Speaker == "requester" {
 			s.History = s.History[i+1:]
 			break
 		}
 	}
+	return s
+}
+
+// Count immediate re-selection of a successful entrance, not the initial
+// pass, returns from a question, or required recovery after a failed launch.
+func (s State) entranceReworks() int {
+	first := s.Workflow.Stages[0].Name
 	count, previous := 0, stageRun{}
-	for _, run := range s.stageRuns() {
+	for _, run := range s.sinceReply().stageRuns() {
 		if run.role == first && previous.role == first && previous.satisfied {
 			count++
 		}
 		previous = run
 	}
 	return count
+}
+
+// confirmationReworks counts how often the first stage ran straight after a
+// successful stage that confirms the change, since the requester's latest
+// comment: the returns to requirements chosen after the change was read.
+func (s State) confirmationReworks() int {
+	first := s.Workflow.Stages[0].Name
+	count, previous := 0, stageRun{}
+	for _, run := range s.sinceReply().stageRuns() {
+		if stage, index := stageAt(s.Workflow.Stages, previous.role); run.role == first && index > 0 && stage.Confirm && previous.satisfied {
+			count++
+		}
+		previous = run
+	}
+	return count
+}
+
+// confirmationDecision reports that the latest launch is a successful one of
+// a stage that confirms the change, so the next choice is made after it.
+func (s State) confirmationDecision() bool {
+	if s.Workflow == nil || len(s.Workflow.Stages) == 0 {
+		return false
+	}
+	runs := s.stageRuns()
+	if len(runs) == 0 {
+		return false
+	}
+	last := runs[len(runs)-1]
+	stage, index := stageAt(s.Workflow.Stages, last.role)
+	return index > 0 && stage.Confirm && last.satisfied
+}
+
+// askingStage is the stage that ran before the question role's latest
+// launches, which end the record: where that question was chosen.
+func (s State) askingStage() (Stage, int) {
+	if s.Workflow == nil || s.Workflow.Question == "" {
+		return Stage{}, -1
+	}
+	runs := s.stageRuns()
+	i := len(runs) - 1
+	if i < 0 || runs[i].role != s.Workflow.Question {
+		return Stage{}, -1
+	}
+	for i >= 0 && runs[i].role == s.Workflow.Question {
+		i--
+	}
+	if i < 0 {
+		return Stage{}, -1
+	}
+	return stageAt(s.Workflow.Stages, runs[i].role)
+}
+
+// confirmingQuestion reports that the question role's latest launch, at the
+// end of the record, was chosen after a stage that confirms the change.
+func (s State) confirmingQuestion() bool {
+	stage, index := s.askingStage()
+	return index > 0 && stage.Confirm
 }
 
 // stageActions reports what may run next. Everything here comes from results
@@ -159,7 +228,12 @@ func (s State) stageActions() []string {
 	switch {
 	case index < 0 && last.role != "":
 		// The question role is the only role outside the ordered run. Whatever
-		// the requester replied, the run settles the request again first.
+		// the requester replied goes back to the stage that asked: a stage that
+		// confirms the change reads it with that change; otherwise the run
+		// settles the request again first.
+		if asker, at := s.askingStage(); at > 0 && asker.Confirm {
+			return []string{asker.Name}
+		}
 		return []string{stages[0].Name}
 	case index >= 0 && !last.satisfied && stage.Kind == CommandStage:
 		// The command did not exit 0. What it returned is already in the
@@ -170,6 +244,10 @@ func (s State) stageActions() []string {
 		return []string{stage.Name}
 	case index == 0 && s.Workflow.Question != "" && next != "done":
 		return []string{stage.Name, s.Workflow.Question, next}
+	case index > 0 && stage.Confirm && s.Workflow.Question != "" && next != "done":
+		// The change has been read: requirements again, the requester, or the
+		// next stage, as after the first stage.
+		return []string{stages[0].Name, s.Workflow.Question, next}
 	}
 	return []string{next}
 }
@@ -181,6 +259,9 @@ func (s State) stageInstruction(name string) string {
 	stages := s.Workflow.Stages
 	stage, index := stageAt(stages, name)
 	if index < 0 {
+		if name != "" && name == s.Workflow.Question && s.confirmationDecision() {
+			return confirmationQuestionInstruction
+		}
 		return ""
 	}
 	var text strings.Builder
@@ -189,6 +270,8 @@ func (s State) stageInstruction(name string) string {
 		text.WriteString("The runtime launches this stage's configured commands and records what they returned. Their exit status is the only thing that satisfies this stage.\n")
 	} else if index == 0 && s.Workflow.Question != "" {
 		text.WriteString("The configured decision model reads your requirements report and chooses another requirements pass, a question or the next stage. Use ordinary prose; the runtime does not grade its wording. A later command stage proves completed work.\n")
+	} else if stage.Confirm && s.Workflow.Question != "" {
+		fmt.Fprintf(&text, confirmationStageInstruction, stages[index+1].Name)
 	} else {
 		text.WriteString("Nothing you write is read, decoded or graded, and saying the work is done advances nothing. ")
 		if follow, ok := followingCommand(stages, index); ok {
@@ -205,6 +288,13 @@ func (s State) stageInstruction(name string) string {
 	}
 	return text.String()
 }
+
+// What the runtime tells a stage that confirms the change, and the question
+// role chosen after it. These are instructions to roles in plain words, not a
+// format to answer in; nothing reads or grades what the roles write.
+const confirmationStageInstruction = "Read the change actually made in the checkout before it is delivered: what Git lists as changed, the diff, new files, and commits the integration branch does not have. Read the settled requirements and the project's knowledge. Say in ordinary prose whether the change alters how a person operates the product, what a screen shows or does, or the public API. The project's knowledge defines the public API; where it does not, take the entry points used from outside: HTTP routes, command arguments and options and the output other programs read, exported functions and types, and configuration keys and file formats that others read. Name the material you read and what you could not read. A change too long to read whole is not an internal one: say what you could not read. When you cannot tell, say so. When none of the three changes, say that the requester's confirmation is not needed and why, in a line such as 依頼者の確認: なし. A requester's reply in the record covers only the change it was given about. The configured decision model reads your report and chooses the first stage again, a question to the requester, or the next stage (%s); a question holds the request until the requester comments. Use ordinary prose; the runtime does not grade its wording.\n"
+
+const confirmationQuestionInstruction = "The decision after the stage that confirms the change chose to ask the requester before the change is delivered. Post one comment that shows the requester what the change does to how they operate the product, to its screens or to its public API, as that stage's report and the change itself show it, and ask them to choose: to deliver it as it is, to name what to change, or not to deliver it. Nothing is delivered before their reply; say so. Ask about this change only. Whatever this launch posts, the request then waits for the requester's comment.\n"
 
 func followingCommand(stages []Stage, index int) (string, bool) {
 	for _, stage := range stages[index+1:] {
@@ -255,6 +345,24 @@ func (w *Workflow) validateStages(roles map[string]string) error {
 		if w.Stages[0].Kind != ModelStage {
 			return errors.New("the entrance stage must be a model stage for the requester to be asked at all")
 		}
+	}
+	confirms := false
+	for index, stage := range w.Stages {
+		if !stage.Confirm {
+			continue
+		}
+		confirms = true
+		switch {
+		case stage.Kind != ModelStage:
+			return fmt.Errorf("stage %q confirms the change, so it must be a model stage whose role reads the change", stage.Name)
+		case index == 0:
+			return fmt.Errorf("stage %q is the first stage, which a choice already follows; confirm marks a later model stage", stage.Name)
+		case w.Question == "":
+			return fmt.Errorf("stage %q confirms the change, but no question role is configured (intake.question_role), so the choice after it could only deliver", stage.Name)
+		}
+	}
+	if w.ConfirmationReworkLimit != 0 && !confirms {
+		return errors.New("workflow.confirmation_rework_limit needs a stage marked confirm")
 	}
 	return nil
 }

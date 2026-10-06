@@ -52,6 +52,11 @@ type State struct {
 	// answer; only the caller that owns the conversation can clear it.
 	Waiting    bool `json:"waiting,omitempty"`
 	Recovering bool `json:"recovering,omitempty"`
+	// WaitingWithoutQuestion records that the request waits for the requester
+	// although no question was seen posted: the question chosen after a stage
+	// that confirms the change posted nothing, did not exit 0 or was cut short
+	// by a restart. The requester's comment clears it together with Waiting.
+	WaitingWithoutQuestion bool `json:"waiting_without_question,omitempty"`
 	// These count successful launches observed to have posted no question.
 	// A new requester comment clears the count, not a role's claim of a reply.
 	QuestionsWithoutPost int    `json:"questions_without_post,omitempty"`
@@ -162,7 +167,11 @@ func (c Chain) Run(ctx context.Context) error {
 			return err
 		}
 	}
-	checkQuestion := c.WaitAfter != "" && state.Step == c.WaitAfter && !state.Recovering
+	// A question chosen after a stage that confirms the change is waited on
+	// whatever its launch did; one chosen after the first stage is looked up
+	// only when its launch returned without an error.
+	confirming := state.confirmingQuestion()
+	checkQuestion := c.WaitAfter != "" && state.Step == c.WaitAfter && (!state.Recovering || confirming)
 	if len(state.History) > 0 {
 		last := state.History[len(state.History)-1]
 		checkQuestion = checkQuestion && last.Role == c.WaitAfter && last.Speaker != "requester"
@@ -172,16 +181,22 @@ func (c Chain) Run(ctx context.Context) error {
 			return err
 		}
 		if checkQuestion {
-			question := QuestionObservation{Posted: true}
-			if c.QuestionPosted != nil {
-				var err error
-				question, err = c.QuestionPosted(ctx)
-				if err != nil {
-					c.observe("checking whether the question was posted: " + err.Error())
-					if err := c.wait(ctx); err != nil {
-						return err
+			// A launch that did not exit 0, or that a restart cut short, is
+			// not looked up: only a confirmation question is checked after one,
+			// and it waits whatever was posted.
+			question := QuestionObservation{}
+			if !state.Recovering {
+				question.Posted = true
+				if c.QuestionPosted != nil {
+					var err error
+					question, err = c.QuestionPosted(ctx)
+					if err != nil {
+						c.observe("checking whether the question was posted: " + err.Error())
+						if err := c.wait(ctx); err != nil {
+							return err
+						}
+						continue
 					}
-					continue
 				}
 			}
 			checkQuestion = false
@@ -191,6 +206,21 @@ func (c Chain) Run(ctx context.Context) error {
 					return err
 				}
 				c.observe("waiting for an answer to " + c.WaitAfter)
+				return ErrWaiting
+			}
+			if confirming {
+				// The decision chose to show the requester the change before it
+				// is delivered. Nothing this launch did or failed to post stands
+				// in for their words, so the request waits for them all the same.
+				// It is not a question that posted nothing after the first stage
+				// and is not counted toward that limit.
+				state.Waiting, state.WaitingWithoutQuestion = true, true
+				message := "納品前の確認の質問は、投稿を確かめられなかった。依頼者の返答があるまで納品へは進まない"
+				state.History = append(state.History, Result{Role: "router", Speaker: "runtime", Output: message, FinishedAt: time.Now().UTC()})
+				if err := c.save(ctx, state); err != nil {
+					return err
+				}
+				c.observe(message)
 				return ErrWaiting
 			}
 			message := "質問役は質問を投稿しなかったので、そのまま進める"
@@ -257,6 +287,9 @@ func (c Chain) Run(ctx context.Context) error {
 			state.Done = true
 			return c.save(ctx, state)
 		}
+		// Where the question was chosen is taken before the launch, so a
+		// launch that returns no result still waits as a confirmation.
+		asking := next.Role == c.WaitAfter && state.confirmationDecision()
 		launched := time.Now().UTC()
 		state.Pending, state.PendingSince = &next, launched
 		if err := c.save(ctx, state); err != nil {
@@ -307,7 +340,8 @@ func (c Chain) Run(ctx context.Context) error {
 		}
 		// A successful command may have posted nothing. Check before routing;
 		// a pause during the check resumes here from the saved step above.
-		checkQuestion = c.WaitAfter != "" && next.Role == c.WaitAfter && !state.Recovering
+		confirming = asking || next.Role == c.WaitAfter && state.confirmingQuestion()
+		checkQuestion = c.WaitAfter != "" && next.Role == c.WaitAfter && (!state.Recovering || confirming)
 	}
 }
 

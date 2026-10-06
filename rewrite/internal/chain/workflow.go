@@ -27,6 +27,11 @@ type Workflow struct {
 	// EntranceReworkLimit bounds immediate re-selection of the first ordered
 	// stage. Zero uses two repeats; a requester reply starts the count over.
 	EntranceReworkLimit int `json:"entrance_rework_limit,omitempty"`
+	// ConfirmationReworkLimit bounds how often the decision after a stage that
+	// confirms the change can choose the first stage. Zero uses two; a
+	// requester reply starts the count over. It is counted apart from the
+	// first stage's own limit, and neither applies at the other's decision.
+	ConfirmationReworkLimit int `json:"confirmation_rework_limit,omitempty"`
 	// LaunchLimit caps how many times a named role may be launched for one
 	// request (a reply from the requester starts the count over). A role at
 	// its cap is not offered at the next decision, so a review that keeps
@@ -44,6 +49,9 @@ func (w *Workflow) Validate(roles map[string]string) error {
 	}
 	if w.EntranceReworkLimit < 0 || w.EntranceReworkLimit != 0 && len(w.Stages) == 0 {
 		return errors.New("workflow.entrance_rework_limit needs an ordered run and must not be negative")
+	}
+	if w.ConfirmationReworkLimit < 0 || w.ConfirmationReworkLimit != 0 && len(w.Stages) == 0 {
+		return errors.New("workflow.confirmation_rework_limit needs an ordered run with a stage marked confirm and must not be negative")
 	}
 	if len(w.Stages) > 0 {
 		if len(w.LaunchLimit) > 0 {
@@ -112,7 +120,8 @@ func (w *Workflow) Validate(roles map[string]string) error {
 
 func (w *Workflow) clone() *Workflow {
 	copy := &Workflow{Start: slices.Clone(w.Start), After: map[string][]string{}, Recover: map[string][]string{},
-		Stages: slices.Clone(w.Stages), Question: w.Question, EntranceReworkLimit: w.EntranceReworkLimit}
+		Stages: slices.Clone(w.Stages), Question: w.Question, EntranceReworkLimit: w.EntranceReworkLimit,
+		ConfirmationReworkLimit: w.ConfirmationReworkLimit}
 	if w.LaunchLimit != nil {
 		copy.LaunchLimit = make(map[string]int, len(w.LaunchLimit))
 		for role, limit := range w.LaunchLimit {
@@ -181,11 +190,20 @@ func (s State) atLaunchLimit(role string) bool {
 		return false
 	}
 	if len(s.Workflow.Stages) > 0 {
-		limit := s.Workflow.EntranceReworkLimit
+		if role != s.Workflow.Stages[0].Name {
+			return false
+		}
+		// Each limit counts the choices made at its own decision and applies
+		// there only: after a stage that confirms the change, or after the
+		// first stage.
+		limit, count := s.Workflow.EntranceReworkLimit, s.entranceReworks
+		if s.confirmationDecision() {
+			limit, count = s.Workflow.ConfirmationReworkLimit, s.confirmationReworks
+		}
 		if limit == 0 {
 			limit = 2
 		}
-		return role == s.Workflow.Stages[0].Name && s.entranceReworks() >= limit
+		return count() >= limit
 	}
 	limit, capped := s.Workflow.LaunchLimit[role]
 	return capped && s.launches(role) >= limit
@@ -196,7 +214,14 @@ func (s State) atLaunchLimit(role string) bool {
 // cap. When every connected role is at its cap they all stay offered, so a cap
 // never leaves a decision without a role to choose and never ends a request.
 func (s State) offered(action string) bool {
-	if action == s.QuestionUnavailable {
+	// The limit on questions that posted nothing belongs to the questions
+	// after the first stage. A stage that confirms the change can always ask:
+	// without the question it could only deliver.
+	unavailable := s.QuestionUnavailable
+	if s.confirmationDecision() {
+		unavailable = ""
+	}
+	if unavailable != "" && action == unavailable {
 		return false
 	}
 	if !s.permits(action) {
@@ -206,7 +231,7 @@ func (s State) offered(action string) bool {
 		return true
 	}
 	for _, other := range s.nextActions() {
-		if other != "done" && other != s.QuestionUnavailable && !s.atLaunchLimit(other) {
+		if other != "done" && (unavailable == "" || other != unavailable) && !s.atLaunchLimit(other) {
 			return false
 		}
 	}
@@ -226,17 +251,22 @@ func (s State) launchLimitNotes() []Result {
 		if !s.atLaunchLimit(role) || s.offered(role) {
 			return nil
 		}
+		limit := "entrance rework limit"
+		note := fmt.Sprintf("%s reached the entrance rework limit after %d repeats; this choice stays unavailable until a new requester reply. Choose among the remaining actions without weakening the original requirements.", role, s.entranceReworks())
+		if s.confirmationDecision() {
+			limit = "confirmation rework limit"
+			note = fmt.Sprintf("%s reached the confirmation rework limit after %d returns from the stage that confirms the change; after that stage this choice stays unavailable until a new requester reply. Ask the requester or go on to the next stage, without weakening the original requirements.", role, s.confirmationReworks())
+		}
 		for i := len(s.History) - 1; i >= 0; i-- {
 			result := s.History[i]
 			if result.Speaker == "requester" {
 				break
 			}
-			if result.Speaker == "runtime" && result.Role == "router" && strings.Contains(result.Output, "entrance rework limit") {
+			if result.Speaker == "runtime" && result.Role == "router" && strings.Contains(result.Output, limit) {
 				return nil
 			}
 		}
-		return []Result{{Role: "router", Speaker: "runtime", FinishedAt: time.Now().UTC(),
-			Output: fmt.Sprintf("%s reached the entrance rework limit after %d repeats; this choice stays unavailable until a new requester reply. Choose among the remaining actions without weakening the original requirements.", role, s.entranceReworks())}}
+		return []Result{{Role: "router", Speaker: "runtime", FinishedAt: time.Now().UTC(), Output: note}}
 	}
 	if len(s.Workflow.LaunchLimit) == 0 {
 		return nil

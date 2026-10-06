@@ -470,8 +470,10 @@ unchanged in the normal requester history; the requirements role interprets
 it with the actual question, not a new keyword parser. A general request for
 clarification is not a question. Initial elicitation continues until no
 requester-only decision remains. After handover, only a newly required
-expansion of authority may be asked; other uncertainty is resolved and
-recorded within the approved scope.
+expansion of authority may be asked, and, where the ordered run has a stage
+that confirms the change before delivery, that change (see "Confirming the
+change before delivery" below); other uncertainty is resolved and recorded
+within the approved scope.
 
 What counts as the requester's point is said in the same words everywhere: a
 point is theirs only when the request, the repository and the operator
@@ -1094,11 +1096,13 @@ ends, so a repaired stage is never read as part of the launch that failed.
 One launch of a process has no time limit unless its `timeout_minutes` names
 one; a launch that reaches that limit is stopped and recorded like any failure.
 
-**Outside the entrance, no model chooses** which stage runs next, whether a
+**Outside the entrance and a stage that confirms the change, no model chooses**
+which stage runs next, whether a
 command stage is satisfied, whether a failure is recoverable, or when the request
 is complete.
-The routing judgment is after the first stage. If `intake.question_role` is set,
-then each time that stage finishes the configured decision service (the decision API
+The routing judgment is after the first stage, and after a stage that confirms
+the change before delivery (below). If `intake.question_role` is set,
+then each time the first stage finishes the configured decision service (the decision API
 when `router.decision` names a model, the chat API otherwise) chooses among
 the first stage again, the question role, or the next stage. Returning to the
 first stage lets that role clarify its own report without inventing a question
@@ -1106,7 +1110,8 @@ for the requester. It is never
 offered `done`, so the entrance still cannot end a request at a person, and the
 question role cannot be a stage, so it satisfies nothing. A question holds the
 request and the reply resumes it exactly as described above; the reply returns
-the run to its first stage. Other stage transitions use the configured order.
+the run to the stage that asked, here the first stage. Other stage transitions
+use the configured order.
 
 The shipped example sends failed verification, review and delivery commands to
 `elicit`, not straight to `work`. Requirements are reconsidered using the actual
@@ -1114,7 +1119,8 @@ failure and earlier answers. A repair or an unknown failure inside the agreed
 scope continues to work: investigate and check the cause, recording choices.
 After handoff, only evidence that a newly required expansion of authority cannot
 be decided by the roles may lead to the existing question role, with concrete
-alternatives. The entrance rule to ask about an uncertain requirement does not
+alternatives; the one other way to it is the decision after a stage that
+confirms the change before delivery (below). The entrance rule to ask about an uncertain requirement does not
 apply to recovery. This also covers a worker reporting that the
 allowed paths cannot satisfy the request, followed by a failed check. Nothing
 parses that report to decide progression. A process error in a model stage still
@@ -1167,6 +1173,76 @@ the record, so the input grows with every stage and every repair cycle, and a
 long repair loop will eventually exceed a model's context. No session sharing
 or summarizing is implemented here on purpose: measure it first. Nothing in
 this mode has run with a live model or a real tracker.
+
+### Confirming the change before delivery
+
+A person is asked to look at a change before it is delivered only when the
+change alters how a person operates the product, what a screen shows or does,
+or the public API. A model stage marked `"confirm": true` reads the change for
+that, between the review and the delivery:
+
+```json
+{ "name": "review", "kind": "command", "on_failure": "elicit" },
+{ "name": "confirm_change", "kind": "model", "confirm": true },
+{ "name": "deliver", "kind": "command", "on_failure": "elicit" }
+```
+
+Its role reads the change actually made in the checkout, the settled
+requirements and the project's knowledge, and writes in ordinary prose what the
+change does to operation, screens and the public API, naming the material it
+read and what it could not read. The project's knowledge defines the public
+API; where it does not, the runtime's instruction to the stage takes the entry
+points used from outside: HTTP routes, command arguments and options and the
+output other programs read, exported functions and types, and configuration
+keys and file formats that others read. When none of them changes, the role
+says that the requester's confirmation is not needed and why, so that the
+report can say `依頼者の確認: なし`. A change too long to read whole is not an
+internal one.
+
+When the stage finishes, the decision service that chooses after the first
+stage chooses again: the first stage, the question role or the next stage. It
+is never offered `done`. Its instructions say to ask when the change alters one
+of the three or when the report cannot tell, and to go on only when the report
+establishes from the change it read that none is altered, or when the
+requester's reply about this same change accepts it. That is wording only:
+nothing measures what the role found, and a model that ignores the wording can
+still choose the delivery.
+
+Choosing the first stage returns the work to requirements. Every later stage
+runs again, this one included, so a new change gets a decision of its own; a
+reply given about an earlier change does not settle a later one.
+`workflow.confirmation_rework_limit` bounds how often the first stage can be
+chosen at these decisions: omitted or zero means two, counted until a new
+requester reply. At the limit that choice is left out there and one runtime
+note says so; the question role and the next stage stay offered, so the limit
+never forces a delivery. `workflow.entrance_rework_limit` counts only the
+choices after the first stage, and this limit only the choices after a stage
+that confirms.
+
+Choosing the question role launches it with the runtime's own instruction:
+show the requester what the change does, with the choices to deliver it as it
+is, to name what to change, or not to deliver it. Whatever that launch does,
+the request then waits for the requester's comment. A question seen posted is
+waited on as described above. When no post is seen, when the launch did not
+exit 0 or when a restart cut it short, the request waits all the same and the
+history says so. Such a launch does not count toward
+`intake.question_no_post_limit`, and a question role that this limit left out
+of the choices after the first stage is still offered here. Only a comment
+with words from the requester, or from an account in
+`intake.stop_user_ids`, ends the wait, as for any question: silence, a post
+that was not made, a tracker that cannot be read and a reached limit are none
+of them a reply. The reply returns the run to this stage, which reads it
+against the change it was given about, and the decision service chooses again.
+Nothing reads the reply's words: whether it accepts, asks for a correction or
+refuses is for the role and the decision service, and a correction or a
+refusal leads back to requirements, not to delivery.
+
+A stage marked `"confirm": true` must be a model stage and not the first
+stage, and the run needs `intake.question_role`; anything else is refused
+before work is accepted. Without such a stage nothing changes, and the
+question is offered only after the first stage. Each pass through the stage
+costs one working-role launch and one decision, for an internal change too.
+Connected workflows have no such stage.
 
 ### A pull request description from the run's reports
 
