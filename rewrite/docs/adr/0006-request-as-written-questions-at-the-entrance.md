@@ -11,7 +11,7 @@ investigated or built, in one comment with two to four choices per point so that
 a single reply answers it. Wording, naming, language, level of detail and style
 are never asked. The role that asks is not a stage, satisfies nothing and cannot
 end a request. In an ordered run with a question role configured, the question
-is offered, as one of exactly two choices, only after the first stage; when a
+is offered only after the first stage, beside the stages the run may take next; when a
 failure returns the work there, the instructions allow a question only for an
 expansion of authority that the roles cannot decide. In a connected workflow
 the configured connections decide, and the shipped example connects the asking
