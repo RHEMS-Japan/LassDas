@@ -255,6 +255,41 @@ func TestConfigurationKeyTheEngineDoesNotTakeIsRefused(t *testing.T) {
 	}
 }
 
+// A first start on a fresh volume has no queue directory yet, and the shipped
+// manifests keep the log file inside it. The engine creates that directory
+// before opening the file; on a fresh volume it used to stop with "opening
+// --log-file: no such file or directory" and never start.
+func TestLogFileDirectoryIsCreatedAtFirstStart(t *testing.T) {
+	directory := t.TempDir()
+	path, root, logFile := filepath.Join(directory, "operator.json"), filepath.Join(directory, "queue"), filepath.Join(directory, "queue", "engine.log")
+	if err := os.WriteFile(path, []byte(`{"intake":{"project_id":17,"created_since":"2026-01-02T00:00:00Z","category_id":[77]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := run(context.Background(), []string{"--config", path, "--watch", "--run-dir", root, "--log-file", logFile}, io.Discard, io.Discard)
+	if err == nil || strings.Contains(err.Error(), "--log-file") || !strings.Contains(err.Error(), `unknown key "category_id" in intake`) {
+		t.Fatalf("a first start did not get past opening the log file: %v", err)
+	}
+	// The directory exists now, the reason is in the file, and nothing else
+	// was written there: the queue's own state is written only once a watch
+	// starts, after the configuration is read.
+	if said, err := os.ReadFile(logFile); err != nil || string(said) != "the runtime stopped: reading the configuration: unknown key \"category_id\" in intake\n" {
+		t.Fatalf("the log file says %q, %v", said, err)
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 || entries[0].Name() != "engine.log" {
+		t.Fatalf("the queue directory holds %v, %v", entries, err)
+	}
+	// A directory that cannot be created is still a refusal to start, said
+	// as such, not a later surprise.
+	blocked := filepath.Join(directory, "file")
+	if err := os.WriteFile(blocked, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	err = run(context.Background(), []string{"--config", path, "--watch", "--run-dir", root, "--log-file", filepath.Join(blocked, "engine.log")}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "creating the directory of --log-file") {
+		t.Fatalf("a log file under a regular file: %v", err)
+	}
+}
+
 // The operator can have a configuration read and checked without starting
 // anything: the same checks as a real start, the line that says which issues
 // a watch would take up, and no queue, no log file and no request to any
