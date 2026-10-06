@@ -266,6 +266,20 @@ const stagesRequest = "Create and deliver Hello 日本語 through the configured
 const stagesArtifact = "Hello 日本語\n"
 const stagesReceipt = "delivered release/greeting.txt\n"
 const stagesReport = "できるようになったこと\n試験用の納品先からHello 日本語を読み戻せます。これは本番ではありません。\n"
+
+const stagesUnitObservation = "project tests: greeting read-back passed"
+const stagesLiveObservation = "fixture live check: Hello 日本語"
+const stagesNoLiveMethod = "Live verification method: none is supplied."
+const stagesLiveMethod = "Live verification method: read the greeting from the synthetic delivery directory, not a production environment."
+
+func stagesEvidenceReport(live bool) string {
+	report := stagesReport + "\n観察できる結果\nrelease/greeting.txt: " + stagesArtifact + "\n単体テスト\n" + stagesUnitObservation + "\nライブ確認\n"
+	if live {
+		return report + stagesLiveObservation + " (架空の検証先。本番ではありません)\n"
+	}
+	return report + "なし (導入先に検証の手段が無い)\n"
+}
+
 const stagesQuestion = "依頼者にしか決められない点があります。納品先は (a) release/ か (b) dist/ のどちらにしますか。\n"
 const stagesAnswer = "(a) release/ でお願いします。\n"
 const stagesScopeQuestion = "許可された範囲のままでは満たせません。(a) 許可済みの静的ページで挨拶を表示する (b) 運用者に API の変更権限を設定してもらう、どちらにしますか。\n"
@@ -374,6 +388,9 @@ func TestStagesRoleHelper(t *testing.T) {
 		if !repairQuestion || os.Getenv("EXAMPLE_STAGE_PROCESS") == "project-tests" {
 			read("src/greeting.txt", stagesArtifact)
 		}
+		if os.Getenv("EXAMPLE_STAGE_PROCESS") == "project-tests" {
+			fmt.Println(stagesUnitObservation)
+		}
 	case "review":
 		read("src/greeting.txt", stagesArtifact)
 		if os.Getenv("EXAMPLE_KNOWLEDGE") == "answered" {
@@ -403,23 +420,46 @@ func TestStagesRoleHelper(t *testing.T) {
 		write(os.Getenv("EXAMPLE_STAGE_RECEIPT"), stagesReceipt)
 	case "verify_merged":
 		read("release/greeting.txt", stagesArtifact)
+		if os.Getenv("EXAMPLE_REPORT_EVIDENCE") == "live" {
+			fmt.Println(stagesLiveObservation)
+		}
 	case "report":
 		read("release/greeting.txt", stagesArtifact)
-		write("report/result.md", stagesReport)
+		report := stagesReport
+		if evidence := os.Getenv("EXAMPLE_REPORT_EVIDENCE"); evidence != "" {
+			for _, phrase := range []string{"Observable results", "Unit tests", "Live verification", stagesUnitObservation} {
+				if !bytes.Contains(prompt, []byte(phrase)) {
+					t.Fatalf("reporter did not receive %q", phrase)
+				}
+			}
+			live := evidence == "live"
+			if live && !bytes.Contains(prompt, []byte(stagesLiveObservation)) {
+				t.Fatal("reporter lost the observed live-check output")
+			}
+			method := stagesNoLiveMethod
+			if live {
+				method = stagesLiveMethod
+			}
+			if !bytes.Contains(prompt, []byte(method)) {
+				t.Fatal("reporter lost the installation's verification method")
+			}
+			report = stagesEvidenceReport(live)
+		}
+		write("report/result.md", report)
 		stored := 0
 		for _, content := range storedComments() {
-			if content == stagesReport {
+			if content == report {
 				stored++
 			}
 		}
 		if stored == 0 {
-			post(stagesReport)
+			post(report)
 			stored = 1
 		}
 		if stored != 1 {
 			t.Fatalf("the actual report is stored %d times", stored)
 		}
-		fmt.Print(stagesReport)
+		fmt.Print(report)
 	case "confirm_report":
 		reported, err := os.ReadFile("report/result.md")
 		if err != nil {
@@ -542,6 +582,24 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			}
 			cfg := stagesFixtureConfig(t)
 			cfg.Instructions += "\nApproved knowledge write destination: " + stagesKnowledgePath + "."
+			// These two existing full runs also exercise report evidence. The
+			// role is scripted; it does not prove a real model writes truthfully.
+			if !repairQuestion {
+				method := stagesNoLiveMethod
+				if asked {
+					method = stagesLiveMethod
+				}
+				cfg.Instructions += "\n" + method
+				for i := range cfg.Roles {
+					for j := range cfg.Roles[i].Processes {
+						evidence := "none"
+						if asked {
+							evidence = "live"
+						}
+						cfg.Roles[i].Processes[j].Env["EXAMPLE_REPORT_EVIDENCE"] = evidence
+					}
+				}
+			}
 			if asked {
 				for i := range cfg.Roles {
 					for j := range cfg.Roles[i].Processes {
@@ -747,6 +805,16 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			}
 			if posts != 1+questions || catalogs != selections || selections != routes+workingModels {
 				t.Fatalf("posts=%d catalogs=%d selections=%d routes=%d working=%d", posts, catalogs, selections, routes, workingModels)
+			}
+			if !repairQuestion {
+				expected, found := stagesEvidenceReport(asked), false
+				for _, row := range comments {
+					found = found || row.(map[string]any)["content"] == expected
+				}
+				if !found {
+					t.Fatal("the evidence report was not actually stored on the assigned issue")
+				}
+				t.Logf("stored and read back:\n%s", expected)
 			}
 			t.Logf("%d stage launches recorded, %d model decisions, one delivered artifact and one stored/read-back comment", records, routes)
 		})
