@@ -1629,9 +1629,17 @@ the endpoints your installation should reach and refuse, for example:
 ```json
 [
   {"name": "model", "url": "https://allowed.example:8443", "expect": "connected"},
-  {"name": "restricted", "url": "https://denied.example", "expect": "refused"}
+  {"name": "restricted", "url": "https://denied.example", "expect": "refused"},
+  {"name": "metadata", "url": "http://169.254.169.254:80", "expect": "refused"},
+  {"name": "cluster-api", "url": "https://CLUSTER_API_IP:443", "expect": "refused"}
 ]
 ```
+
+`metadata` is the cloud metadata service. `cluster-api` is the cluster's own
+API: put the cluster IP of the `kubernetes` Service in the `default`
+namespace in place of `CLUSTER_API_IP` (read it with
+`kubectl -n default get service kubernetes -o jsonpath='{.spec.clusterIP}'`),
+not the public API endpoint, which the shipped policy does not refuse.
 
 Replace these example endpoints. Include the tracker, model/gateway and delivery
 endpoints actually used, and destinations your network operator expects to be
