@@ -269,9 +269,8 @@ func (c Chain) Run(ctx context.Context) error {
 			results[i].Instruction = next.Instruction
 			state.Recovering = state.Recovering || results[i].Error != ""
 		}
-		// In an ordered run the runtime writes down what this launch actually
-		// returned, so the next stage reads observed facts instead of a claim
-		// about them, and so a repeated stage is not read as one long launch.
+		// Ordered stages and capped connected roles get a runtime record of
+		// what this launch returned, so repeated launches stay distinguishable.
 		if record, staged := state.stageRecord(next, results); staged {
 			results = append(results, record)
 		}
