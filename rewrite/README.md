@@ -1352,6 +1352,67 @@ automation rather than treating its saved body as a lock. This option does
 not change ticket comments or establish production delivery. The report role
 must still describe what actually reached the requested destination.
 
+### A live check the installation supplies
+
+An installation can give the `verify` stage one more process: its own command
+that starts the changed project from the checkout, uses one feature and
+prints what it requested and observed. deploy/ticket-engine/SETUP.md ("A live
+check of the running change (optional)") says how to add it and what the
+command has to do. The engine has no setting for it and reads none of its
+words:
+
+- Its exit status counts like that of any other process of the stage. When
+  it does not exit 0, the stage is not satisfied, the work goes back to the
+  stage's `on_failure` with the check's output in the record, and every later
+  stage runs again. The report stage is not launched until a later `verify`
+  launch in which the check exited 0, whatever the failing check printed.
+- What it prints joins the history like any output, and the report stage
+  reads it there; the shipped report instructions put that observation under
+  Live verification. A check that was supplied and failed is never the same
+  record as no check: the failed launch stays in the history with its output
+  and exit status, and the report is told that a failed method is not absent.
+- Without such a process there is no such record, and the report says
+  `なし (導入先に検証の手段が無い)`. The shipped examples supply none, so an
+  installation without a method is not failed on every request by a command
+  that is not there.
+
+Three facts of the engine decide how such a command writes and prints:
+
+- A long output keeps its end: the record keeps the last 8 MiB of each
+  stream, and the merged check the last 4000 characters of each command's
+  output. The observation belongs at the end of standard output.
+- Once a request has finished, everything in a role's home directory except
+  `logs` and the files directly in it is removed. Evidence belongs under
+  `TASK_HOME/logs`.
+- Stopping a launch sends SIGTERM to its process group and SIGKILL three
+  seconds later. The shipped launcher runs the command inside bubblewrap with
+  `--new-session` and `--die-with-parent`, so the SIGTERM probably reaches only
+  bubblewrap, and the command inside ends without its own cleanup; this has
+  not been tried on a cluster. A check that leaves test data outside its
+  sandbox has to remove what an earlier, stopped launch recorded before it
+  uses the service again.
+
+`examples/live-check/` is such a command for a fictional project on
+`127.0.0.1`, with the project's service and its Feature Map. It is not part of
+the bundle; `harnesses/test_live_check_example.py` runs it on its own.
+
+`cmd/engine/live_check_test.go` runs requests through the shipped ordered
+example with the real queue, processes and workspace preparation, every stage
+but the live check scripted. A request with no check reaches its report with
+`なし (導入先に検証の手段が無い)`. A check that fails, whatever it prints, sends
+the work back to elicitation every time, and no report is posted. With the
+example check, a request whose first change breaks the feature goes back once
+and then reaches its report: the report stage is given the failed launch, the
+failed launch's record is the same at the end as when it was saved, and what
+the scripted report stage stores under ライブ確認 is the observation the check
+printed, the request it sent and the answer it got, which the service's own
+log also has. In these tests, which run without bubblewrap, stopping the
+engine while the check waits for an answer leaves no service and no test user
+behind and is recorded as an interruption; after a restart the check runs
+again. A check whose cleanup fails after a passing
+observation sends the work back. The scripted report stage shows what reaches
+a report, not that a model writes it.
+
 ### A read-only status page
 
 `bin/ticket-status` serves what the queue directory holds, as it is, over

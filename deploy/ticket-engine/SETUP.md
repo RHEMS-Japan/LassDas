@@ -1048,6 +1048,168 @@ still sends back (a checkout with no change), are in rewrite/README.md
 ("Stages instead of roles", from the paragraph that begins "No verdict, no
 pass").
 
+### A live check of the running change (optional)
+
+The report's Live verification section (`ライブ確認`) can name an observation
+only when your installation supplies a way to start the changed project and
+use it. Without one the report says `なし (導入先に検証の手段が無い)`, and unit
+tests are not offered in its place. This section adds such a check as one
+more process of the `verify` stage. It needs no new setting and no change to
+the engine: the process's exit status counts like the build's and the
+tests', and what it prints joins the history, where the report stage reads it.
+
+**Prepare three things first.** Note which of them you have. A check that
+cannot have all three is left out, not made to pass.
+
+| What | Ready when |
+| --- | --- |
+| Start (起動方法) | The project's service starts from the checkout inside the `verify` process and listens on `127.0.0.1`, without production data, accounts or hosts. Whatever it has to build first, it builds itself: the `verify` stage starts its processes at the same time, so the check cannot wait for `project-build`. |
+| Operate (操作する手段) | A program in the image (an HTTP client, a script) can reach the service and use one feature, inside the network the `verify` process already has. |
+| Test user and data (テスト用のユーザーとデータ) | A user and data the owner agreed the check may create and remove. Never a real user's data. A password or key for that user is a credential: approve it on its own and give it to this process's `secrets` only, never the delivery token or a production account. |
+
+Record which one stopped you, in your private setup notes and in the project
+guidance at the start of `instructions`, in this form:
+
+```text
+Live verification method: none is supplied.
+- Start: ready | missing: <what is missing>
+- Operate: ready | missing: <what is missing>
+- Test user and data: ready | missing: <what is missing>
+```
+
+When all three are ready, write instead what the check does, for example:
+`Live verification method: the verify stage's live-check process starts the
+service from the checkout on 127.0.0.1, uses the greeting as the test user
+live-check-user following docs/FEATURES.md, and prints the request, the
+response and the result. It checks the change before merge, not production.`
+The report stage reads this sentence and the check's output. It is how the
+report tells a check that was supplied and failed from one that was never
+supplied.
+
+**The command.** One program with a `run` subcommand that does the other five
+in order. The names are yours; the engine looks for none of them, and each
+can be run by hand.
+
+| Subcommand | Does | Exits |
+| --- | --- | --- |
+| start | Starts the service from the checkout and records, in this launch's own directory, what it started: the process and its address. | 0 once the service answers; otherwise non-zero with the reason. It stops nothing it did not start. |
+| diagnose | Checks the three things above for this launch. | 0 when the feature can be used; otherwise non-zero, naming which of the three is missing. |
+| act | Uses the feature with the agreed test user and data, recording what it will create before creating it, and saves the actual request and response. | 0 only when what it observed is what the project's Feature Map says shows the feature working. Not running is not a pass. |
+| evidence | Prints what was requested and observed: the command, the target, the expectation, the observation, the result and where the files are. | Prints what there is also after a failure. No credentials and no personal data beyond what the observation needs. |
+| stop | Removes only the processes and test data this launch recorded, and keeps every evidence file. | 0 when nothing of them is left, also when nothing was started or all was removed before; otherwise non-zero, naming what is left. |
+
+`run` exits 0 only when all five did. A cleanup that failed is a failed check,
+also after a passing observation. Three facts of the engine decide where the
+command writes and prints:
+
+- Write under `$HOME/logs/` (the process's own `TASK_HOME`). Once a request has
+  finished, the engine removes everything in a role's home directory except
+  `logs` and the files directly in it, and whatever is written in the checkout
+  is what the delivery commits.
+- Print the observation as the **last** lines of standard output, and keep
+  standard error short. The history keeps the end of a long output, and the
+  merged check keeps only the last 4000 characters of each command's output.
+- Send the service's own output to a file. The engine waits for the check's
+  output to close: a service still holding it after the check has ended adds
+  five seconds, after which the engine records the check as failed with
+  `exec: WaitDelay expired before I/O complete`, even when it exited 0.
+
+**When the check is stopped.** When the engine stops during the check (a
+restart, an upgrade), it sends SIGTERM to the check's process group and
+SIGKILL three seconds later; finish the cleanup within that time. In the
+shipped launcher the check runs inside bubblewrap, which starts it in a
+session of its own and kills it when bubblewrap ends, so the SIGTERM probably
+reaches only bubblewrap and the check ends without cleaning up. This has not
+been tried on a cluster. So let each `run` first look for the directories of
+earlier launches that have no record of a finished `stop`, and run `stop` on
+them. Processes inside the sandbox end with it, since Linux ends every
+process of the sandbox's PID namespace when its first process ends; test data
+in a database or on another host does not, and only the next `run` of the same
+request removes it. Each request has a home of its own, so what a request
+recorded stays when it ends or is stopped before its `verify` stage runs
+again.
+
+Know the service you started by the time it began, recorded when you start
+it, not by its arguments. On Linux a process that is ending, as the service
+is right after the group's SIGTERM, has no arguments left to read, so a check
+that looks for its own arguments takes its own service for another process
+and fails although nothing is left. When another process holds the recorded
+PID now, yours has ended: leave that process alone.
+
+**Add it to your copy.** Append this process to the `verify` role's
+`processes`, with your own values in place of the example's:
+
+<!-- setup-live-check-process -->
+```json
+{
+  "name": "live-check",
+  "command": [
+    "/usr/bin/python3", "-B", "/opt/ticket-automation/bundle/harnesses/git_workspace.py", "--",
+    "/usr/bin/python3", "-B", "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+    "--runtime", "/opt/ticket-automation/bundle", "--runtime", "/opt/ticket-automation/operator",
+    "--network", "inherit", "--",
+    "/opt/ticket-automation/operator/live-check", "run", "--map", "docs/FEATURES.md"
+  ],
+  "instructions": "Run the operator's live check of the running change. It starts the project's service from this checkout, checks that the service can be used, uses one feature as the agreed test user, prints what it requested and observed, and removes what it started. Its exit status is the observation; it returns no report and no approval.",
+  "env": {
+    "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+    "TASK_BRANCH": "example-integration-branch",
+    "LIVE_CHECK_TEST_USER": "<agreed-test-user>"
+  },
+  "timeout_minutes": 10
+}
+```
+
+`TASK_REPOSITORY` and `TASK_BRANCH` take the same values as in the other
+`verify` processes, and the checks in "Check that no example value is left"
+find them and `<agreed-test-user>` while unreplaced. `LIVE_CHECK_TEST_USER` and
+`--map` are this example's own; the engine passes `env` and arguments on and
+reads neither. Keep `--network` as the build and tests have it, and add no
+`--write` or `--create`: the checkout stays read-only. `timeout_minutes` ends a
+check whose service stops answering, and the engine records that as a failure.
+Put the program beside the other operator scripts (section 6).
+
+**What adding it approves.** Adding the process approves a command, not a new
+destination. It runs with the `--network` and the Pod's egress rules that the
+build and tests already have. If using the service needs a destination those
+rules do not allow (a staging host, an outside API), that is a separate
+decision by the network's owner. Until it is made, record `Operate: missing:
+<destination> is not allowed` and leave the check out. Do not change the
+egress rules as part of adding the check.
+
+**Optional or required.** Decide when you configure it. Configured, it is
+required: a check that does not exit 0 sends the work back to `elicit` like
+any failing command, and the request does not reach its report until a later
+check exits 0. No setting lets a failing check through. If it keeps failing
+for a missing preparation or permission, do not let the work role add
+production access or a credential to make it pass: fix the preparation, or
+remove the process and record which of the three is missing. The failures
+recorded before that stay in the history.
+
+**After the merge.** This checks the change before it is merged. To check the
+integration branch after the merge as well, add the same command as one more
+line of `VERIFY_COMMANDS` in `verify_merged` (each line runs without a shell).
+That is a separate run against a different state, and its output is the
+merged check's, not the `verify` stage's. The shipped instructions ask the
+report to name the checked revision and environment under Observable results
+only; to have the report say which state a live check saw, say so in the
+project guidance.
+
+**A working example.** `rewrite/examples/live-check/` checks a fictional
+project on `127.0.0.1`: `verify_feature.py` has `run` and the five
+subcommands, `server.py` is the project's service it starts, and
+`FEATURES.md` is the project's Feature Map, one table whose columns are the
+feature, how to reach it, how to use it, what shows it working and the
+pitfalls. The check finds its row by the first column and reads nothing else
+of the table, so a map needs no fixed form. The example writes in Japanese,
+since what it prints is quoted in the report. Its tests
+(`rewrite/harnesses/test_live_check_example.py`) run it through a pass, a
+feature that does not work, SIGTERM while it waits for an answer, a killed
+launch whose leftovers the next launch removes, a cleanup that fails, a
+process it did not start, a missing preparation, and a run through the
+merged check's command runner. A made-up `/proc` gives it what Linux shows of
+a service that is ending and of a PID another process holds now.
+
 ### With a gateway in front of the models
 
 `rewrite/examples/operator-gateway.json` shows the gateway settings for the
