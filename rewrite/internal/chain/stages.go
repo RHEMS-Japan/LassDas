@@ -13,7 +13,7 @@ import (
 // A model stage is satisfied when its processes ran without a process error:
 // its words do not prove completed work. At the entrance the decision model
 // reads the report before handing over; later commands prove the work.
-// There is no counter and no failing end state.
+// Entrance re-selection is bounded; process failures are not failing end states.
 const (
 	ModelStage   = "model"
 	CommandStage = "command"
@@ -109,6 +109,26 @@ func stageAt(stages []Stage, name string) (Stage, int) {
 		}
 	}
 	return Stage{}, -1
+}
+
+// Count immediate re-selection of a successful entrance, not the initial
+// pass, returns from a question, or required recovery after a failed launch.
+func (s State) entranceReworks() int {
+	first := s.Workflow.Stages[0].Name
+	for i := len(s.History) - 1; i >= 0; i-- {
+		if s.History[i].Speaker == "requester" {
+			s.History = s.History[i+1:]
+			break
+		}
+	}
+	count, previous := 0, stageRun{}
+	for _, run := range s.stageRuns() {
+		if run.role == first && previous.role == first && previous.satisfied {
+			count++
+		}
+		previous = run
+	}
+	return count
 }
 
 // stageActions reports what may run next. Everything here comes from results
@@ -246,10 +266,11 @@ func (w *Workflow) validateStages(roles map[string]string) error {
 // next stage to read, not a format anything has to produce, and it says
 // nothing about whether the work is any good.
 func (s State) stageRecord(assignment Assignment, results []Result) (Result, bool) {
-	if s.Workflow == nil || len(s.Workflow.Stages) == 0 {
+	if s.Workflow == nil {
 		return Result{}, false
 	}
-	if _, staged := stageAt(s.Workflow.Stages, assignment.Role); staged < 0 {
+	_, staged := stageAt(s.Workflow.Stages, assignment.Role)
+	if staged < 0 && (len(s.Workflow.Stages) > 0 || s.Workflow.LaunchLimit[assignment.Role] == 0) {
 		return Result{}, false
 	}
 	record := Result{Role: assignment.Role, Speaker: "runtime", Instruction: assignment.Instruction,
@@ -260,7 +281,11 @@ func (s State) stageRecord(assignment Assignment, results []Result) (Result, boo
 		return record, true
 	}
 	var text strings.Builder
-	fmt.Fprintf(&text, "Runtime record for stage %s, written by the engine from what it observed.\n", assignment.Role)
+	kind := "stage"
+	if staged < 0 {
+		kind = "role"
+	}
+	fmt.Fprintf(&text, "Runtime record for %s %s, written by the engine from what it observed.\n", kind, assignment.Role)
 	for _, result := range results {
 		name := result.Speaker
 		if name == "" {

@@ -84,6 +84,15 @@ func askedTimes(t *testing.T, root string) int {
 // comment happens to arrive. Nothing about the answer's wording is required;
 // only its author and its position after the question are.
 func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
+	testWaitingRequestResumesOnAnswer(t, requesterAnswer)
+}
+
+func TestWaitingRequestAcceptsTheRecommendedAnswerUnchanged(t *testing.T) {
+	testWaitingRequestResumesOnAnswer(t, "推奨で")
+}
+
+func testWaitingRequestResumesOnAnswer(t *testing.T, text string) {
+	t.Helper()
 	cfg := questionConfiguration(t)
 	root := t.TempDir()
 	var mu sync.Mutex
@@ -158,7 +167,7 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 	defer restarted()
 	held("a collector restart while waiting")
 	mu.Lock()
-	comments = append(comments, issueComment(705, 55, requesterAnswer))
+	comments = append(comments, issueComment(705, 55, text))
 	mu.Unlock()
 	waitFor(t, func() bool { state, err := loadWatchState(root, 51); return err == nil && state.Done })
 	restarted()
@@ -167,7 +176,7 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 		t.Fatalf("resumed state: %+v %v", state, err)
 	}
 	answer := state.History[1]
-	if answer.Speaker != "requester" || answer.Role != "ask_requester" || answer.Output != requesterAnswer {
+	if answer.Speaker != "requester" || answer.Role != "ask_requester" || answer.Output != text {
 		t.Fatalf("the requester's own words did not reach the history unchanged: %+v", answer)
 	}
 	if starts, asked := log.starts(), askedTimes(t, root); starts != 2 || asked != 1 {

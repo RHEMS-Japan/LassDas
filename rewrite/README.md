@@ -442,6 +442,19 @@ testable conditions is returned to requirements by the configured decision
 model, not by a prose parser. This is an instruction to that model, not a
 guarantee that every model follows it.
 
+For ordered stages, `workflow.entrance_rework_limit` bounds how often the
+decision can immediately choose the first stage again: omitted or zero means
+two repeats; a positive value chooses another limit. The initial pass, a return
+from a question and mandatory recovery after a process or command failure do
+not consume a repeat. Once the limit is reached, that choice is removed until
+a new requester reply reaches the history, and one runtime note explains why.
+The other permitted choices remain; the limit neither completes nor fails the
+request and does not relax its requirements. Connected examples use their
+existing `workflow.launch_limit.elicit: 3` for the initial pass and two repeats.
+The runtime records the end of each capped connected-role launch as it does
+for ordered stages, so consecutive executions are counted separately without
+interpreting the role's prose.
+
 The standard it settles against, in the words the decision model and the
 entrance actions are both given: can this request be carried to a delivered,
 verified result by morning with nobody available to answer? Points the roles

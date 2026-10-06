@@ -188,7 +188,7 @@ const askWithChoices = "each with two to four concrete choices, in ordinary pros
 const notAGeneralPlea = "A general request for clarification is not a question: name the undecided points and their choices."
 const requesterPointTest = "A point is the requester's to decide only when the request, the repository and the operator instructions do not settle it and it changes what the delivered result does, where it goes or what the work may touch: a behaviour the request leaves open without saying you may choose, a target that cannot be told apart, access or a credential that was not given, instructions that contradict each other, or an action that cannot be undone."
 const preferencesAreSettled = "Wording, naming, language, level of detail and style are never questions: take the reading closest to the request and to what the repository already does, write the choice down with its reason, and leave it to the review of the delivered result; a point once decided is settled and is not listed again as a question."
-const askWhenInDoubt = "Proceeding with such an open point costs a night's work and asking costs one reply, so proceed only when every point of that kind is absent or already answered and the settled requirements state the completion condition to be held to; when you cannot tell whether a point is of that kind, ask the requester, and never proceed in order to find out."
+const askWhenInDoubt = "Proceeding with such an open point costs a night's work and asking costs one reply, so at initial elicitation only, proceed only when every point of that kind is absent or already answered and the settled requirements state the completion condition to be held to; when you cannot tell whether a point is of that kind, ask the requester, and never proceed in order to find out."
 const exampleAnswer = "(a) release/ でお願いします。\n"
 
 // Actual subprocess fixture, not a native SDK/model or permission-sandbox test.
@@ -598,7 +598,7 @@ func TestEveryExampleAsksAnswerableQuestionsTogetherAndRestatesTheGoal(t *testin
 }
 
 func TestEveryExampleCarriesTheEntranceStandard(t *testing.T) {
-	for _, path := range []string{"../../examples/operator.json", "../../examples/operator-gateway.json", "../../examples/operator-stages.json"} {
+	for _, path := range []string{"../../examples/operator.json", "../../examples/operator-gateway.json", "../../examples/operator-github.json", "../../examples/operator-stages.json", "../../examples/operator-github-stages.json"} {
 		cfg := loadExample(t, path)
 		roles := map[string]chain.Role{}
 		for _, role := range cfg.Roles {
@@ -629,6 +629,9 @@ func TestOperatorExampleCapsTheReportWriterAndNotTheImplementer(t *testing.T) {
 		cfg := loadExample(t, example.path)
 		if cfg.Workflow == nil || cfg.Workflow.LaunchLimit["draft_report"] < 1 {
 			t.Fatalf("%s: draft_report has no launch limit", example.path)
+		}
+		if cfg.Workflow.LaunchLimit["elicit"] != 3 {
+			t.Fatalf("%s: the entrance must allow its initial pass and two repeats", example.path)
 		}
 		if _, capped := cfg.Workflow.LaunchLimit["implement"]; capped {
 			t.Fatalf("%s: implement is capped, which would force delivery over a reviewer's objection", example.path)
@@ -808,7 +811,13 @@ func TestOperatorExampleCarriesTheRequestersAnswerOnToDelivery(t *testing.T) {
 	// The open point went back to the requester at once: the entrance ran
 	// first, and the very next action asked them, with nothing investigated
 	// or built in between.
-	if len(state.History) < 2 || state.History[0].Role != "elicit" || state.History[1].Role != "ask_requester" {
+	var actions []string
+	for _, result := range state.History {
+		if result.Speaker != "runtime" {
+			actions = append(actions, result.Role)
+		}
+	}
+	if len(actions) < 2 || actions[0] != "elicit" || actions[1] != "ask_requester" {
 		t.Fatalf("the open point was not put to the requester first: %+v", state.History)
 	}
 	answers, workingModels := 0, 0

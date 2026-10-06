@@ -300,7 +300,7 @@ func TestEntranceCanReworkUnderstandingBeforeHandingOff(t *testing.T) {
 			var ran []string
 			elicited := 0
 			judge := testJudge(func(_ context.Context, state State, instruction string, choices map[string]string) (string, error) {
-				for _, phrase := range []string{"two or three sentences", "pass or fail", "restate or make the acceptance conditions testable"} {
+				for _, phrase := range []string{"two or three sentences", "pass or fail", "restate or make the acceptance conditions testable", "every question that can be answered now in one numbered comment", "Interpret an ordinary reply such as 推奨で"} {
 					if !strings.Contains(instruction, phrase) {
 						t.Fatalf("the decision model did not receive %q", phrase)
 					}
@@ -484,6 +484,90 @@ func TestEntranceCarriesQuestionBatchesAndRecommendedAnswers(t *testing.T) {
 	}
 }
 
+func TestEntranceReworkStopsAtItsConfiguredLimitAndAReplyStartsItOver(t *testing.T) {
+	for _, tc := range []struct {
+		name, setting string
+		limit         int
+		connected     bool
+	}{
+		{"default", `{}`, 2, false},
+		{"configured", `{"entrance_rework_limit":1}`, 1, false},
+		{"connected", `{}`, 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flow := stagesWorkflow()
+			flow.Question = "ask_requester"
+			if err := json.Unmarshal([]byte(tc.setting), flow); err != nil {
+				t.Fatal(err)
+			}
+			if tc.connected {
+				stages := flow.Stages
+				flow = &Workflow{Start: []string{"elicit"}, After: map[string][]string{}, Recover: map[string][]string{}, LaunchLimit: map[string]int{"elicit": 3}}
+				for i, stage := range stages {
+					next := "done"
+					if i+1 < len(stages) {
+						next = stages[i+1].Name
+					}
+					flow.After[stage.Name], flow.Recover[stage.Name] = []string{next}, []string{stage.Name}
+				}
+				flow.After["elicit"] = []string{"elicit", "ask_requester", "work"}
+				flow.After["ask_requester"], flow.Recover["ask_requester"] = []string{"elicit"}, []string{"elicit"}
+			}
+			store := &memoryStore{state: State{Request: "Deliver after resolving the requirements."}}
+			judge := testJudge(func(_ context.Context, _ State, _ string, choices map[string]string) (string, error) {
+				if len(choices) == 1 {
+					for name := range choices {
+						return name, nil
+					}
+				}
+				if _, offered := choices["elicit"]; offered {
+					return "elicit", nil
+				}
+				return "work", nil
+			})
+			decision := DecisionRouter{Roles: stagePurposes(), Judge: judge}
+			var router Router = StageRouter{Entrance: decision}
+			if tc.connected {
+				router = decision
+			}
+			for round := 1; round <= 2; round++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				elicits, work := 0, 0
+				engine := Chain{Store: store, Workflow: flow, Router: router,
+					Executor: testExecutor(func(_ context.Context, assignment Assignment, _ State) []Result {
+						if assignment.Role == "elicit" {
+							elicits++
+							if elicits > tc.limit+1 {
+								cancel() // A missing bound fails without a timed busy loop.
+							}
+						}
+						if assignment.Role == "work" {
+							work++
+						}
+						return []Result{{Role: assignment.Role, Speaker: "fixture", Output: "ordinary report"}}
+					})}
+				err := engine.Run(ctx)
+				cancel()
+				if err != nil || !store.state.Done || work != 1 || elicits != tc.limit+1 {
+					t.Fatalf("round=%d elicits=%d work=%d done=%v error=%v", round, elicits, work, store.state.Done, err)
+				}
+				notes := 0
+				for _, result := range store.state.History {
+					if result.Speaker == "runtime" && strings.Contains(result.Output, "limit") {
+						notes++
+					}
+				}
+				if notes != round {
+					t.Fatalf("one limit note per requester reply: got %d after round %d", notes, round)
+				}
+				t.Logf("round=%d initial=1 repeats=%d work=1 final command completed", round, elicits-1)
+				store.state.History = append(store.state.History, Result{Role: "ask_requester", Speaker: "requester", Output: "Please use the newly clarified scope."})
+				store.state.Done, store.state.Step = false, "ask_requester"
+			}
+		})
+	}
+}
+
 func TestStagesContinueWhenTheQuestionRolePostedNothing(t *testing.T) {
 	flow := stagesWorkflow()
 	flow.Question = "ask_requester"
@@ -492,10 +576,19 @@ func TestStagesContinueWhenTheQuestionRolePostedNothing(t *testing.T) {
 	var ran []string
 	engine := Chain{Store: store, Workflow: flow, WaitAfter: "ask_requester",
 		QuestionPosted: func(context.Context) (QuestionObservation, error) { return QuestionObservation{}, nil },
-		Router: StageRouter{Entrance: testRouter(func(context.Context, State) (Assignment, error) {
+		Router: StageRouter{Entrance: DecisionRouter{Roles: stagePurposes(), Judge: testJudge(func(_ context.Context, state State, _ string, choices map[string]string) (string, error) {
 			decisions++
-			return Assignment{Role: "ask_requester"}, nil
-		})},
+			if state.QuestionUnavailable != "" {
+				if len(choices) != 2 || choices["elicit"] == "" || choices["work"] == "" {
+					t.Fatalf("the cap removed requirements revision or kept the question: %v", choices)
+				}
+				if decisions == 3 {
+					return "elicit", nil
+				}
+				return "work", nil
+			}
+			return "ask_requester", nil
+		})}},
 		Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
 			ran = append(ran, a.Role)
 			return []Result{{Role: a.Role, Speaker: "worker", Output: "No question was needed."}}
@@ -506,8 +599,8 @@ func TestStagesContinueWhenTheQuestionRolePostedNothing(t *testing.T) {
 	if err := engine.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"elicit", "ask_requester", "elicit", "ask_requester", "elicit", "work", "verify", "deliver", "confirm"}
-	if !store.state.Done || store.state.Waiting || decisions != 2 || !reflect.DeepEqual(ran, want) {
+	want := []string{"elicit", "ask_requester", "elicit", "ask_requester", "elicit", "elicit", "work", "verify", "deliver", "confirm"}
+	if !store.state.Done || store.state.Waiting || decisions != 4 || !reflect.DeepEqual(ran, want) {
 		t.Fatalf("done=%t waiting=%t decisions=%d ran=%v", store.state.Done, store.state.Waiting, decisions, ran)
 	}
 }
@@ -523,10 +616,15 @@ func TestOrderedRunRejectsConfigurationThatWouldLetWordsDecide(t *testing.T) {
 	}
 	for _, variant := range []string{"unknown-stage", "repeated-stage", "unknown-kind", "model-last",
 		"command-without-repair", "command-repaired-by-command", "model-with-repair", "mixed-with-graph",
-		"question-is-a-stage", "unknown-question", "question-without-model-entrance", "question-without-stages"} {
+		"question-is-a-stage", "unknown-question", "question-without-model-entrance", "question-without-stages",
+		"negative-rework-limit", "rework-limit-without-stages"} {
 		t.Run(variant, func(t *testing.T) {
 			flow := stagesWorkflow()
 			switch variant {
+			case "negative-rework-limit":
+				flow.EntranceReworkLimit = -1
+			case "rework-limit-without-stages":
+				flow = &Workflow{EntranceReworkLimit: 1}
 			case "unknown-stage":
 				flow.Stages[1].Name = "other"
 			case "repeated-stage":
