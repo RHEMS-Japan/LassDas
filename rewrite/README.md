@@ -1250,6 +1250,46 @@ automation rather than treating its saved body as a lock. This option does
 not change ticket comments or establish production delivery. The report role
 must still describe what actually reached the requested destination.
 
+### A live check the installation supplies
+
+An installation can give the `verify` stage one more process: its own command
+that starts the changed project from the checkout, uses one feature and
+prints what it requested and observed. deploy/ticket-engine/SETUP.md ("A live
+check of the running change (optional)") says how to add it and what the
+command has to do. The engine has no setting for it and reads none of its
+words:
+
+- Its exit status counts like that of any other process of the stage. When
+  it does not exit 0, the stage is not satisfied, the work goes back to the
+  stage's `on_failure` with the check's output in the record, and every later
+  stage runs again. The report stage is not launched until a later `verify`
+  launch in which the check exited 0, whatever the failing check printed.
+- What it prints joins the history like any output, and the report stage
+  reads it there; the shipped report instructions put that observation under
+  Live verification. A check that was supplied and failed is never the same
+  record as no check: the failed launch stays in the history with its output
+  and exit status, and the report is told that a failed method is not absent.
+- Without such a process there is no such record, and the report says
+  `なし (導入先に検証の手段が無い)`. The shipped examples supply none, so an
+  installation without a method is not failed on every request by a command
+  that is not there.
+
+Three facts of the engine decide how such a command writes and prints:
+
+- A long output keeps its end: the record keeps the last 8 MiB of each
+  stream, and the merged check the last 4000 characters of each command's
+  output. The observation belongs at the end of standard output.
+- Once a request has finished, everything in a role's home directory except
+  `logs` and the files directly in it is removed. Evidence belongs under
+  `TASK_HOME/logs`.
+- Stopping a launch sends SIGTERM to its process group and SIGKILL three
+  seconds later. The shipped launcher runs the command inside bubblewrap with
+  `--new-session` and `--die-with-parent`, so the SIGTERM probably reaches only
+  bubblewrap, and the command inside ends without its own cleanup; this has
+  not been tried on a cluster. A check that leaves test data outside its
+  sandbox has to remove what an earlier, stopped launch recorded before it
+  uses the service again.
+
 ### A read-only status page
 
 `bin/ticket-status` serves what the queue directory holds, as it is, over
