@@ -924,9 +924,35 @@ without it, `REVIEW_MODEL` is the only model. Whichever model answers first
 reviews, so every model in the list should come from a different publisher
 than the worker, as the first one does. An HTTP error is said with what the
 service answered, the credential scrubbed and cut to about 200 characters;
-400, 401, 403, 404, 413 and 422 are named as the operator's to fix (the
-credential, the model id, a request the service refuses), and asking goes
-on, the other models included. What asking again cannot get past, a setting
+Repeated unrecognized 400 responses, 401, 403, 404 and 422
+remove that model from this review's attempts: the operator must fix the
+credential, model id or request settings. Other configured
+models are still tried. If none remains, the review holds without further
+model calls until the operator fixes the setting and restarts the engine.
+Transient failures, including HTTP 402 while credit is unavailable, and replies
+without a verdict still use the growing waits. Restoring credit lets the same
+review continue on its next attempt without restarting the engine.
+
+On HTTP 413 or a 400 explicitly naming excessive context or token length,
+the command retries with less runtime text, saved context, diff and test
+output. An unrecognized 400 gets one reduced retry per model too, before being
+treated as an operator correction; a repeated explicit context-length refusal
+continues reducing to the minimum. The first combined body budget is half the
+smaller of the body amount and `REVIEW_MEMORY_CHARACTERS`; later reductions halve
+the preceding budget, retaining each part's beginning
+and end. The model sees why and where material was omitted; the same reason
+is printed with the final result and saved in `review.md`. The reduced size
+is kept for later attempts to that model. Headings, omission notices and the
+complete proposed pull request explanation are outside this body budget:
+the explanation is never silently shortened. If even minimal context is
+refused, another configured model is tried; with none available, the operator
+must configure one that can accept the required instructions and explanation.
+Even before service-driven reduction, runtime text longer than the normal
+head/tail window visibly marks its omitted middle. Omitted material is not
+represented as reviewed. There is no default
+unreviewed success or new send-back for these service refusals.
+
+What asking again cannot get past, a setting
 that is missing or mistyped (among them `REVIEW_UNAVAILABLE` with any value
 but `pass`, read in any letter case), an endpoint that is not HTTPS, a
 credential that is not set, test commands that cannot be read, holds the
@@ -963,7 +989,7 @@ last step may have stopped midway), then the stages after it, the review among
 them, run again. The requester is told that the request carries on after a
 restart. Each request to a model
 carries the change and the test output: once the waits reach
-`REVIEW_RETRY_CAP_SECONDS`, every model in `REVIEW_MODELS` is asked once
+`REVIEW_RETRY_CAP_SECONDS`, every still-available model in `REVIEW_MODELS` is asked once
 every 300 seconds: about 100 rounds in eight hours, so up to about 100
 requests with one model and 300 with three. A longer
 `REVIEW_RETRY_CAP_SECONDS` asks less often.
@@ -973,7 +999,11 @@ it delivers unreviewed work when no verdict can be obtained: after
 `REVIEW_ATTEMPTS` requests (3), the models in turn, or at once where the review
 would otherwise hold, the command prints `NOT REVIEWED` with the reason and
 exits 0. Description settings that the worker cannot fix still hold for an
-operator correction and restart. Another rule comes before this opt-in:
+operator correction and restart. Other permanent HTTP refusals also use this
+explicit opt-in, without repeatedly asking the refused model; the default is
+to hold. A reduced retry after a context refusal also counts against
+`REVIEW_ATTEMPTS`; reducing input does not grant extra requests.
+Another rule comes before this opt-in:
 a checkout in which Git lists no changed
 path and no earlier delivery round committed one can end with nothing
 delivered if it is let through, so it is let through only on a verdict, and
