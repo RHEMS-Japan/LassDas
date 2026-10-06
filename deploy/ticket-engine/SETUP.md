@@ -492,6 +492,71 @@ person who merges, and you can keep them as they are. The token needs the
 same access all the same, to push the ticket branch and open the pull request,
 and a rule that also covers the `ticket/...` branches applies to that push.
 
+### What counts as done in this repository
+
+Settle this with the owner before writing the configuration in section 4. If
+an AI assistant is doing this setup for them, it asks the owner; it does not
+answer for them. The engine delivers a change once the configured commands
+exit 0 and the review lets it through, so what those commands check is all it
+can know about whether a change is done. A definition that only says the
+build passes lets through a change to a part that the build does not cover,
+such as code in a language whose tools the image does not carry.
+
+**List the parts of the repository first**, from the checkout: each language
+or toolchain, each module or package, documentation, configuration, and
+anything built or published from it. Ask the four questions below for each
+part, and keep a part that has no answer in the list as one without an
+answer: that is where a change goes through unchecked.
+
+1. What must be seen before a change to this part counts as correct?
+2. Which command checks that, and does it run in the engine's environment:
+   inside a role, with the checkout read-only, with only the tools the image
+   carries (`deploy/pod/Dockerfile`) and only the network the roles already
+   have ([Dependencies and read-only builds](#dependencies-and-read-only-builds))?
+3. How is the change's behaviour observed? If the answer is only that the
+   build or the tests pass, ask what a person would look at to see the change
+   work. If a program can do that, it is a live check
+   ([section 4](#a-live-check-of-the-running-change-optional)); if not, it
+   belongs to the next question.
+4. What can no machine check here, and who checks it? The requester sees a
+   change before delivery only when it alters how a person operates the
+   product, what a screen shows or does, or the public API (`confirm_change`
+   in [How a request moves](#how-a-request-moves)). A person can check a
+   change before merging it when the merge is left to them
+   ([section 4](#leaving-the-merge-to-a-person)). Otherwise nobody checks it,
+   and the report says so.
+
+**Signs of a definition too weak to rely on**: it names only the build; a
+part has no answer; a command was run on a workstation but not inside a role;
+a part that a command is said to check can be broken without that command
+failing. Section 7 ([Before it accepts work](#before-it-accepts-work), "What
+counts as done, checked inside a role") runs every command inside a role and
+breaks each such part once.
+
+**Write it down in the repository.** The owner chooses the file and its form;
+the engine requires no file name and reads no format. Put it in through the
+repository's ordinary pull request, so that later changes to it are reviewed
+the same way. The engine is given only its location, in the project guidance
+([section 4](#finish-the-project-guidance-either-tracker)). Its commands
+become the operator's `build` and `test` (section 6) and, if there is one, the
+live check's process. Change a command and the definition together, and run
+the check in section 7 again after either changes.
+
+**Decide whether the engine may add to it.** A request can show that the
+definition lacks an item: a part it does not cover, or a check that cannot
+run here. If the owner allows additions, the working role adds such an item
+in the same delivery pull request, adds only and never removes or weakens an
+item, and the review reads the addition with the rest of the change. If not,
+the report proposes the addition. Either way, the project guidance says which.
+
+The engine itself does not read the definition. The shipped roles read it at
+the location the guidance names: requirements list the items that apply to
+the request and how each is checked, and the report marks each of them
+`確かめた`, with the record that shows it, or `確かめていない`, with the
+reason. A check left to a person that is none of the three kinds of change
+above is not asked for before delivery: the report says `確かめていない` for
+it, unless the merge is left to a person who checks it.
+
 ### The branch must pass before you start
 
 The merged check runs your build and tests against the integration branch
@@ -679,6 +744,15 @@ answer. The work role integrates reusable answers, without secrets or
 invented facts; review compares the note with the actual exchange. Knowledge
 and code use the same reviewed delivery PR. This is work assigned to the
 existing models, not a controller that appends arbitrary comment text.
+
+Name where the definition of done of
+[section 3](#what-counts-as-done-in-this-repository) is written, and whether
+roles may add to it, for example "What counts as done is written in
+docs/done.md; roles may add a missing item to it in the delivery pull request
+and never remove or weaken one." Those are examples too. The shipped roles
+read the definition there; as with knowledge, its location alone does not let
+them write to it. With no location named, the report says
+`完了の定義: なし (導入先が定めていない)`.
 
 For long guidance, edit a UTF-8 text file rather than escaping quotes and
 newlines inside JSON by hand. This command replaces the example's first
@@ -2027,27 +2101,61 @@ The merged check lists each command with its exit status and ends with
 the integration branch fails your own checks today
 ([section 3](#the-branch-must-pass-before-you-start)).
 
-**Your test script inside a role.** The verify stage runs it confined and
-with the checkout read-only, which is not how it ran in the check above. The
-launcher passes its standard input on to the script, so it too is given
-`/dev/null`:
+**What counts as done, checked inside a role.** The verify stage runs the
+operator's commands confined and with the checkout read-only, which is not how
+they ran in the check above. This runs one of them that way, on a copy of the
+integration branch. `COMMAND` is the command as the verify stage runs it, with
+its arguments. `BREAK` is empty, or one shell command that breaks one part of
+the copy, run in the copy's root. The launcher passes its standard input on to
+the command, so the command is given `/dev/null`:
 
+<!-- setup-done-check -->
 ```sh
-kubectl -n "$NS" exec -i "$POD" -c engine -- /bin/sh -s <<'CHECK'
-d=$(mktemp -d /tmp/test-check.XXXXXXXX)
+COMMAND=/opt/ticket-automation/operator/test BREAK=
+kubectl -n "$NS" exec -i "$POD" -c engine -- env COMMAND="$COMMAND" BREAK="$BREAK" /bin/sh -s <<'CHECK'
+d=$(mktemp -d /tmp/done-check.XXXXXXXX) || exit 2
+mkdir "$d/home" || exit 2
 git -c core.hooksPath=/dev/null clone --quiet --no-local --branch <integration-branch> \
-  /var/lib/ticket-automation/mirror/<owner>/<repository-name>.git "$d/work"
+  /var/lib/ticket-automation/mirror/<owner>/<repository-name>.git "$d/work" || { rm -rf "$d"; exit 2; }
+if [ -n "$BREAK" ]; then
+  (cd "$d/work" && sh -c "$BREAK") || { echo "the break did not apply; nothing was run"; rm -rf "$d"; exit 2; }
+  if [ -z "$(git -C "$d/work" status --porcelain)" ]; then
+    echo "the break changed nothing; nothing was run"; rm -rf "$d"; exit 2
+  fi
+fi
 env -i PATH=/runtime-policy/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin \
   TASK_WORKSPACE="$d/work" TASK_HOME="$d/home" \
   python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py \
-  --runtime /opt/ticket-automation/operator --network inherit -- /opt/ticket-automation/operator/test </dev/null
-echo "test inside a role exit: $?"
+  --runtime /opt/ticket-automation/bundle --runtime /opt/ticket-automation/operator \
+  --network inherit -- $COMMAND </dev/null
+s=$?
+echo "inside a role exit: $s"
 rm -rf "$d"
+exit "$s"
 CHECK
 ```
 
-Exit 0 is required; a test that only passes with a writable checkout fails
-every request at `verify`.
+Run it for each of these, and keep each printed line in your private setup
+notes:
+
+| Run | `COMMAND` | `BREAK` | Must print |
+| --- | --- | --- | --- |
+| Each command the verify stage runs | `/opt/ticket-automation/operator/build`, then `/opt/ticket-automation/operator/test`, then the live check's command line if you added one | empty | `inside a role exit: 0` |
+| Each part that the definition of done says a command checks | the command that checks it | one change that breaks that part, for example `printf 'not source\n' >> crates/parser/src/lib.rs` for a crate the definition says the tests compile | `inside a role exit:` with a status other than 0 |
+
+A command that does not exit 0 here fails every request at `verify`, and the
+request goes round without end
+([section 11](#a-request-goes-round-without-end)): a test that only passes
+with a writable checkout, or a tool the image lacks, does that. Make each
+break one that the part's own tools reject: a line that happens to be valid in
+that language breaks nothing. A broken part whose command still exits 0 is
+then not checked by that command: fix the command or the image, or change the
+definition of done to say that no machine checks that part, so that the
+report says `確かめていない` for it. A line that says the break did not apply
+or changed nothing is no result; correct `BREAK` and run it again. A live
+check that needs values from its process's `env` gets them as `NAME=value` on
+the `env -i` line. Do not open the intake (section 8) until every run prints
+what the table says.
 
 **The queue survives a restart.** Delete the Pod once and look again:
 
@@ -2208,6 +2316,11 @@ Look at the pull request on GitHub (`Deliver <ISSUE-KEY>`, merged, or open
 for a person to merge), at the integration branch, and at the report. The
 report is written by a model from the run's records; the status page has the
 records themselves.
+
+The report lists each item of the definition of done that applies to the
+request ([section 3](#what-counts-as-done-in-this-repository)). An item
+marked `確かめていない` is one that nobody checked, with the reason: it is
+left for a person, and the `delivered` status does not cover it.
 
 ## 9. Stopping a request
 
