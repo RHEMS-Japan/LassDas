@@ -23,7 +23,8 @@ func TestRepeatedReviewReportHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, phrase := range []string{"second independent occurrence", "not a new occurrence", "Do not create the follow-up PR", "TASK_HISTORY"} {
+	for _, phrase := range []string{"second independent occurrence", "not a new occurrence", "several reviewers in one round",
+		"in a later round, after a repair", "Do not create the follow-up PR", "TASK_HISTORY"} {
 		if !strings.Contains(string(prompt), phrase) {
 			t.Fatalf("reporter lost %q", phrase)
 		}

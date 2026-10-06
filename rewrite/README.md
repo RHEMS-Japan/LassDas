@@ -2112,14 +2112,21 @@ knowledge for repeated findings. At a second independent occurrence of the same
 kind of finding, they propose a follow-up PR: a focused addition to the approved
 knowledge location or a regression check. The report names both observations,
 the common cause, the proposed location and how to check the result. A retry or
-replayed record of one finding is not a second occurrence. With only one known
-occurrence, no recurrence-based proposal is needed.
+replayed record of one finding is not a second occurrence. Occurrences are
+counted by review round: the same finding from several reviewers in one round
+counts once, and a second occurrence is the same kind of finding raised again
+in a later round, after a repair. With only one known occurrence, no
+recurrence-based proposal is needed.
 
 This is model guidance, not a controller-owned classification or counter. The
 report does not create the follow-up PR or widen the current request's write
 permissions. It must not claim that a proposal was implemented. Other requests
 are visible only if the operator's existing knowledge sources include them;
 missing history is not evidence that a finding has never occurred before.
+A local test checks that this guidance and the history path reach a scripted
+report process launched by the engine, and that its report is saved unchanged;
+the judgment is scripted, so the test does not show that a real model counts
+occurrences correctly.
 
 **The bridge is not a sandbox.** The configured container/launcher must enforce
 filesystem, network and credential access. Separate environment variables alone
