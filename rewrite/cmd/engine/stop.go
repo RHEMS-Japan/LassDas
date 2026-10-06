@@ -88,12 +88,17 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	observe := func(message string) { fmt.Fprintf(log, "request %d: %s\n", issue.ID, message) }
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
-	var result chan error
+	var result chan watchedOutcome
 	var cancel context.CancelFunc
 	stopChild := func() {
 		if cancel != nil {
 			cancel()
-			<-result
+			outcome := <-result
+			if outcome.clockErr != nil {
+				observe("active-work time remains unconfirmed: " + outcome.clockErr.Error())
+			} else if outcome.err != nil && !errors.Is(outcome.err, context.Canceled) {
+				observe("child ended while being held: " + outcome.err.Error())
+			}
 			turns.release()
 			cancel, result = nil, nil
 		}
@@ -199,8 +204,8 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			}
 		} else if waiting {
 			// The engine put a question to the requester and stopped there.
-			// Use the question's POST receipt, not comments arriving since it,
-			// then leave the request to the collector to await the answer.
+			// Use its POST receipt when available, otherwise the latest comment
+			// at this read, and leave later answers to the collector.
 			if err := recordQuestion(source, directory, rows, issue); err != nil {
 				turns.leave(issue.ID)
 				observe("waiting to record the question put to the requester: " + err.Error())
@@ -218,21 +223,31 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			// reading its control comments and asks again on the next tick.
 			if turns.try(issue.ID) {
 				workCtx, releaseWork := context.WithCancel(ctx)
+				clock := activeWorkTime
+				work, startErr := beginActiveWork(directory, releaseWork, clock)
+				if startErr != nil {
+					releaseWork()
+					turns.release()
+					return startErr
+				}
 				cancel = releaseWork
-				result = make(chan error, 1)
+				result = make(chan watchedOutcome, 1)
 				outcome := result
 				began = time.Now().UTC()
 				fmt.Fprintf(log, "starting accepted request %d\n", issue.ID)
+				go func() {
+					defer releaseWork()
+					err := run(workCtx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(directory, "run")}, io.Discard, log)
+					ended := clock.now()
+					outcome <- watchedOutcome{err: err, clockErr: work.finish(ended)}
+				}()
 				if cfg.Intake != nil && cfg.Intake.Announce && waited {
-					// The slot was taken just now.
+					// The marker is retained and the run is launched. A blocked
+					// announcement cannot delay the child's own limit timer.
 					if noticeErr := notice.post(ctx, startedNotice, startedNoticeText, time.Now().UTC()); noticeErr != nil {
 						observe("start not announced: " + noticeErr.Error())
 					}
 				}
-				go func() {
-					defer releaseWork()
-					outcome <- run(workCtx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(directory, "run")}, io.Discard, log)
-				}()
 				// Credit returning alone does not start work: a slot must also
 				// be available. Announce recovery only once the run is launched.
 				if creditKnown {
@@ -251,7 +266,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case err := <-result:
+			case outcome := <-result:
 				cancel()
 				turns.release()
 				cancel, result = nil, nil
@@ -262,8 +277,11 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				if declaring {
 					tell(observe)
 				}
-				if !errors.Is(err, chain.ErrWaiting) {
-					return err
+				if outcome.clockErr != nil {
+					return errors.Join(outcome.err, outcome.clockErr)
+				}
+				if !errors.Is(outcome.err, chain.ErrWaiting) {
+					return outcome.err
 				}
 				waiting = true
 				pause = false

@@ -23,6 +23,10 @@ says that this delivery merged nothing; whether a person merged since is not
 looked at here. Once the delivery has recorded that a person merged the pull
 request, the integration branch is verified as usual.
 
+A branch-only delivery has no pull request. Its exact recorded branch head
+must still be present; the commands run on that fetched commit, never on the
+working copy or on a different branch head. No environment is checked here.
+
 Two endings a person caused end this check at 0 without running anything,
 since there is nothing of this delivery left to verify and failing would only
 send the work round again: a pull request closed without a merge (nothing of
@@ -65,6 +69,25 @@ def receipt_fields(workspace):
     receipt = support.read_receipt(support.receipt_path(workspace))
     if not receipt:
         raise DeliveryError("No delivery receipt is present; nothing was delivered to verify")
+    if receipt.get("branch_only"):
+        if receipt.get("changed_by_person"):
+            if (receipt.get("branch_only") is not True or not receipt.get("ended_at")
+                    or "branch_head" not in receipt
+                    or not COMMIT.fullmatch(str(receipt.get("head", "")))
+                    or not str(receipt.get("branch", "")).startswith("ticket/")
+                    or any(receipt.get(key) for key in ("unchanged", "pull_request", "merge_sha",
+                                                       "merge_left_to_person", "previous", "publishing_head",
+                                                       "closed_unmerged"))):
+                raise DeliveryError("The branch-only record does not identify the person's handoff")
+            return receipt, ""
+        published = str(receipt.get("published_head", ""))
+        if (receipt.get("branch_only") is not True or not COMMIT.fullmatch(published)
+                or receipt.get("head") != published or not receipt.get("branch_confirmed_at")
+                or not str(receipt.get("branch", "")).startswith("ticket/")
+                or any(receipt.get(key) for key in ("unchanged", "pull_request", "merge_sha", "merge_left_to_person",
+                                                   "previous", "publishing_head", "closed_unmerged", "changed_by_person"))):
+            raise DeliveryError("The branch-only record does not identify a confirmed publication")
+        return receipt, published
     if receipt.get("unchanged"):
         # No merge was made: what is verified is the integration branch's own
         # commit that the request stands on, as the delivery recorded it.
@@ -152,6 +175,13 @@ def verify(arguments):
     workspace = os.environ.get("TASK_WORKSPACE") or os.getcwd()
     home = os.environ.get("TASK_HOME") or tempfile.gettempdir()
     receipt, merge = ({}, "") if dry else receipt_fields(workspace)
+    if receipt.get("branch_only"):
+        owner, name = support.repository()
+        base = support.setting("DELIVERY_BASE_BRANCH")
+        issue = support.setting("TASK_ISSUE")
+        if (receipt.get("repository") != owner + "/" + name or receipt.get("base_branch") != base
+                or receipt.get("issue") != issue or receipt.get("branch") != "ticket/" + issue):
+            raise DeliveryError("The branch-only record belongs to a different request or verification target")
     named = "%s (%s)" % (receipt.get("pull_request", "(none recorded)"),
                          receipt.get("pull_request_url") or "no address recorded")
     if receipt.get("closed_unmerged"):
@@ -167,6 +197,18 @@ def verify(arguments):
                        + earlier + ["The configured verification commands were not run."]))
         return 0
     if receipt.get("changed_by_person"):
+        if receipt.get("branch_only"):
+            print("Not checked: a person changed or deleted branch %s. This process handed it over without "
+                  "publishing more work. The branch was not read again and the configured verification "
+                  "commands were not run." % receipt.get("branch"))
+            return 0
+        if receipt.get("merge_sha"):
+            print("Not checked: when the delivery last looked, a person had changed branch %s of pull request "
+                  "%s to %s and merged it as commit %s. This process did not verify that merge or run the "
+                  "configured verification commands. The delivery report names local work not included; "
+                  "the pull request and branch were not read again here."
+                  % (receipt.get("branch"), named, receipt.get("branch_head"), receipt["merge_sha"]))
+            return 0
         where = ("The delivery's commit %s is not on that branch, so it is not in the pull request."
                  % receipt["not_pushed"] if receipt.get("not_pushed")
                  else "The delivery's last commit %s is on that branch." % receipt.get("head"))
@@ -180,15 +222,17 @@ def verify(arguments):
               % (receipt.get("branch"), named, receipt.get("branch_head"), where))
         return 0
     unchanged = bool(receipt.get("unchanged"))
+    branch_only = bool(receipt.get("branch_only"))
     pending = bool(receipt.get("merge_left_to_person")) and not receipt.get("merge_sha")
     owner, name = support.repository()
     base = support.setting("DELIVERY_BASE_BRANCH")
     url = support.remote_url(owner, name)
     commands = verify_commands()
     # An unmerged pull request is checked where it is: on its ticket branch.
-    fetched = receipt["branch"] if pending else base
+    fetched = receipt["branch"] if pending or branch_only else base
     try:
-        source = (fetch_branch(home, url, fetched, describe="fetch the pull request's branch " + fetched)
+        source = (fetch_branch(home, url, fetched, describe="fetch the published branch " + fetched) if branch_only else
+                  fetch_branch(home, url, fetched, describe="fetch the pull request's branch " + fetched)
                   if pending else fetch_branch(home, url, fetched))
     except DeliveryError as error:
         # The next role needs this in the report, not only in diagnostics.
@@ -207,6 +251,9 @@ def verify(arguments):
         report.append("No merge was made: the delivery receipt records that no file was changed, so there "
                       "is no merge commit to look for. The request stands on %s as it was at commit %s."
                       % (base, merge))
+    elif branch_only:
+        report.append("The delivery published only branch %s at commit %s. No pull request or merge is recorded; "
+                      "environment deployment is not checked." % (fetched, merge))
     elif pending:
         report.append("This delivery did not merge pull request %s (%s); the merge was left to a person, and "
                       "whether they merged it since is not looked at here. What is verified is that pull "
@@ -220,13 +267,16 @@ def verify(arguments):
     if unchanged:
         what = "commit the request stands on"
         absent = "the commit the request stands on is not part of the integration branch"
+    elif branch_only:
+        what = "published branch commit"
+        absent = "the published branch no longer has the recorded head"
     elif pending:
         what = "commit the delivery pushed"
         absent = "the commit the delivery pushed is not part of %s" % fetched
     else:
         what = "merge commit"
         absent = "the delivered merge is not part of the integration branch"
-    contained = dry or contains_merge(source, merge)
+    contained = (tip.strip() == merge) if branch_only else dry or contains_merge(source, merge)
     if not dry:
         report.append("The %s is %scontained in %s." % (what, "" if contained else "NOT ", fetched))
     failures = 0
@@ -234,7 +284,7 @@ def verify(arguments):
         if unchanged:
             report.append("The configured commands ran on %s as it is now, at commit %s, as after a merge."
                           % (base, tip.strip()))
-        elif pending:
+        elif pending or branch_only:
             # The commit the delivery pushed, not whatever the branch holds by
             # now: that is what a person was asked to merge.
             support.run(support.git("-C", str(source), "checkout", "-q", "--detach", merge))

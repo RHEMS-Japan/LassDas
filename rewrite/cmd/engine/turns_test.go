@@ -94,7 +94,7 @@ func TestTheStartIsAnnouncedOnlyToARequestThatWaitedForASlot(t *testing.T) {
 	// Observe later ticks after the launch as well: the start must not be
 	// announced a second time while this same child remains running.
 	afterStart := readCount(waiting)
-	waitFor(t, func() bool { return readCount(waiting) >= afterStart+2 })
+	waitFor(t, func() bool { return readCount(waiting) >= afterStart+5 })
 	finish()
 	mu.Lock()
 	defer mu.Unlock()

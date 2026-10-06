@@ -94,6 +94,11 @@ def command(args, environment):
         create_path(workspace, relative)
         writable.append(workspace / relative)
     runtimes = [absolute(value) for value in args.runtime]
+    history = absolute(environment["TASK_HISTORY"]) if environment.get("TASK_HISTORY") else None
+    if history is not None:
+        for path in [workspace, home, *runtimes]:
+            if history == path or history.is_relative_to(path) or path.is_relative_to(history):
+                raise ValueError("Request history must be a separate read-only file, not inside another mount")
     for path in runtimes:
         if any(path == grant or path.is_relative_to(grant) or grant.is_relative_to(path)
                for grant in (workspace, home)):
@@ -149,6 +154,14 @@ def command(args, environment):
             if metadata.is_dir() and not metadata.is_symlink() and metadata not in writable:
                 result += mount(metadata, directory=True)
         result += mount(home, read_only=False, directory=True, create=True)
+        if history is not None:
+            descriptor = open_path(history)
+            descriptors.append(descriptor)
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("Request history must be a regular file")
+            # Only the file is visible. Its empty destination parents do not
+            # expose the controller's directory or neighboring requests.
+            result += ["--ro-bind-fd", str(descriptor), str(history)]
         result += ["--chdir", str(workspace), "--", *program]
         child_environment = dict(environment)
         child_environment.update(HOME=str(home), HERMES_HOME=str(home), TMPDIR="/tmp")

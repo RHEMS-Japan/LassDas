@@ -1,13 +1,14 @@
-# Role-chain experiment
+# Role-chain engine
 
 Start with [the handoff and startup guide](START.md) and the complete
 [editable operator example](examples/operator.json). Both ship in the local
 bundle. The example's intake scope is intentionally unset; it does not activate
 an existing project or provision delivery/network permissions.
 
-This is a standalone, undeployed prototype, not the production entry point.
-It does not import the previous worker or runner. It is not a claim that an
-arbitrary request will finish unattended or reach a live delivery target.
+This is the current engine and the only runtime built from this source tree.
+It is a standalone Go module. This does not claim that an arbitrary request
+will finish unattended or reach a live delivery target; each installation
+must verify its configured workflow and delivery path.
 
 The original request and ordinary prose reports go to a routing model. The
 router invokes a configured role; the role runs an existing agent harness and
@@ -18,9 +19,9 @@ working role's answer passes a certificate check.
 
 ## Current executable
 
-A local build bundle and a Linux role launcher are now available. See
-[runtime setup and remaining prerequisites](RUNTIME.md). These do not activate
-intake or change the existing production entry point.
+A local build bundle and a Linux role launcher are available. See
+[runtime setup and remaining prerequisites](RUNTIME.md). Building a bundle
+does not activate intake or change an existing installation.
 
 From this directory:
 
@@ -311,13 +312,15 @@ before anyone has read it.
 
 A watch, and so the check, also refuses a configuration that still holds one
 of the shipped examples' placeholders: a URL whose host is under
-`example.invalid`, which cannot exist, or the paragraph the examples'
-`instructions` open with. It names the first one by its place, for example
+`example.invalid`, which cannot exist, a `REPLACE_WITH_` component of
+`github.repository`, or the paragraph the examples' `instructions` open with.
+It also refuses a token prefix (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
+or `github_pat_`) in `github.key_env`: that field names an environment
+variable, not the credential value. It names the first problem by its place, for example
 `roles[0].processes[0].env.TASK_REPOSITORY still holds the example's
 placeholder host under example.invalid; a watch needs your own value there`.
-Only the host of a URL is looked at, so an author's address under that name or
-a sentence that mentions it is yours to write. A GitHub repository component
-still beginning with `REPLACE_WITH_` is also refused. A runtime started on a
+For the URL placeholder check, only the host is looked at, so an author's address under that name or
+a sentence that mentions it is yours to write. A runtime started on a
 configuration with such a host would take up requests and fail each of them
 over and over, launching models every time. The commands an example expects
 the operator to supply are not checked here: a stage whose command is missing
@@ -359,6 +362,18 @@ also be credential/model-selection destinations. The Hermes bridge uses
 `TASK_HOME` instead of a global `HERMES_HOME`. Commands and referenced bridge
 paths must be available from the per-job directory. Repository preparation and
 actual delivery permissions still have to be supplied by the configured roles.
+Each run also supplies `TASK_HISTORY`, pointing to that run's existing
+`history.json`, for both watched and single runs. It is a reserved runtime
+name, not a process `env`, credential destination or `model_env` setting.
+The launcher exposes only that regular file read-only, with its descriptor
+pinned for the launch; it does not expose the run directory, queue or other
+roles' homes. A later atomic checkpoint replacement is seen on the next
+launch. The ordinary prompt still keeps its most recent 60 records after
+repeated-failure collapsing. Native file/terminal tools can read the omitted
+questions, accepted answers and reports through this reference as needed.
+This is the saved answer the runtime accepted, not a later edit fetched from
+the tracker. The reference grants no additional authority and does not mean
+that a model actually read or understood every older record.
 The bridge also seeds the native terminal's existing working-directory setting
 from `TASK_WORKSPACE` unless explicitly supplied. The tested SDK otherwise began
 terminal commands in its private home despite the correct process directory;
@@ -489,10 +504,16 @@ If a stored submission receipt names a comment missing from the next read,
 the run checks again every 10 seconds without relaunching the question role.
 It does not assume no question was posted. Stop instructions still apply.
 
-For a posted question, the run history records that
-it is waiting, and the collector records in `queue/jobs/<id>/question.json` how
-far that issue's comments had gone at the moment of the question. The request
-is then skipped until the issue's creator, or an operator listed in
+For a posted question, the run history records that it is waiting, and the
+collector records the asking role's actual comment ID in
+`queue/jobs/<id>/question.json`. If no submission receipt survived, a nonempty
+engine-account post after the saved launch position supplies that boundary.
+Replies arriving before the next poll are still read; controller notices are
+not answers. This differs from an already-waiting request without a saved
+submission or question position: that existing recovery path records the
+latest comment and waits for a later reply. It cannot reconstruct an earlier
+question's position. New question launches do not enter that path merely
+because no post was made. The request waits until its creator, or an operator in
 `intake.stop_user_ids`, posts a comment with words after that point. A status
 or field change, which the tracker records as a comment without words, is not
 an answer; the collector makes such changes itself while it waits. That
@@ -611,9 +632,11 @@ Neither an attribute nor the version a change replaces decides it, though
 either makes Git take a file as binary: text in Shift_JIS is refused under a
 `binary` or `-diff` attribute and in place of a file that held a NUL. Those
 first 8000 bytes are read only for a file the change would otherwise be
-refused for. Where such a name
-or text is printed or recorded, each byte that is not UTF-8 shows as a
-replacement character (U+FFFD). Two limits follow from looking at bytes. An
+refused for. Individual path names in refusals and checks preserve bytes that
+are not UTF-8 as byte escapes, so different names remain distinguishable.
+This includes unresolved conflict markers, merge conflicts and paths changed
+by the integration branch. Raw diagnostic text still uses replacement
+characters (U+FFFD). Two limits follow from looking at bytes. An
 ASCII entry can be found where none was written: the second byte of a
 Shift_JIS character can be an ASCII letter, so `ツode` (bytes 83 63 6F 64 65)
 holds `code`, and such a change is refused although it carries no forbidden
@@ -689,7 +712,7 @@ after it:
   number of them in all, whatever it is. A later delivery does not read the
   pull request or its branch again: it says what was read and when, and names
   the changes the workspace holds uncommitted then.
-- merged by a person: reported as merged by someone else, with the commit the
+- merged by a person without changing this delivery's head: reported as merged by someone else, with the commit the
   service reports for their merge (recorded as `merge_sha`: the merge commit,
   the squashed commit, or for a rebase the commit the integration branch was
   moved to); work after that is a further round with a pull request of its
@@ -704,12 +727,20 @@ after it:
   pull request's own head is what tells the two apart. If a round stopped
   after its commit and before its push, the earlier round's record carries the
   stopped round's commit time as `committed_at`.
-- not handled: a person pushes to the pull request's branch and merges it
-  before any delivery has seen their push, and the next delivery has no new
-  work. That delivery takes their merge for an earlier round and pushes its
-  own older commit again; while their branch exists the push is refused, and
-  the delivery ends 1 saying that nothing was merged, which is not so, so the
-  work goes round again.
+- a person changes the branch and merges it before the next delivery observes
+  either action: the delivery reads the head the service says was merged and
+  compares its Git ancestry with the recorded delivery head. A merged head
+  that precedes this process's genuinely new commit is an earlier round,
+  as above. Otherwise the person's changes take over, as with an open branch
+  they changed: nothing is pushed over them and no replacement pull request
+  is opened. The report names their merge, any delivery commit not included,
+  and work still uncommitted locally. Continuing that leftover work needs a
+  new request. The record retains both `changed_by_person` and `merge_sha`;
+  later reports explicitly describe the last observation, not a new read.
+  This also handles a squash and a deleted branch when the server allows the
+  exact merged head to be fetched. If that head cannot be read, the delivery
+  retains the known merge in its error and retries; it does not claim that
+  nothing was merged. Server availability of that exact head still matters.
 - merged by a person, but the service does not report the merge commit yet: the
   delivery ends 1 saying so, and the next one reads it again.
 - closed without a merge: the request ends. The delivery ends 0 with `Pull
@@ -722,6 +753,12 @@ after it:
   says what was read and when, and that the request ended then. A delivery
   interrupted after opening a pull request but before recording it does not
   know that one, and opens another if a person closed it meanwhile.
+
+A server policy that forbids fetching the reported head does not change just
+because delivery repeats. This command has no run-wide retry limit. Bound
+repeated work with the runtime's active-work limit when using a runtime that
+provides it; without a positive limit, these attempts can continue. A pause
+at that limit is not proof that the requested result was delivered.
 
 Switching to a merge method takes a round from the person it was left to only
 once the delivery's own merge request succeeds, and only that merge is
@@ -740,16 +777,20 @@ and says that this delivery merged nothing, without looking at whether a
 person merged since; it ends 0 only when that commit is there and every
 command passed. That is what a person is asked to merge, including the
 catch-up merge, which the verify stage before the review never saw, so keep
-the stage. Once a delivery has recorded a person's merge, the check verifies
-the integration branch as usual. If the person's merge deletes the branch
+the stage. Once a delivery has recorded a person's merge of its unchanged
+head, the check verifies the integration branch as usual. If the person's merge deletes the branch
 before a delivery has recorded it, the check cannot read the branch and the
 run goes round once more, after which the next delivery records the merge;
 anything the work changed in that extra round goes in a further round's pull
 request. After the two endings a person causes, a closed pull request and a
-branch a person changed, the check runs nothing and ends 0, saying what it did
+branch a person changed (including a later merge of that changed head), the
+check runs nothing and ends 0, saying what it did
 and did not look at: nothing of this delivery is left to verify, and failing
 would only send the work round again. An earlier round of the request that was
-merged is named there and not checked. Where the target's own checks on pull
+merged is named there and not checked. A person's changed-and-merged head is
+reported as `Not checked`, with its actual merge commit: neither the merged
+result nor the configured verification commands were checked by this process.
+Where the target's own checks on pull
 requests are what the person merging relies on, the stage can be left out:
 
 ```json
@@ -784,6 +825,12 @@ delivered. That too is the receipt's reading: a pull request a person reopens
 and merges after the run ended is still shown closed unmerged, and the check
 after delivery says what the delivery last read and when.
 
+When the agreed endpoint includes an environment, consult
+`rewrite/ENVIRONMENT-DELIVERY.md` in a source checkout for composing
+operator-owned commands before reporting. That guide is not included in the
+host bundle. A PR, merge, or verifier's zero status alone is not proof of an
+authorized, verified environment deployment.
+
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator
 names, normally from a different publisher than the worker, is handed the
@@ -815,10 +862,57 @@ for as long as it finds a blocking defect, the count so far is printed with
 each verdict, and a run that will not converge is ended by the requester's
 stop comment, not by a limit.
 
+The fixed reviewer reads saved material itself: its model has the verdict
+tool, not a file-reading tool. With `TASK_HISTORY`, it adds the canonical
+original request, the latest report from each process of each model stage,
+the latest reports of its own review role, and the latest accepted requester
+answer with the preceding question-role reports. The latest requester control
+supplement with an empty recorded role is carried separately; it does not
+replace a question answer with a recorded role. Selection uses recorded
+role/process identities and configured stage kinds, not words such as
+"fixed" or "approved". For connected workflows without stage kinds, the
+latest report of each role process is included instead. These selected
+reports are carried separately from the normal 12,000-character
+head and 6,000-character tail of stdin. Older reports remain available to
+native roles; the fixed review does not automatically receive every old
+answer or determine which old answer is semantically relevant.
+
+`REVIEW_MEMORY_CHARACTERS` sets a positive character budget for the selected
+original request and report bodies (default 48000, excluding headings and
+omission notices). Within it, all selected bodies are carried in full. Above
+it, each body receives an equal share; longer bodies retain their beginning
+and end with the omitted character range explicitly named. Short bodies stay
+unchanged. The review still asks the model: size alone neither holds the run
+nor produces NOT REVIEWED. This is not a claim that omitted material was
+reviewed; increase the budget for models able to accept more context. A brief
+omission notice also accompanies the final review result and its saved log.
+
+The checkpoint read has a separate 64 MiB limit. Missing, malformed or larger
+checkpoint files do not prevent a review: the model receives the reason the
+saved context could not be read, the runtime's normal 12,000-character head
+and 6,000-character tail, and the available review log below. The live
+diagnostic and final review result (stdout and `review.md`) name that limitation.
+Missing context is not represented as
+remembered or as a verdict; the model still reviews the current change and
+test output. This cannot restore output the runtime did not retain.
+
+The existing `TASK_HOME/review.md` also supplies its last 12,000 characters,
+with a notice when older text was omitted. Its headings are ordinary prose,
+not a record or resolution format: a quoted heading cannot hide preceding
+findings inside that retained range. A preceding finding longer than this
+range is not guaranteed to reach the model in full. An absent first log is
+normal; an unreadable log is reported as unavailable, not silently treated
+as remembered. The counter is still only a count. Neither the log nor a
+worker's response proves that an objection was resolved: the reviewer must
+judge the current change and tests. Local context-transport tests do not
+establish the model's ability to remember or judge correctly.
+
 No verdict, no pass. The adversarial review is what justifies delivering
 without a person, so by default the command exits 0 only on a verdict that
-does not object and 1 only on one that does; without a verdict it does
-neither. Trouble with the model service (a connection that fails or times
+does not object and 1 on one that does. An empty or oversized report selected
+for the pull request description also returns 1 for the worker to repair,
+explicitly before model review; it is not described as a model's verdict.
+Otherwise, without a verdict it does neither. Trouble with the model service (a connection that fails or times
 out, an HTTP error, a reply without a verdict or with one whose `blocking` is
 not plain), and any unexpected error, is waited out: the models named in
 `REVIEW_MODELS` (newline- or comma-separated, in order of preference; a model
@@ -878,7 +972,9 @@ requests with one model and 300 with three. A longer
 it delivers unreviewed work when no verdict can be obtained: after
 `REVIEW_ATTEMPTS` requests (3), the models in turn, or at once where the review
 would otherwise hold, the command prints `NOT REVIEWED` with the reason and
-exits 0. One rule comes before it: a checkout in which Git lists no changed
+exits 0. Description settings that the worker cannot fix still hold for an
+operator correction and restart. Another rule comes before this opt-in:
+a checkout in which Git lists no changed
 path and no earlier delivery round committed one can end with nothing
 delivered if it is let through, so it is let through only on a verdict, and
 without one the command ends 1 with `NOT REVIEWED` and the reason. The same
@@ -934,17 +1030,28 @@ the run to its first stage. Other stage transitions use the configured order.
 
 The shipped example sends failed verification, review and delivery commands to
 `elicit`, not straight to `work`. Requirements are reconsidered using the actual
-failure and earlier answers. A repair inside the agreed scope continues to work;
-a new choice only the requester can make can go through the existing question
-role, with concrete alternatives. This also covers a worker reporting that the
+failure and earlier answers. A repair or an unknown failure inside the agreed
+scope continues to work: investigate and check the cause, recording choices.
+After handoff, only evidence that a newly required expansion of authority cannot
+be decided by the roles may lead to the existing question role, with concrete
+alternatives. The entrance rule to ask about an uncertain requirement does not
+apply to recovery. This also covers a worker reporting that the
 allowed paths cannot satisfy the request, followed by a failed check. Nothing
 parses that report to decide progression. A process error in a model stage still
 retries that stage; it is not this command-failure path.
 
 A reply does not widen filesystem, delivery or credential permissions. A wider
 choice needs the operator to update the relevant configuration; an in-scope
-alternative can proceed without that. Do not silently reduce the request. Each
-failed command now costs another requirements launch and routing decision, even
+alternative can proceed without that. Do not silently reduce the request.
+Where active-work limits are available, set a positive `intake.max_active_minutes`
+and `intake.max_hard_exits` to bound retries while an operator changes permissions.
+Reaching the limit pauses the request and posts the existing pause notice; it is
+not completion. The question comment and run record identify the configuration
+change needed. After the operator resolves it, an authorized user can post
+`再開` on its own first line to grant another interval with the same saved cap.
+A requester reply alone never updates permissions. Without a positive
+active-work limit, this recovery path has no bound on repeated attempts.
+Each failed command now costs another requirements launch and routing decision, even
 for a simple repair. Existing configurations retain their selected `on_failure`
 targets until the operator edits them. `confirm_report` still returns to `report`.
 
@@ -980,6 +1087,70 @@ the record, so the input grows with every stage and every repair cycle, and a
 long repair loop will eventually exceed a model's context. No session sharing
 or summarizing is implemented here on purpose: measure it first. Nothing in
 this mode has run with a live model or a real tracker.
+
+### A pull request description from the run's reports
+
+An operator can give the fixed review and delivery commands the same
+`PR_DESCRIPTION_ROLE`, naming a role that reports before review and runs again
+after a review send-back (`work` in the shipped example), not a process name
+or the later reporting role. Its report explains the change to a person
+reviewing the pull request. Tell that existing role to
+write its findings, implementation explanation, settings and verification
+commands in its final ordinary report. No special headings or model answer
+schema are required. With no role selected, the fixed delivery description
+is unchanged.
+
+This uses the runtime's read-only `TASK_HISTORY` reference, not a document in
+the consumer's repository. Configure this option only with a runtime that
+supplies that reference to both commands. The latest contiguous set of reports
+from the selected role is used, with each process's original words. Requester
+and runtime control messages are not substitutes for that role's report. The
+review receives exactly this selected text alongside the diff. It must check
+the explanation too; its presence is not proof that the change is correct.
+
+The delivery adds the selected text to its ordinary introduction and checks
+the whole description for `DELIVERY_FORBIDDEN_TEXT` and its credential before
+any publication. Give review and delivery the same `PR_DESCRIPTION_ROLE`,
+`PR_DESCRIPTION_MAX_BYTES` and `DELIVERY_MERGE_METHOD` (default `merge`). The
+same `TASK_ISSUE` must reach both; `watch` supplies it from the assigned request.
+`PR_DESCRIPTION_MAX_BYTES` is a
+positive UTF-8 byte limit (default 60000); both commands check the complete
+body, including the shared introduction. An oversized or empty selected report
+sends the work back with its reason (exit 1), rather than holding the review
+without asking a model. When the checkpoint is missing, unreadable, malformed
+or over its local read limit, review continues without the explanation, and
+both the model's input and the delivery result state what could not be read.
+The pull request body states that omission too; the remaining diff and test
+output are still reviewed. An unset `TASK_HISTORY` or `TASK_ISSUE`, an invalid size setting,
+or no recorded report from the selected role asks the operator to fix the
+configuration and restart, even with `REVIEW_UNAVAILABLE=pass`. So does a limit
+too small for the required introduction or the reason an explanation was omitted:
+the worker cannot shorten that fixed text. A recorded but
+empty report still goes back to the worker; the refusal identifies the role,
+and an oversized report also states its actual UTF-8 byte count. This limit is not a
+claim about a hosting service's exact limit. The old repository-document option
+`DELIVERY_PR_BODY_FILE` is removed; there is no compatibility path or migration.
+
+The generated body is retained in the delivery process's
+`TASK_HOME/pull-request-description.md`, outside the checkout. The delivery
+record identifies that location and the commit the description accompanies.
+The explanation itself is never committed into the consumer repository.
+Ordinary run retention still applies to this file; it is not permanent storage.
+
+While an open pull request still contains a body previously submitted by the
+automation, later reviewed work can update it. If the service returns a
+different body, keep it as the person's version and continue the configured
+push and merge. The result says it was retained and where the latest generated
+description is kept. CRLF/CR and LF are compared as the same line endings,
+so line-ending normalization alone is not reported as a person's edit.
+Communication failures remain distinct from different text;
+an unknown write result is not a confirmed update.
+
+There is no atomic comparison-and-update. A person's edit between the last
+read and an update can race with that update. Coordinate direct edits with
+automation rather than treating its saved body as a lock. This option does
+not change ticket comments or establish production delivery. The report role
+must still describe what actually reached the requested destination.
 
 ### A read-only status page
 
@@ -1224,6 +1395,95 @@ while reporting finished. Recorded child PIDs and scoped access disappeared.
 Model answers and the tracker were synthetic; this validates wiring and the
 observed access boundary, not real-model judgment or production isolation.
 
+### Active-work limits and recovery
+
+A failed attempt is not a completed request. The configured workflow decides
+the next work; the watch controller can also enforce an operator's explicit
+active-time limit. One-shot `--request` runs do not acquire an intake limit.
+
+#### Select the limit
+
+Set `intake.max_active_minutes` to a positive integer in the existing operator
+configuration. Omission or zero disables this optional feature. Negative,
+fractional and overflowing values are invalid. Check the complete configuration
+with `--check` before changing a running installation.
+
+A positive cap is saved at acceptance. Configuration changes do not silently
+change an accepted request's cap. Do not delete or edit runtime records to change
+the policy. No migration or backward-format support is provided.
+
+For these time-limited requests, `intake.max_hard_exits` sets the number of
+forced exits that pauses the request (default 3). Omission and zero both select
+3; negative and fractional values are invalid. A value of 1 pauses after the
+first forced exit. This bound is saved with the time cap. It is not a count of
+ordinary failed commands or model requests. Zero does not mean unlimited
+restarts. For example, `"max_active_minutes": 120, "max_hard_exits": 3` allows
+two automatic recoveries before a third forced exit requires attention.
+The shipped example leaves this optional time limit off and does not set a
+hard-exit count alone. Pause notices show measured time in ordinary units
+(for example, `0 秒` or `2 分 0 秒`), as other requester notices do.
+
+Time accumulates while the request runtime is active, across successful stages,
+failures and routing retries. Success does not reset it. Waiting for a slot,
+waiting after a question has returned, waiting after a credit hold has stopped
+the child and controller downtime are excluded. A running command polling a
+service is still active. This is neither CPU time nor a token or billing budget.
+
+#### At the limit
+
+The timer cancels the child independently of tracker calls and storage of its
+final record. The controller waits for the child to finish, records its actual
+elapsed time and returns the slot. The request remains unfinished, retaining its
+workflow position, question, history and workspace. No push, comment or deployment
+that already happened is undone. Cancellation is not a hard real-time guarantee
+for a hung kernel or processes outside the configured supervisor's ownership.
+
+After the pause notice, the issue creator or an account in `intake.stop_user_ids`
+can post a new comment whose first nonblank line is exactly `再開`, with further
+instructions on later lines. This grants another interval with the same saved
+cap, and resets the forced-exit count to zero. The acknowledgment means the resume was recorded, not that work started or
+finished. Slots and credit may still be unavailable. Answer an outstanding
+question separately; repeated resumes do not become answers or grant more time.
+
+To wait, do nothing. Pauses do not expire into success. To abandon the request,
+an authorized user posts a new comment beginning with `停止`. Native stop takes
+priority and uses its separate configured reporting role. Neither a stopped nor
+a delivered request is reopened by `再開`. Recovery never weakens the agreed
+delivery destination or authorizes repeating an external operation blindly.
+
+#### Restart and operator action
+
+Normal shutdown waits for the child and saves elapsed time; restart uses the
+remaining allowance. A forced exit or failed final save can leave an interval
+whose end is unknown. Recovery closes that interval without adding its unknown
+time or downtime, counts one forced exit, and continues using the saved remaining
+allowance. It posts one automatic-recovery notice with the count and saved limit.
+At the forced-exit limit it instead pauses, posts that reason and waits for the
+existing authorized resume. This never marks a request complete.
+
+The status page shows the time cap, confirmed time and forced-exit count/limit
+as ordinary information, not as an attention alert. Completed requests do not
+show those ongoing limits; an open interval is never counted as measured time.
+
+After inspecting prior external effects, use the authorized resume for a readable
+pause. Damaged records need operator inspection and a reviewed repair procedure,
+not invented replacement history. Authorized native stop remains available.
+Rollback to a binary without these limits is not supported or authorized here.
+
+Process/model failures use the configured retry or repair work. Fix an operator
+setting, permission or service when that is the actual cause. Billing and keys
+use the operator's authorized procedure, never a value pasted into a ticket.
+Check both original stopped work and its report before calling the queue idle.
+
+Question waits have no expiry added here. Pauses retain the workspace. Existing
+home-cache cleanup after stop reporting is not permission to lose source data.
+Removing source after an authorized stop requires the separate, explicit
+stopped-workspace retention policy.
+Tests use local children, controlled clocks and synthetic services. Real tracker
+permissions, model judgment, production cancellation and external-operation
+idempotence remain installation checks. Reports, branches, PRs, merges and working
+environments remain different observations.
+
 ### What the requester is told at night
 
 A request filed at eleven and stopped at two by an outage used to say nothing
@@ -1298,7 +1558,9 @@ start immediately followed by a pause. An answer received while it is low
 likewise gets one acknowledgement saying it is waiting. Those receipts replace
 the separate pause comment for that episode, including after a restart. The
 recovery comment is sent when execution starts, not merely when credit returns
-while another request still occupies the slot.
+while another request still occupies the slot. It replaces the ordinary start
+announcement rather than adding a second one. A low-allowance receipt also
+states how many requests are ahead when there are any.
 
 An authorized stop does not wait for the balance: recording it launches no
 model. A request held below the floor is still read for a stop on every tick,
@@ -1316,8 +1578,9 @@ credential value removed.
 **When nothing has completed for a long time.** `intake.stall_notice_minutes`
 is how long a running request may go without a completed step before the
 requester hears about it. Absent means 90 minutes and zero switches it off. The
-window is measured from the last history entry that finished without an error,
-so any successful role output inside it keeps the request quiet. Past the
+window is measured only from records within the current launch, or from the
+launch's start when it has no record yet. Successful output inside that window
+keeps the request quiet. Past the
 window, a request whose steps keep failing is told:
 
 > 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません（直近の失敗: <直近の失敗の1行目>）。
@@ -1330,8 +1593,9 @@ whose work is running, with no failure recorded, is told once nothing has been
 recorded for that long. The time counts only within the current launch: from
 its last record or, when there is none yet, from the moment the launch began,
 so a wait before it (for its turn, for the budget, for a stopped engine) does
-not count; a stop that cut a step short is recorded as a failure and counted
-in the form above. No time limit ends a launch, so this is the requester's
+not count; a stop that cut a step short is recorded as an interruption, not a
+failure. Interruption is read from the runtime's recorded field, not inferred
+from the wording of its diagnostic. No time limit ends a launch, so this is the requester's
 only word about a long one:
 
 > 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません。この間に工程の失敗は記録されていません。
@@ -1342,9 +1606,8 @@ steps did, and from there a launch that is working and one that waits for its
 operator look the same: a step held for a setting only the operator can
 correct has not failed and has not finished. A failure that repeats may need a
 person. A balance may come back by itself or only when someone adds to it. The
-failing form is also said while the engine itself holds the work for the
-budget; the failure it quotes then is the engine's own cancellation of the
-step it stopped, and nothing is being tried. None of the three says that no
+engine does not count its own cancellation during a budget hold as a failure.
+Only failures within the current launch can be quoted. None of the three says that no
 answer is awaited, because a question to the requester may be standing right
 above it. The stall notice repeats at most once per six hours per request. It
 is a notice and nothing else: routing, recovery and the request's goal are
@@ -1750,8 +2013,14 @@ work. There is no filename convention or controller-owned append operation.
 Existing write and delivery permissions still apply. The runtime carries the
 exchange, but the models decide what is reusable, whether it duplicates
 existing knowledge, and whether sensitive material must be left out; this
-is not a guarantee that every answer will be recorded correctly. Long
-histories and the review command's context limits still apply.
+is not a guarantee that every answer will be recorded correctly. The runtime
+places requester comments, unchanged, immediately after the original request,
+before role reports and their diagnostics. These comments are not dropped by
+the ordinary history's 60-record window or repeated in that later section.
+With no requester comments, neither that section nor its heading is added.
+The review command's model context limits still apply; a local process-to-review
+test checks that ordinary diagnostic output does not hide the answer from the
+model request, not that a real model will judge the resulting note correctly.
 
 **The bridge is not a sandbox.** The configured container/launcher must enforce
 filesystem, network and credential access. Separate environment variables alone
@@ -1984,6 +2253,9 @@ Post stdin is sent unchanged as the API's form `content`; there is no success
 template, answer schema or completion mark. The native comment receipt goes to
 stdout. `comment` reads that API id back, and `comments` retrieves all pages
 after the cursor, including a possible inclusive page boundary without duplicates.
+For the scoped GitHub connection, an enumeration releases its saved list when
+it reaches the end. A later read from the last seen comment ID fetches anew,
+so a reply posted after that enumeration is not hidden by the earlier list.
 This follows the [comment API](https://developer.nulab.com/docs/backlog/api/2/add-comment/).
 
 A failed or unreadable submission response is ambiguous: the command reports
@@ -2440,3 +2712,94 @@ prove optimal routing/model selection, or validate live overnight operation.
   is buffered in memory; production resource behavior has not been exercised.
 
 Jev routing is one comparison candidate, not a settled architecture decision.
+
+## Publish only a branch
+
+Use this when the agreed destination is a Git branch, not an open pull
+request, an integration branch or a running environment. A branch push can
+still trigger your existing CI or deployment automation: check those triggers
+and permissions before choosing this option.
+
+In the existing delivery process configuration, append `--branch-only` to
+the `deliver_git.py` command. Keep the operator's repository, base branch,
+allowed paths, forbidden text and credential references. Remove explicit
+`DELIVERY_MERGE_METHOD`; it conflicts with branch-only delivery, including
+merge method `none`. Pull-request explanations are not used in this mode.
+
+For a sandboxed process, keep `linux_role.py`, every existing mount and
+permission argument, the interpreter and the read-only harness path. Append
+the single final argument `--branch-only`; do not replace the whole command
+with an unwrapped Python invocation. Do not change the other processes or
+give model tools delivery keys. No engine-level depth option or model
+response format is required.
+
+The ordinary invocation still opens and merges a pull request.
+`DELIVERY_MERGE_METHOD=none` still opens a pull request and leaves its merge
+to a person. Neither is a substitute for branch-only publication.
+
+## What it does and records
+
+The fixed command applies the existing changed-path, conflict and forbidden
+text/credential checks, commits the permitted work, and catches up from the
+configured base when necessary. It pushes `ticket/<issue>` and reads that
+branch back at the exact committed head. It does not update the base branch
+or call the pull-request REST API. The existing delivery receipt records
+the branch, published commit and confirmation time, with `branch_only: true`;
+it contains no invented PR or merge. This is the fixed command's own receipt,
+not a format requested from any model.
+
+A rerun without new work reads the remote but does not recommit or repush.
+New reviewed work continues the same branch. A saved push attempt is read
+back after a lost reply or interrupted confirmation. If it cannot be
+confirmed, the command returns nonzero and preserves what it knows; earlier
+commits or remote changes are not undone. The configured workflow handles
+that failure through its existing retry or `on_failure` destination.
+
+An already-existing branch without this request's publication record is not
+adopted. Another writer's push, rewrite or deletion is not overwritten or
+recreated. After its own recorded publication, the delivery records that a person
+took over, reports that this attempt changed nothing and exits 0. Later runs
+leave the branch alone and repeat that handoff report. This is not a claim that
+the outstanding request was fulfilled. The command requires both ancestry from its previously published
+head and an explicit Git lease for that head, including an absent-branch
+lease on first creation. The lease closes the read-to-push race; it is not
+permission to rewrite history. Recovery does not automatically restore a
+missing local receipt from a branch name alone.
+
+Do not switch a request with a PR receipt to branch-only, or a recorded
+branch-only publication to PR mode. Use a separately agreed new request for
+such a change of destination. No existing PR is closed or merged by changing
+this setting.
+
+An empty workspace is refused by default. The separate, explicit
+`DELIVERY_ALLOW_UNCHANGED=1` policy can still end with an unchanged receipt
+after reading the actual base. That reports no branch publication and does
+not establish that an unfulfilled request was satisfied.
+
+## Verification and the final report
+
+Keep the existing `verify_merged.py` process after delivery. Despite its
+historical filename, it recognizes a branch-only receipt, fetches that
+branch, requires the exact published head and runs the operator's commands
+on that fetched commit with delivery credentials removed. A changed or
+deleted branch before delivery has recorded a person's takeover, incomplete
+record, different repository/base, unreadable remote or failing verification
+returns nonzero. After that recorded handoff, verification exits 0 with a
+not-checked report and runs no verification command or remote operation. It does not verify the
+model's modified workspace, a PR merge or a deployed environment.
+
+The final report should name the branch and commit and say that no PR was
+opened, nothing was merged and no environment deployment was checked. The
+existing board's generic Delivered column means the configured destination;
+the detail view retains the receipt and verification report. It is not a
+claim that a production environment changed. Model-written reporting still
+requires the configured independent review; byte-transport tests do not
+prove that every model will describe the result correctly.
+
+`--branch-only --dry-run` checks the configuration, paths and Git reachability
+without committing, pushing or contacting the PR API. Like the existing dry
+run it deliberately returns nonzero, never evidence of a completed delivery.
+
+Tests use real local Git repositories and a local API fixture that must
+receive zero requests. Real hosting permissions, branch protection, triggered
+CI, live credentials and deployment behavior remain installation checks.

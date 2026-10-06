@@ -16,8 +16,8 @@ import (
 	"time"
 )
 
-// GitHub is one repository's issues as the engine's tracker. Nothing in the
-// configuration chooses it yet; this is the side that reads.
+// GitHub is one repository's issues as the engine's configured tracker.
+// The engine and scoped role access use the same account and API adapter.
 type GitHub struct {
 	// APIURL is the REST API's base: https://api.github.com when empty, or a
 	// GitHub Enterprise Server's https://HOST/api/v3.
@@ -25,8 +25,8 @@ type GitHub struct {
 	// Repository is owner/name; the issues are this repository's.
 	Repository string `json:"repository"`
 	KeyEnv     string `json:"key_env"`
-	// IntakeLabel narrows the intake to the open issues carrying it. Empty
-	// takes up every open issue.
+	// IntakeLabel narrows intake to open issues carrying it. The engine's
+	// watcher requires an explicit, nonempty label before intake begins.
 	IntakeLabel string `json:"intake_label,omitempty"`
 	// Labels names the label set on an issue at each turn of the work.
 	Labels GitHubLabels `json:"labels"`
@@ -404,28 +404,9 @@ func samePage(address string) string {
 	return strings.ToLower(given.Host) + given.EscapedPath() + "?" + given.Query().Encode()
 }
 
-// githubError is an answer with a status other than the one expected.
-type githubError struct {
-	Status int
-	Body   string
-}
-
-func (e *githubError) Error() string {
-	// The response was redacted before being stored; truncate only its display.
-	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, clip(e.Body, 200))
-}
-
-// clip is text cut to its first limit characters, marked where it was cut.
-func clip(text string, limit int) string {
-	count := 0
-	for index := range text {
-		if count == limit {
-			return text[:index] + "…"
-		}
-		count++
-	}
-	return text
-}
+// Both adapters carry refusals in the common representation. Adapter-local
+// callers may use this name; the scoped server need not know the adapter.
+type githubError = trackerError
 
 // call sends one request with the token in its header, never in its address,
 // follows no redirect, and reads no more of the answer than limit. A moved

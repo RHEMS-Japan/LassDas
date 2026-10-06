@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -256,6 +257,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 			return errors.New("a configured role needs a name and processes")
 		}
 		for _, process := range role.Processes {
+			if process.HistoryEnvironmentConflict() {
+				return errors.New("TASK_HISTORY is reserved for the runtime's request history")
+			}
 			if process.TimeoutMinutes < 0 {
 				return errors.New("a process's timeout_minutes must not be negative")
 			}
@@ -389,7 +393,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		return err
 	}
 	defer store.Close()
-	executor := chain.Processes{Roles: roles, Prepare: prepareAccess}
+	executor := chain.Processes{Roles: roles, Prepare: prepareAccess, HistoryPath: filepath.Join(store.Dir, "history.json")}
 	if cfg.ModelSelection != nil {
 		selection := *cfg.ModelSelection
 		selection.observe = observe

@@ -41,6 +41,11 @@ func (a *IssueAccess) Close() {
 }
 
 func ServeIssue(ctx context.Context, source Upstream, issue string, mayPost bool, options ...func(*IssueScope)) (*IssueAccess, error) {
+	// Some adapters need per-launch state to translate pagination. Never
+	// share an unfinished enumeration with another role's scoped access.
+	if factory, ok := source.(interface{ scopeSource() Upstream }); ok {
+		source = factory.scopeSource()
+	}
 	scope, err := NewIssueScope(source, issue, mayPost, options...)
 	if err != nil {
 		return nil, err

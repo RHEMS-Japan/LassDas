@@ -129,7 +129,7 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 		"card": func(p page, j *job) cardData {
 			return cardData{Lang: p.Lang, ID: j.ID, Key: j.Key, Title: j.Title, Lane: j.Lane, Status: j.Status,
 				Position: j.Position, StageIndex: j.StageIndex, StageCount: j.StageCount, Model: j.Model, Attention: j.Attention, Failure: j.Failure,
-				Elapsed: j.Elapsed, Updated: j.Updated, Requester: j.Requester}
+				Elapsed: j.Elapsed, Updated: j.Updated, Requester: j.Requester, WorkTime: j.WorkTime}
 		},
 	}).Parse(pageTemplates))
 	return s, nil
@@ -280,6 +280,7 @@ type job struct {
 	WorkPause   string
 	PauseStatus string
 	PauseBroken bool
+	WorkTime    string
 	NoRecord    bool
 	StageIndex  int
 	StageCount  int
@@ -405,10 +406,18 @@ func pauseState(dir string, state *chain.State) (reason, status string, broken b
 	}
 	var record struct {
 		Version int `json:"version"`
-		Pauses  []struct {
-			Reason   string    `json:"reason"`
-			At       time.Time `json:"at"`
-			NoticeID int64     `json:"notice_id"`
+		Clock   *struct {
+			MaxMinutes   int           `json:"max_minutes"`
+			Elapsed      time.Duration `json:"elapsed_ns"`
+			Active       *time.Time    `json:"active_since"`
+			MaxHardExits int           `json:"max_hard_exits"`
+			HardExits    int           `json:"hard_exits"`
+		} `json:"clock"`
+		Pauses []struct {
+			Reason   string        `json:"reason"`
+			At       time.Time     `json:"at"`
+			NoticeID int64         `json:"notice_id"`
+			Elapsed  time.Duration `json:"elapsed_ns"`
 			Resume   *struct {
 				Comment      json.RawMessage `json:"comment"`
 				HistoryIndex int             `json:"history_index"`
@@ -420,8 +429,12 @@ func pauseState(dir string, state *chain.State) (reason, status string, broken b
 	if err != nil || json.Unmarshal(raw, &record) != nil || record.Version != 1 {
 		return "", "", true
 	}
+	if c := record.Clock; c != nil && (c.MaxMinutes <= 0 || uint64(c.MaxMinutes) > uint64(time.Duration(1<<63-1)/time.Minute) || c.Elapsed < 0 || (c.Active != nil && c.Active.IsZero()) ||
+		c.MaxHardExits <= 0 || c.HardExits < 0 || c.HardExits > c.MaxHardExits) {
+		return "", "", true
+	}
 	for i, pause := range record.Pauses {
-		if pause.At.IsZero() || pause.NoticeID < 0 || (pause.Reason != "active-limit" && pause.Reason != "unmeasured-active") ||
+		if pause.At.IsZero() || pause.NoticeID < 0 || pause.Elapsed < 0 || (pause.Reason != "active-limit" && pause.Reason != "hard-exit-limit") ||
 			(i+1 < len(record.Pauses) && (pause.Resume == nil || !pause.Resume.Applied)) {
 			return "", "", true
 		}
@@ -482,10 +495,34 @@ func pauseState(dir string, state *chain.State) (reason, status string, broken b
 		return "The resume instruction is retained. Work has not been confirmed as started; an outstanding question still needs a separate answer.", "resume recorded; waiting for the controller to finish releasing the pause", false
 	}
 	reason = "The configured active-work limit was reached. " + pauseResumeHelp
-	if pause.Reason == "unmeasured-active" {
-		reason = "Active time could not be established after an interrupted run; reaching the limit was not confirmed. " + pauseResumeHelp
+	if pause.Reason == "hard-exit-limit" {
+		reason = "The configured forced-exit limit was reached. " + pauseResumeHelp
 	}
 	return reason, "paused; waiting for an authorized resume instruction", false
+}
+
+// The saved total excludes an open interval. The status reader cannot know
+// whether that child still runs, so it never invents elapsed wall-clock time.
+func workTimeState(dir string) string {
+	raw, err := os.ReadFile(filepath.Join(dir, "work-limit.json"))
+	var record struct {
+		Clock *struct {
+			MaxMinutes   int           `json:"max_minutes"`
+			Elapsed      time.Duration `json:"elapsed_ns"`
+			Active       *time.Time    `json:"active_since"`
+			MaxHardExits int           `json:"max_hard_exits"`
+			HardExits    int           `json:"hard_exits"`
+		} `json:"clock"`
+	}
+	if err != nil || json.Unmarshal(raw, &record) != nil || record.Clock == nil {
+		return ""
+	}
+	text := fmt.Sprintf("Saved active-work cap: %d min; measured: %s.", record.Clock.MaxMinutes, record.Clock.Elapsed.Round(time.Second))
+	text += fmt.Sprintf("\nForced exits: %d; saved limit: %d.", record.Clock.HardExits, record.Clock.MaxHardExits)
+	if record.Clock.Active != nil {
+		text += "\nThe open interval is not included in the measured time."
+	}
+	return text
 }
 
 // cssClass turns an outcome's words into one class name.
@@ -559,6 +596,7 @@ type record struct {
 	Instruction string
 	Error       string
 	Runtime     bool
+	Interrupted bool
 	Person      bool
 	Gap         string
 }
@@ -615,6 +653,24 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 	dir := filepath.Join(s.runDir, "jobs", id)
 	j := &job{ID: id}
 	note := func(format string, args ...any) { j.Notes = append(j.Notes, fmt.Sprintf(format, args...)) }
+	var retained map[string][]byte
+	removalNote := workspaceRemovalNote(dir)
+	if removalNote != "" {
+		note("%s", removalNote)
+		raw, err := os.ReadFile(filepath.Join(dir, "workspace-evidence.json"))
+		if err != nil || len(raw) > 64<<20 || json.Unmarshal(raw, &retained) != nil || retained == nil {
+			note("retained workspace evidence could not be read")
+		}
+	}
+	workspaceFile := func(name string) ([]byte, error) {
+		if removalNote != "" {
+			if data, ok := retained[name]; ok {
+				return data, nil
+			}
+			return nil, os.ErrNotExist
+		}
+		return os.ReadFile(filepath.Join(dir, "workspace", name))
+	}
 	touch := func(path string) {
 		if info, err := os.Stat(path); err == nil && info.ModTime().After(j.Updated) {
 			j.Updated = info.ModTime()
@@ -672,7 +728,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 					Model: result.ModelPrefix + result.Model, Started: result.StartedAt, Finished: result.FinishedAt,
 					Duration: humanDuration(result.FinishedAt.Sub(result.StartedAt)), Output: result.Output,
 					Diagnostics: result.Diagnostics, Instruction: result.Instruction, Error: result.Error,
-					Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"}
+					Interrupted: result.Interrupted, Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"}
 				if !previous.IsZero() && result.StartedAt.Sub(previous) >= time.Second {
 					entry.Gap = humanDuration(result.StartedAt.Sub(previous))
 				}
@@ -692,6 +748,9 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 	}
 	j.Stopped, j.Reported, j.StopBroken = stopState(dir)
 	j.WorkPause, j.PauseStatus, j.PauseBroken = pauseState(dir, j.State)
+	if !j.PauseBroken {
+		j.WorkTime = workTimeState(dir)
+	}
 	touch(filepath.Join(dir, "work-limit.json"))
 	if !detail {
 		if raw, err := os.ReadFile(filepath.Join(dir, "notices.json")); err == nil {
@@ -718,7 +777,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 		// A finished request's card says whether anything was delivered,
 		// which only the delivery's receipt records.
 		if j.State != nil && j.State.Done {
-			if raw, err := os.ReadFile(filepath.Join(dir, "workspace", ".git", "ticket-engine", "delivery.json")); err == nil {
+			if raw, err := workspaceFile(".git/ticket-engine/delivery.json"); err == nil {
 				j.Receipt = string(raw)
 			}
 		}
@@ -787,7 +846,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		note("notices.json could not be read: %v", err)
 	}
-	if raw, err := os.ReadFile(filepath.Join(dir, "workspace", "report", "result.md")); err == nil {
+	if raw, err := workspaceFile("report/result.md"); err == nil {
 		j.Report = string(raw)
 	}
 	if names, _ := filepath.Glob(filepath.Join(dir, "homes", "*", "review.md")); len(names) > 0 {
@@ -798,7 +857,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 			}
 		}
 	}
-	if raw, err := os.ReadFile(filepath.Join(dir, "workspace", ".git", "ticket-engine", "delivery.json")); err == nil {
+	if raw, err := workspaceFile(".git/ticket-engine/delivery.json"); err == nil {
 		j.Receipt = string(raw)
 	}
 	if homes, err := os.ReadDir(filepath.Join(dir, "homes")); err == nil {
@@ -963,12 +1022,13 @@ func (j *job) derive(now time.Time) {
 		// pending. The card says which, and names the failure it retries.
 		if state.Recovering {
 			prefix := "retrying after a failure; "
-			if n := len(state.History); n > 0 && strings.HasPrefix(state.History[n-1].Error, "The process stopped while this action was pending") {
+			if n := len(state.History); n > 0 && state.History[n-1].Speaker == "runtime" && state.History[n-1].Interrupted {
 				prefix = "taking up an interrupted step; "
 			} else {
 				// The latest launch is one role's process records behind the
 				// runtime's notes; any of them may be the one that failed.
 				role := ""
+				wasInterrupted := false
 				for i := len(state.History) - 1; i >= 0; i-- {
 					record := state.History[i]
 					if record.Speaker == "runtime" {
@@ -981,9 +1041,13 @@ func (j *job) derive(now time.Time) {
 						break
 					}
 					role = record.Role
-					if record.Error != "" && j.Failure == "" {
+					wasInterrupted = wasInterrupted || record.Interrupted
+					if record.Error != "" && !record.Interrupted && j.Failure == "" {
 						j.Failure = firstLine(record.Error)
 					}
+				}
+				if wasInterrupted && j.Failure == "" {
+					prefix = "taking up an interrupted step; "
 				}
 			}
 			j.Status = prefix + j.Status
@@ -1095,8 +1159,7 @@ func (j *job) derive(now time.Time) {
 			// The runtime's own failure (a router it could not reach) needs a
 			// person; its note that a stopped action is being taken up again
 			// after a restart is the run going on, not a call for attention.
-			if record.Speaker == "runtime" && record.Error != "" && len(j.Live) == 0 &&
-				!strings.HasPrefix(record.Error, "The process stopped while this action was pending") {
+			if record.Speaker == "runtime" && record.Error != "" && !record.Interrupted && len(j.Live) == 0 {
 				j.Lane, j.Attention = "attention", record.Error
 			}
 		}
@@ -1150,6 +1213,9 @@ func (j *job) derive(now time.Time) {
 		if j.Reported {
 			j.Status = "stopped by the requester; report posted"
 		}
+	}
+	if j.PauseBroken || j.Stopped || j.StopBroken || (j.State != nil && j.State.Done) {
+		j.WorkTime = ""
 	}
 	// The trail of stages on the card: passed, current and ahead; a finished
 	// request has passed them all, a waiting one is still at its stage.
@@ -1206,7 +1272,7 @@ func (j *job) derive(now time.Time) {
 				order = append(order, result.Role)
 			}
 			entry.Launches++
-			if result.Error != "" {
+			if result.Error != "" && !result.Interrupted {
 				entry.Failures++
 			}
 			durations[result.Role] += result.FinishedAt.Sub(result.StartedAt)
@@ -1267,7 +1333,31 @@ func gitRead(dir string, args ...string) (string, error) {
 	return out.String(), nil
 }
 
+func workspaceRemovalNote(directory string) string {
+	raw, err := os.ReadFile(filepath.Join(directory, "workspace-removal.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	var record struct {
+		Removing  bool       `json:"removing"`
+		RemovedAt *time.Time `json:"removed_at"`
+	}
+	if err != nil || json.Unmarshal(raw, &record) != nil {
+		return "workspace discard progress could not be read; inspect the saved records"
+	}
+	if record.RemovedAt != nil {
+		return "workspace discarded under the stopped-work retention policy; retained evidence does not restore unpublished work"
+	}
+	if record.Removing {
+		return "workspace discard is incomplete; retained evidence does not restore files already removed"
+	}
+	return ""
+}
+
 func (s *server) readWorkspace(id string) *workspace {
+	if note := workspaceRemovalNote(filepath.Join(s.runDir, "jobs", id)); note != "" {
+		return &workspace{Note: note}
+	}
 	rel := filepath.Join("jobs", id, "workspace")
 	dir := filepath.Join(s.runDir, rel)
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
@@ -1716,6 +1806,7 @@ type cardData struct {
 	Elapsed    string
 	Updated    time.Time
 	Requester  string
+	WorkTime   string
 }
 
 type headData struct {
@@ -1763,7 +1854,7 @@ var japanese = map[string]string{
 	"resume recorded; waiting for the controller to finish releasing the pause":                                                          "再開指示を保存済み。一時停止の解除処理を待っています",
 	"The resume instruction is retained. Work has not been confirmed as started; an outstanding question still needs a separate answer.": "再開指示を保存しています。作業を開始したと確認したわけではありません。回答待ちの質問には別のコメントで回答してください。",
 	"The configured active-work limit was reached. " + pauseResumeHelp:                                                                   "設定された実稼働時間の上限に達しました。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
-	"Active time could not be established after an interrupted run; reaching the limit was not confirmed. " + pauseResumeHelp:            "途中終了した区間の実稼働時間を確定できません。上限に達したと確認したわけではありません。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
+	"The configured forced-exit limit was reached. " + pauseResumeHelp:                                                                   "強制終了が設定の回数上限に達しました。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
 	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
 	"Decision and models": "判断とモデル", "Runtime log (tail)": "本体のログ (末尾)", "(nothing yet)": "(まだ何もない)", "the whole log": "ログ全文",
 	"Rendered": "表示時刻", "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.": "この画面は自動で更新され (工程の実行中は 10 秒ごと、それ以外は 30 秒ごと)、ディスク上の queue をそのまま表示します。読み取り専用。",
@@ -1821,6 +1912,29 @@ func stageName(lang, name string) string {
 
 func translate(lang, text string) string {
 	if lang == "ja" {
+		if strings.Contains(text, "\n") {
+			lines := strings.Split(text, "\n")
+			for i := range lines {
+				lines[i] = translate(lang, lines[i])
+			}
+			return strings.Join(lines, "\n")
+		}
+		if strings.HasPrefix(text, "Saved active-work cap: ") {
+			var minutes int
+			var measured string
+			if _, err := fmt.Sscanf(text, "Saved active-work cap: %d min; measured: %s", &minutes, &measured); err == nil {
+				return fmt.Sprintf("保存された実稼働上限: %d 分。確定済み: %s。", minutes, strings.TrimSuffix(measured, "."))
+			}
+		}
+		if text == "The open interval is not included in the measured time." {
+			return "未終了の区間は、確定済み時間に含まれていません。"
+		}
+		if strings.HasPrefix(text, "Forced exits: ") {
+			var count, limit int
+			if _, err := fmt.Sscanf(text, "Forced exits: %d; saved limit: %d.", &count, &limit); err == nil {
+				return fmt.Sprintf("強制終了: %d 回。保存された上限: %d 回。", count, limit)
+			}
+		}
 		if ja, known := japanese[text]; known {
 			return ja
 		}

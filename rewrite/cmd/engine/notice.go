@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/textclip"
 	"ticket-runner/internal/tracker"
 )
 
@@ -188,12 +189,18 @@ func noticeDue(log noticeLog, kind string, now time.Time) bool {
 		}
 		return kind == pausedNotice
 	}
+	if kind == startedNotice && noticeDue(log, restoredNotice, now) {
+		return false
+	}
 	interval := resumeNoticeInterval
 	if kind == stallNotice {
 		interval = stallNoticeInterval
 	}
 	once := onceNotice(kind)
 	for i := len(log.Notices) - 1; i >= 0; i-- {
+		if kind == startedNotice && log.Notices[i].Kind == restoredNotice {
+			return false
+		}
 		if log.Notices[i].Kind == kind {
 			return !once && now.Sub(log.Notices[i].WrittenAt) >= interval
 		}
@@ -540,7 +547,7 @@ func modelCreditRemaining(ctx context.Context, cfg config) (*float64, error) {
 		return nil, errors.New(redact(err.Error()))
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("model budget endpoint returned HTTP %d: %s", response.StatusCode, limitRunes(redact(string(body)), 200))
+		return nil, fmt.Errorf("model budget endpoint returned HTTP %d: %s", response.StatusCode, textclip.Clip(strings.TrimSpace(redact(string(body))), 200))
 	}
 	var payload struct {
 		Data *struct {
@@ -616,8 +623,10 @@ func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) 
 	for i > 0 {
 		end := i
 		launchFailed := false
+		launchInterrupted := false
 		for i > 0 && history[i-1].Speaker == "runtime" {
-			if history[i-1].Error != "" {
+			launchInterrupted = launchInterrupted || history[i-1].Interrupted
+			if history[i-1].Error != "" && !history[i-1].Interrupted {
 				launchFailed = true
 				if failure == "" {
 					failure = history[i-1].Error
@@ -628,7 +637,8 @@ func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) 
 		processes := 0
 		for role := ""; i > 0 && history[i-1].Speaker != "runtime" && (processes == 0 || (delimited && history[i-1].Role == role)); processes++ {
 			role = history[i-1].Role
-			if history[i-1].Error != "" {
+			launchInterrupted = launchInterrupted || history[i-1].Interrupted
+			if history[i-1].Error != "" && !history[i-1].Interrupted {
 				launchFailed = true
 				if failure == "" {
 					failure = history[i-1].Error
@@ -636,7 +646,7 @@ func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) 
 			}
 			i--
 		}
-		if processes > 0 && !launchFailed {
+		if processes > 0 && !launchFailed && !launchInterrupted {
 			if failure == "" {
 				return 0, "", false
 			}
@@ -672,7 +682,7 @@ func stallWindow(cfg config) time.Duration {
 // routing and ends nothing: the request keeps trying to recover.
 func noteStall(ctx context.Context, cfg config, n notices, directory string, running bool, began time.Time) error {
 	window := stallWindow(cfg)
-	if window <= 0 {
+	if window <= 0 || began.IsZero() {
 		return nil
 	}
 	state, err := savedHistory(directory)
@@ -680,9 +690,22 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string, run
 		return err
 	}
 	now := time.Now().UTC()
+	// The watcher has a new execution window after each restart/relaunch.
+	// Keep the full saved history for the roles, but do not call an old
+	// interruption or failure the latest failure of this new window.
+	current := make([]chain.Result, 0, len(state.History))
+	for _, record := range state.History {
+		if !record.FinishedAt.Before(began) {
+			current = append(current, record)
+		}
+	}
+	state.History = current
 	// Each silence began where it is measured from: a stall at the last
 	// completed step, a quiet launch at its last record or its own start.
 	elapsed, failure, stalled := stalledFor(state, now)
+	if sinceLaunch := now.Sub(began); elapsed > sinceLaunch {
+		elapsed = sinceLaunch
+	}
 	if stalled && elapsed > window {
 		return n.post(ctx, stallNotice, stallNoticeText(int(elapsed.Minutes()), noticeDetail(cfg, failure)), now.Add(-elapsed))
 	}
@@ -700,9 +723,11 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string, run
 
 // noticeDetail renders one failure line for a comment a person will read: the
 // first nonblank line, with every configured credential value removed, cut to
-// 200 characters. Scrubbing happens before the cut so no partial key survives.
+// 200 code points without splitting a grapheme, plus an ellipsis if cut.
+// Scrubbing happens before the cut so no partial key survives.
 // A process that died says only "exit status N" first; its last line, where a
-// harness puts its reason, is added so the comment says why.
+// harness puts its reason, is added so the comment says why. GitHub receives
+// only this detail as inline code, so diagnostic mentions cannot notify users.
 func noticeDetail(cfg config, text string) string {
 	line := firstInstructionLine(text)
 	if strings.HasPrefix(line, "exit status ") || strings.HasPrefix(line, "signal: ") {
@@ -714,7 +739,25 @@ func noticeDetail(cfg config, text string) string {
 		line = strings.ReplaceAll(line, value, "[credential]")
 		line = strings.ReplaceAll(line, url.QueryEscape(value), "[credential]")
 	}
-	return limitRunes(line, 200)
+	line = textclip.Clip(strings.TrimSpace(line), 200)
+	if cfg.GitHub == nil || line == "" {
+		return line
+	}
+	// A delimiter longer than any run inside the detail cannot be closed by
+	// diagnostics. Spaces separate it from leading/trailing backticks; Markdown
+	// removes that padding from the rendered code span. Quote after scrubbing
+	// and truncation so neither operation can cut the closing delimiter away.
+	longest, run := 0, 0
+	for _, ch := range line {
+		if ch == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	delimiter := strings.Repeat("`", longest+1)
+	return delimiter + " " + line + " " + delimiter
 }
 
 // lastInstructionLine is the last nonblank line of a text.

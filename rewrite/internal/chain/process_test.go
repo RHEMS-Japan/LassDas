@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -17,7 +20,7 @@ import (
 
 func TestRoleAndRouterInstructionsAllowConfiguredRecoveryQuestions(t *testing.T) {
 	for _, instructions := range []string{routingInstructions, processPrompt(Role{}, Process{}, Assignment{}, State{})} {
-		for _, phrase := range []string{"only when the workflow offers that role", "failed check may return to requirements", "concrete alternatives", "no answer itself widens those permissions"} {
+		for _, phrase := range []string{"only when the workflow offers that role", "failed check may return to requirements", "concrete alternatives", "no answer itself widens those permissions", "newly required expansion of authority", "unknown cause", "initial elicitation only"} {
 			if !strings.Contains(instructions, phrase) {
 				t.Errorf("recovery guidance omits %q", phrase)
 			}
@@ -133,6 +136,99 @@ func TestProcessGetsOriginalAndAssignmentWithoutShellInterpolation(t *testing.T)
 	if strings.Contains(result.Output, "diagnostic only") || result.Diagnostics != "diagnostic only" {
 		t.Fatal("diagnostic output was mixed with the report")
 	}
+	if strings.Contains(result.Output, "Requester comments (original words;") {
+		t.Fatal("a run without requester comments received an empty comments section")
+	}
+}
+
+// Exercise the runtime's actual prompt and the shipped review command. The
+// local model returns a scripted verdict; this checks transport, not judgment.
+func TestRequesterAnswersReachReviewModelBeyondProcessDiagnostics(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := filepath.Abs("../../harnesses/adversarial_review.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "decision.txt")
+	if err := os.WriteFile(file, []byte("Existing decision.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitEnv := []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_SYSTEM=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0"}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "decision.txt"},
+		{"-c", "user.name=Fixture", "-c", "user.email=fixture", "commit", "-qm", "initial"}} {
+		command := exec.Command("git", args...)
+		command.Dir, command.Env = workspace, gitEnv
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("fixture git: %s %v", output, err)
+		}
+	}
+	if err := os.WriteFile(file, []byte("Use dist/.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sent := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			Messages []struct{ Content string }
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || len(input.Messages) != 2 {
+			t.Errorf("review model input: %+v %v", input, err)
+			http.Error(w, "bad fixture request", http.StatusBadRequest)
+			return
+		}
+		select {
+		case sent <- input.Messages[1].Content:
+		default:
+			t.Error("unexpected extra model request")
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"tool_calls":[{"function":{"name":"verdict","arguments":"{\"blocking\":false,\"findings\":\"fixture verdict\"}"}}]}}]}`)
+	}))
+	defer server.Close()
+	t.Setenv("PROMPT_REVIEW_FIXTURE_KEY", "synthetic-prompt-review-key")
+	process := Process{Name: "reviewer", Command: []string{python, "-B", script}, Directory: workspace, Timeout: 15 * time.Second,
+		Secrets: map[string]string{"REVIEW_API_KEY": "PROMPT_REVIEW_FIXTURE_KEY"},
+		Env: map[string]string{"TASK_WORKSPACE": workspace, "TASK_HOME": t.TempDir(),
+			"REVIEW_MODEL_URL": server.URL, "REVIEW_MODEL": "fixture/reviewer", "REVIEW_TEST_COMMANDS": "",
+			"GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_SYSTEM": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1"}}
+	const answer = "Use release/. Keep exactly three entries."
+	state := State{Request: "Use the requester's chosen destination and retain it with the implementation.", History: []Result{
+		{Role: "elicit", Speaker: "planner", Output: strings.Repeat("requirements ", 250), Diagnostics: strings.Repeat("progress ", 800)},
+		{Role: "ask", Speaker: "questioner", Output: strings.Repeat("context ", 300) + "Which destination?", Diagnostics: strings.Repeat("progress ", 800)},
+		{Role: "ask", Speaker: "requester", Output: answer},
+		{Role: "work", Speaker: "builder", Output: strings.Repeat("work report ", 650), Diagnostics: strings.Repeat("progress ", 800)},
+		{Role: "verify", Speaker: "check", Output: strings.Repeat("checks ", 350), Diagnostics: strings.Repeat("progress ", 800)},
+	}}
+	for _, older := range []int{0, 65} {
+		t.Run(fmt.Sprint(older), func(t *testing.T) {
+			current := state
+			current.History = append([]Result(nil), state.History...)
+			for i := 0; i < older; i++ {
+				current.History = append(current.History, Result{Role: "verify", Speaker: "check", Output: strings.Repeat("later check ", 150)})
+			}
+			role, assignment := Role{Name: "review"}, Assignment{Role: "review"}
+			prompt := processPrompt(role, process, assignment, current)
+			if len(prompt) < 30000 {
+				t.Fatal("fixture does not exercise a long runtime prompt")
+			}
+			result := process.run(context.Background(), role, assignment, current)
+			if result.Error != "" || !strings.Contains(result.Output, "PASSED") {
+				t.Fatalf("review command did not complete: %+v", result)
+			}
+			select {
+			case input := <-sent:
+				if !strings.Contains(input, answer) || !strings.Contains(input, "Use dist/.") {
+					t.Fatalf("review model lost the answer or the contradicting diff: answer=%t diff=%t prompt_bytes=%d", strings.Contains(input, answer), strings.Contains(input, "Use dist/."), len(prompt))
+				}
+				t.Logf("prompt_bytes=%d requester_position=%d later_records=%d answer_in_model=true contradictory_diff_in_model=true", len(prompt), strings.Index(prompt, answer), older)
+			default:
+				t.Fatal("no actual model request was captured")
+			}
+		})
+	}
 }
 
 func TestSuccessfulProcessDiagnosticsReachNextRoleWithoutBecomingAVerdict(t *testing.T) {
@@ -230,7 +326,7 @@ func TestProcessTimeoutReturnsAnObservationAndStopIsPrompt(t *testing.T) {
 	process := Process{Name: "worker", Command: []string{"/bin/sh", "-c", "sleep 60"}, Timeout: 30 * time.Millisecond}
 	started := time.Now()
 	result := process.run(context.Background(), Role{Name: "implement"}, Assignment{Role: "implement"}, State{Request: "original"})
-	if !strings.Contains(result.Error, "deadline exceeded") || result.FinishedAt.IsZero() {
+	if !strings.Contains(result.Error, "deadline exceeded") || result.FinishedAt.IsZero() || result.Interrupted {
 		t.Fatalf("result=%#v", result)
 	}
 	if time.Since(started) > time.Second {
@@ -260,6 +356,62 @@ func TestProcessCancellationLetsHarnessCleanUpBeforeReturning(t *testing.T) {
 	}
 	if got.Output != "partial work" || !strings.Contains(got.Error, "context canceled") {
 		t.Fatalf("cancellation erased partial work or looked successful: %#v", got)
+	}
+	encoded, err := json.Marshal(got)
+	var fields map[string]any
+	if err != nil || json.Unmarshal(encoded, &fields) != nil || fields["interrupted"] != true {
+		t.Fatalf("controller cancellation was not distinguished from process failure: %s %v", encoded, err)
+	}
+}
+
+func TestControllerInterruptionDuringSelectionAndPreparationIsRecorded(t *testing.T) {
+	for _, phase := range []string{"selection", "preparation"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			process := Process{Name: "worker", Command: []string{"/bin/sh", "-c", "exit 7"}}
+			p := Processes{}
+			if phase == "selection" {
+				process.ModelEnv = "MODEL"
+				p.SelectModel = func(context.Context, Role, Process, State, []string) (string, error) {
+					cancel()
+					return "", ctx.Err()
+				}
+			} else {
+				p.Prepare = func(context.Context, Process) (Process, func(), error) {
+					cancel()
+					return process, nil, ctx.Err()
+				}
+			}
+			p.Roles = map[string]Role{"work": {Name: "work", Processes: []Process{process}}}
+			results := p.Execute(ctx, Assignment{Role: "work"}, State{})
+			if len(results) != 1 || !results[0].Interrupted || !strings.Contains(results[0].Error, "context canceled") {
+				t.Fatalf("lost interruption reason: %+v", results)
+			}
+		})
+	}
+	result := (Process{Name: "worker", Command: []string{"/bin/sh", "-c", "exit 7"}}).run(context.Background(), Role{Name: "work"}, Assignment{Role: "work"}, State{})
+	if result.Interrupted || result.Error != "exit status 7" {
+		t.Fatalf("a genuine failure was relabelled: %+v", result)
+	}
+}
+
+func TestRestartRetainsAnInterruptedPendingActionWithoutCompletingIt(t *testing.T) {
+	store := &memoryStore{state: State{Request: "original", Pending: &Assignment{Role: "work"}, PendingSince: time.Now().Add(-time.Hour)}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := Chain{Store: store, Router: testRouter(func(ctx context.Context, state State) (Assignment, error) {
+		if len(state.History) != 1 || !state.History[0].Interrupted || !strings.Contains(state.History[0].Error, "may have taken effect") || !state.Recovering {
+			t.Fatalf("restart lost the interruption or its uncertainty: %+v", state)
+		}
+		cancel()
+		return Assignment{}, ctx.Err()
+	}), Executor: testExecutor(func(context.Context, Assignment, State) []Result {
+		t.Fatal("cancelled router started work")
+		return nil
+	})}
+	if err := c.Run(ctx); !errors.Is(err, context.Canceled) || store.state.Done {
+		t.Fatalf("restart was completion: %v %+v", err, store.state)
 	}
 }
 
@@ -353,6 +505,81 @@ func TestAProcessIsToldWhichOfItsVariablesAreCredentials(t *testing.T) {
 	plain := Process{Name: "p", Command: []string{"/bin/sh", "-c", "printf %s \"${TASK_CREDENTIAL_NAMES-unset}\""}}
 	if result := plain.run(context.Background(), Role{Name: "r"}, Assignment{Role: "r"}, State{}); result.Output != "unset" {
 		t.Fatalf("a process without credentials got %q", result.Output)
+	}
+}
+
+func TestHistoryBindingCannotBeReplacedBeforeSelectionOrAfterPreparation(t *testing.T) {
+	for _, source := range []string{"env", "secrets", "credentials", "model"} {
+		for _, prepared := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/prepared=%t", source, prepared), func(t *testing.T) {
+				inject := func(p Process) Process {
+					switch source {
+					case "env":
+						p.Env = map[string]string{"TASK_HISTORY": "private-not-to-be-quoted"}
+					case "secrets":
+						p.Secrets = map[string]string{"TASK_HISTORY": "private-not-to-be-quoted"}
+					case "credentials":
+						p.Credentials = map[string]string{"TASK_HISTORY": "private-not-to-be-quoted"}
+					case "model":
+						p.ModelEnv = "TASK_HISTORY"
+					}
+					return p
+				}
+				process := Process{Name: "p", ModelEnv: "SELECTED_MODEL", Command: []string{"/bin/sh", "-c", "printf child-ran"}}
+				if !prepared {
+					process = inject(process)
+				}
+				selected, released := 0, 0
+				executor := Processes{Roles: map[string]Role{"r": {Name: "r", Processes: []Process{process}}}, HistoryPath: "/trusted/history.json",
+					SelectModel: func(context.Context, Role, Process, State, []string) (string, error) {
+						selected++
+						return "chosen", nil
+					},
+					Prepare: func(_ context.Context, p Process) (Process, func(), error) {
+						if prepared {
+							p = inject(p)
+						}
+						return p, func() { released++ }, nil
+					}}
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				results := executor.Execute(ctx, Assignment{Role: "r"}, State{})
+				if len(results) != 1 || !strings.Contains(results[0].Error, "TASK_HISTORY is reserved") || results[0].Output != "" || strings.Contains(results[0].Error, "private-not-to-be-quoted") {
+					t.Fatalf("collision reached child: %#v", results)
+				}
+				want := 0
+				if prepared {
+					want = 1
+				}
+				if selected != want || released != want {
+					t.Fatalf("selected=%d released=%d want=%d", selected, released, want)
+				}
+			})
+		}
+	}
+}
+
+func TestHistoryBindingIsRuntimeOnlyAndTheParentEnvironmentIsNotInherited(t *testing.T) {
+	t.Setenv("TASK_HISTORY", "a-parent-history-path")
+	process := Process{Name: "p", Command: []string{"/bin/sh", "-c", `printf '%s' "${TASK_HISTORY-unset}"`}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if result := process.run(ctx, Role{Name: "r"}, Assignment{}, State{}); result.Error != "" || result.Output != "unset" {
+		t.Fatalf("parent value inherited: %#v", result)
+	}
+	process.historyPath = "/runtime/history.json"
+	data, err := json.Marshal(process)
+	if err != nil || strings.Contains(string(data), "history") {
+		t.Fatalf("runtime reference entered configuration: %s %v", data, err)
+	}
+	if result := process.run(ctx, Role{Name: "r"}, Assignment{}, State{}); result.Error != "" || result.Output != process.historyPath {
+		t.Fatalf("runtime path not handed over: %#v", result)
+	}
+	if !strings.Contains(processPrompt(Role{}, process, Assignment{}, State{}), process.historyPath) {
+		t.Fatal("usable reference missing")
+	}
+	if strings.Contains(processPrompt(Role{}, Process{}, Assignment{}, State{}), "TASK_HISTORY") {
+		t.Fatal("unbound process advertises an unavailable file")
 	}
 }
 

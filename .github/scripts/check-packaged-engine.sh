@@ -21,8 +21,7 @@ if [ "$#" -ne 1 ]; then
 fi
 expected="watch requires an explicit intake.project_id"
 status=0
-output="$(docker run --rm --network none --platform linux/arm64 \
-  --entrypoint /opt/ticket-automation/bundle/bin/ticket-engine "$1" \
+output="$(docker run --rm --network none --platform linux/arm64 "$1" \
   --config /opt/ticket-automation/bundle/examples/operator.json --check 2>&1)" || status=$?
 printf 'exit status %s\n%s\n' "$status" "$output"
 if [ "$status" -ne 1 ] || ! grep -qxF "$expected" <<<"$output"; then

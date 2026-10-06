@@ -41,8 +41,8 @@ func validateQuestionRole(cfg config) error {
 	return errors.New("intake.question_role must name a configured role with a comment-capable process")
 }
 
-// questionBoundary records the asking role's last successfully stored comment.
-// Later controller notices and requester replies must not advance it.
+// questionBoundary records the launch's starting comment and any stored post.
+// Recovery of the same question keeps both positions.
 type questionBoundary struct {
 	After  *int64 `json:"after"`
 	Before int64  `json:"before,omitempty"`
@@ -293,21 +293,26 @@ func latestComment(source tracker.Tracker, rows []json.RawMessage, issue sourceI
 
 func recordQuestion(source tracker.Tracker, directory string, rows []json.RawMessage, issue sourceIssue) error {
 	data, err := os.ReadFile(filepath.Join(directory, "run", "question-post.json"))
-	if errors.Is(err, os.ErrNotExist) {
-		// Older runs did not retain POST receipts. Their existing conservative
-		// boundary cannot be reconstructed from arbitrary comment prose.
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	var boundary questionBoundary
+	if err == nil && json.Unmarshal(data, &boundary) != nil {
+		return errors.New("the question's comment receipt is unreadable")
+	}
+	if boundary.After == nil {
 		highest, readErr := latestComment(source, rows, issue)
 		if readErr != nil {
 			return readErr
 		}
-		data, err = json.Marshal(questionBoundary{After: &highest})
+		boundary.After = &highest
 	}
+	if *boundary.After < 0 {
+		return errors.New("the question's comment receipt is unreadable")
+	}
+	data, err = json.Marshal(boundary)
 	if err != nil {
 		return err
-	}
-	var boundary questionBoundary
-	if err := json.Unmarshal(data, &boundary); err != nil || boundary.After == nil || *boundary.After < 0 {
-		return errors.New("the question's comment receipt is unavailable; keeping the request waiting without discarding later replies")
 	}
 	return writeRuntimeFile(filepath.Join(directory, "question.json"), data)
 }

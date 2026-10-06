@@ -35,5 +35,5 @@ tests that pin the behaviour and, where it applies, the live observation. -->
 
 ## 関連 / Related
 
-<!-- Design documents under docs/, other issues, the regression row in
-docs/RUNTIME_POD.md this will add. -->
+<!-- Related design, runtime documentation or regression test in rewrite/,
+and any prerequisite issues. -->

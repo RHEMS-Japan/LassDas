@@ -23,15 +23,20 @@ import (
 // Intake settings are operator scope, not a format required of requesters.
 // The explicit timestamp prevents quietly starting every historical issue.
 type intakeConfig struct {
-	ProjectID           int64   `json:"project_id,omitempty"`
-	CreatedSince        string  `json:"created_since"`
-	PollIntervalSeconds int     `json:"poll_interval_seconds,omitempty"`
-	MaxRunning          int     `json:"max_running,omitempty"`
-	StopUserIDs         []int64 `json:"stop_user_ids,omitempty"`
-	StopReportRole      string  `json:"stop_report_role,omitempty"`
-	QuestionRole        string  `json:"question_role,omitempty"`
-	QuestionNoPostLimit *int    `json:"question_no_post_limit,omitempty"`
-	IssueIDs            []int64 `json:"issue_ids,omitempty"`
+	ProjectID                      int64   `json:"project_id,omitempty"`
+	CreatedSince                   string  `json:"created_since"`
+	PollIntervalSeconds            int     `json:"poll_interval_seconds,omitempty"`
+	MaxRunning                     int     `json:"max_running,omitempty"`
+	StopUserIDs                    []int64 `json:"stop_user_ids,omitempty"`
+	StopReportRole                 string  `json:"stop_report_role,omitempty"`
+	StoppedWorkspaceRetentionHours int     `json:"stopped_workspace_retention_hours,omitempty"`
+	QuestionRole                   string  `json:"question_role,omitempty"`
+	QuestionNoPostLimit            *int    `json:"question_no_post_limit,omitempty"`
+	IssueIDs                       []int64 `json:"issue_ids,omitempty"`
+	// MaxActiveMinutes limits each delegated interval of newly accepted work.
+	// Zero leaves it unlimited. Stage outcomes never reset the saved clock.
+	MaxActiveMinutes int `json:"max_active_minutes,omitempty"`
+	MaxHardExits     int `json:"max_hard_exits,omitempty"`
 	// CategoryIDs narrows discovery to issues that carry one of these tracker
 	// categories, so a project shared with people's own tickets hands the
 	// runtime only what a requester marked for it. A category added to an
@@ -92,9 +97,6 @@ func (w *serialLog) Write(p []byte) (int, error) {
 // directory, the starting time, the seconds between scans and the slots.
 func watchSettings(cfg *config, root string) (string, time.Time, int, int, error) {
 	fail := func(err error) (string, time.Time, int, int, error) { return "", time.Time{}, 0, 0, err }
-	if err := validateGitHubConfig(*cfg, nil); err != nil {
-		return fail(err)
-	}
 	if cfg.GitHub == nil && (cfg.Intake == nil || cfg.Intake.ProjectID <= 0) {
 		return fail(errors.New("watch requires an explicit intake.project_id"))
 	}
@@ -104,11 +106,20 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 	if err := validateStopReporter(*cfg); err != nil {
 		return fail(err)
 	}
+	if hours := cfg.Intake.StoppedWorkspaceRetentionHours; hours < 0 || uint64(hours) > uint64(time.Duration(1<<63-1)/time.Hour) || hours > 0 && cfg.Intake.StopReportRole == "" {
+		return fail(errors.New("stopped workspace retention requires nonnegative hours and a stop-report role"))
+	}
 	if err := validateQuestionRole(*cfg); err != nil {
 		return fail(err)
 	}
 	if err := validateNotices(*cfg); err != nil {
 		return fail(err)
+	}
+	if !validWorkMinutes(cfg.Intake.MaxActiveMinutes) {
+		return fail(errors.New("intake.max_active_minutes must be zero or a positive duration in minutes"))
+	}
+	if cfg.Intake.MaxHardExits < 0 {
+		return fail(errors.New("intake.max_hard_exits must be zero or positive; zero selects the default of 3"))
 	}
 	if err := prepareStages(cfg); err != nil {
 		return fail(err)
@@ -146,7 +157,8 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 	if err != nil {
 		return fail(err)
 	}
-	// Validate binding before discovering/accepting any work.
+	// Validate binding (including tracker configuration through roleAccess)
+	// before discovering/accepting any work. No queue or request exists yet.
 	if _, err := bindRequestConfig(*cfg, filepath.Join(root, "jobs", "0"), "example"); err != nil {
 		return fail(err)
 	}
@@ -301,6 +313,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	// A finished request whose caches could not be removed is retried each
 	// tick and said once per reason, not once per tick.
 	trimTrouble := map[string]string{}
+	removalTrouble := map[string]string{}
 	trim := func(name, directory string, say func(string)) {
 		if err := trimFinished(directory); err != nil {
 			reason := err.Error()
@@ -400,8 +413,19 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				}
 				// The reporter may still need its home to resume. Only after
 				// it finishes (or with none configured) are its caches unused.
-				// Keep the workspace, receipts and both histories unchanged.
+				// Cache cleanup keeps source and evidence; only the separately
+				// opted-in stopped-workspace policy below may discard source.
 				trim(entry.Name(), directory, say)
+				removed, err := reclaimStoppedWorkspace(cfg, issue, directory, time.Now())
+				if err != nil {
+					if removalTrouble[entry.Name()] != err.Error() {
+						say("stopped workspace retained or removal incomplete; will retry: " + err.Error())
+						removalTrouble[entry.Name()] = err.Error()
+					}
+				} else if removed {
+					say("stopped workspace discarded under the configured retention policy; evidence retained")
+					delete(removalTrouble, entry.Name())
+				}
 				continue
 			}
 			request, err := source.RequestText(raw)
@@ -613,6 +637,10 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 				}
 				if err := os.MkdirAll(directory, 0700); err != nil {
 					observe("creating request directory: " + err.Error())
+					continue
+				}
+				if err := acceptWorkLimit(directory, cfg.Intake.MaxActiveMinutes, cfg.Intake.MaxHardExits); err != nil {
+					observe("saving accepted work limit: " + err.Error())
 					continue
 				}
 				if err := writeRuntimeFile(path, raw); err != nil {

@@ -65,8 +65,9 @@ grant of the permissions each path requires.
 
 ## How a request moves
 
-The shipped ordered configuration, `rewrite/examples/operator-stages.json`,
-runs every request through these stages. A stage that runs a command is
+The shipped ordered configurations, `rewrite/examples/operator-stages.json`
+for Backlog and `rewrite/examples/operator-github-stages.json` for GitHub Issues,
+run every request through the same stages. A stage that runs a command is
 finished only when the command exits 0; a stage that runs a model is finished
 when its model process returns without an error. Two decisions are a model's:
 after requirements, whether to ask the requester (initially or after a failure),
@@ -93,11 +94,22 @@ round, with a model launch each time, until someone fixes the cause or the
 requester posts a stop ([section 9](#9-stopping-a-request)).
 
 In this example, verification, review and delivery failures return to `elicit`.
-It reads the actual failure: an ordinary repair goes to `work`, while a newly
-discovered requester-only scope choice goes through `ask_requester` with concrete
-alternatives. A reply never changes filesystem, delivery or credential permissions.
+It reads the actual failure: an ordinary repair or an unknown cause goes to
+`work` to investigate and check. After handoff, only a newly required expansion
+of authority that the requester alone can approve goes through `ask_requester`
+with concrete alternatives. The entrance rule to ask when requirements remain
+uncertain does not apply to recovery. A reply never changes filesystem, delivery
+or credential permissions.
 If a chosen alternative needs wider access, the operator must update that setting;
 otherwise the roles must use an agreed alternative inside the existing scope.
+When the runtime supports active-work limits, set positive
+`intake.max_active_minutes` and `intake.max_hard_exits` to bound attempts while
+operator changes are pending. The existing limit notice reports a pause, not
+completion; read the required permission change in the question and run record,
+fix the configuration, then have an authorized user post `再開` on its own
+first line. This grants another interval with the same saved cap; changing the
+configuration does not change an already accepted request's cap. Without a
+positive active-work limit, repeated attempts have no bound.
 Each failure adds a requirements launch and a routing decision, including ordinary
 repairs. A model process that exits with an error still retries its own stage.
 Existing installations need to update their four `on_failure` values and shared
@@ -222,10 +234,9 @@ Item 4 protects GitHub Actions workflow changes only. Other CI systems may run
 configuration taken from a pushed branch with their own credentials. Inspect
 all CI triggers and which branches receive secrets, including ticket branches,
 before granting push access. For example, CircleCI's configuration is not
-protected by a GitHub token lacking Workflows permission. Keep such paths out
-of `DELIVERY_ALLOWED_PATHS` when they must not change, or have the owner isolate
-that CI's credentials and approve the intended access. An instruction to a
-model not to edit a path is not a permission boundary.
+protected by a GitHub token lacking Workflows permission. Have that CI's owner
+isolate its credentials from ticket-branch builds and approve the intended
+access. An instruction to a model not to edit a path is not a permission boundary.
 
 With the shipped configuration, everything goes to OpenRouter and the models
 it serves: the working models, chosen for each launch among the publishers
@@ -401,7 +412,9 @@ script was syntax-checked but not run against Backlog for this guide.
    [Enterprise API guide](https://docs.github.com/en/enterprise-server@3.21/rest/using-the-rest-api/getting-started-with-the-rest-api).
    Do not change only the hostname of the Enterprise example: github.com
    does not use `/api/v3`. Authentication, trust and reachability of your
-   server must be checked separately.
+   server must be checked separately. The shipped egress policy refuses
+   private addresses; check that boundary first if an internal Enterprise
+   server fails the read check.
 
 Only open issues with the intake label and created at or after
 `intake.created_since` are discovered. PRs are excluded. `intake.issue_ids`
@@ -544,14 +557,17 @@ the same lines can conflict when a person merges the second.
 
 ## 4. Writing the operator configuration
 
-`rewrite/examples/operator-stages.json` is complete for the runtime of this
-directory: its delivery and merged check are the image's fixed processes
-under `/opt/ticket-automation/scripts`, its build, tests and report check are
+`rewrite/examples/operator-stages.json` (Backlog) and
+`rewrite/examples/operator-github-stages.json` (GitHub Issues) are complete for
+the runtime of this directory: their delivery and merged check are the image's
+fixed processes under `/opt/ticket-automation/scripts`; their build, tests and report check are
 the operator scripts of section 6, and every checkout comes from the Pod's
 mirror once you name it in place of the example's placeholder URL. Every value
 you must change is one distinct string in it.
 
-Use one of the two copy procedures below. Both keep the ordered stages. The
+Use one of the two copy procedures below. Both examples keep identical ordered
+stages, roles, permissions, question handling and knowledge-writing instructions;
+only the tracker settings differ. Neither unedited example can start intake. The
 separate `rewrite/examples/operator-github.json` ships the model-routed
 workflow, so do not substitute that whole file for the ordered configuration.
 
@@ -592,6 +608,8 @@ Run from the repository root, replacing the arguments below. The first repo
 receives requests; the second receives delivered code. This changes the
 tracker, source path and delivery values but preserves the stages and roles.
 The intake remains closed. `CONFIG` must be a new file outside any repository.
+The repository's setup test executes this conversion and the configuration
+check together; it does not test access to a live server.
 
 ```sh
 CONFIG='<absolute path outside the repository>/operator.json'
@@ -599,7 +617,7 @@ python3 - "$CONFIG" '<intake-owner>/<intake-repository>' '<delivery-owner>/<deli
 import json, sys
 from pathlib import Path
 target, intake_repo, delivery_repo, branch = sys.argv[1:]
-cfg = json.loads(Path('rewrite/examples/operator-stages.json').read_text())
+cfg = json.loads(Path('rewrite/examples/operator-github-stages.json').read_text())
 replacements = [
     ('https://repository.example.invalid/example-owner/example-repository.git',
      '/var/lib/ticket-automation/mirror/' + delivery_repo + '.git'),
@@ -617,16 +635,8 @@ def replace(value):
         return {key: replace(item) for key, item in value.items()}
     return value
 cfg = replace(cfg)
-cfg.pop('backlog')
-cfg['github'] = {
-    'repository': intake_repo, 'key_env': 'TRACKER_API_KEY',
-    'intake_label': 'automation',
-    'labels': {'accepted': 'automation-accepted', 'processing': 'automation-working',
-               'awaiting_requester': 'automation-awaiting-requester',
-               'delivered': 'automation-delivered', 'stopped': 'automation-stopped'},
-}
-for name in ('project_id', 'category_ids', 'category_on_accept', 'statuses'):
-    cfg['intake'].pop(name, None)
+cfg['github']['repository'] = intake_repo
+cfg['github'].pop('api_url')  # github.com uses the default API base.
 cfg['intake']['created_since'] = '2100-01-01T00:00:00Z'
 with Path(target).open('x') as output:
     json.dump(cfg, output, ensure_ascii=False, indent=2)
@@ -713,9 +723,10 @@ The engine reads the configuration strictly and, before it does anything,
 refuses what it can tell is wrong, saying where: a key it does not know, in
 the wrong letter case or written twice; a stage whose kind does not match its
 role; a missing project or start time; the example's paragraph still in
-`instructions`; a URL whose host is still under `example.invalid`; a GitHub
-repository component still beginning with `REPLACE_WITH_`; a recognizable
-token value in `github.key_env`. The latter is never echoed. `--check`
+`instructions`; a URL whose host is still under `example.invalid`; a
+`REPLACE_WITH_` component of `github.repository`; a token prefix
+(`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`) in
+`github.key_env`, which must name an environment variable, not its value. `--check`
 runs those same checks without starting anything, contacting anything or
 creating any file. Run it from the repository's root, on a checkout of the
 commit your image was built from (`engine_sha` in `docs/DISTRIBUTION.json`),
@@ -890,8 +901,9 @@ grep -n '"DELIVERY_MERGE_METHOD"' "$CONFIG"
 
 The `grep` must print one line, ending in `"DELIVERY_MERGE_METHOD": "none"`.
 This applies only to the copy section 4 makes from
-`rewrite/examples/operator-stages.json`: `operator.json` and
-`operator-gateway.json` have no such setting, and for a copy of either the
+`rewrite/examples/operator-stages.json` or `operator-github-stages.json`:
+the connected examples (`operator.json`, `operator-gateway.json` and
+`operator-github.json`) have no such setting, and for a copy of one of them the
 `grep` prints nothing.
 The descriptions of the `deliver` and `verify_merged` roles in your copy state
 both settings, so they need no edit. In this ordered configuration no model is
@@ -989,7 +1001,7 @@ the engine's notice that no stage has completed, after
    the model that gave the verdict.
 2. The requester stops the request (`停止`, [section 9](#9-stopping-a-request)).
 3. You fix the cause (the configuration's ConfigMap or the Secret, section 6)
-   and restart the Pod. The runtime records the stopped review as a failure
+   and restart the Pod. The runtime records the stopped review as an interruption
    and goes on at the review's `on_failure` stage, which is `elicit` here: the
    requirements are reconsidered, then the work and review run again. The requester is told that the
    request carries on after the restart.
@@ -1070,7 +1082,8 @@ First finish the settings and run the engine's `--check` (section 4). Then
 the following read-only GET checks can be run in the prepared runtime. They
 make no inference or tracker writes; the gateway may have its own policy for
 catalogue access. They compare current tool/text models from configured
-publishers with the gateway's **exact prefixed ids**. They do not prove that a
+publishers with the gateway's **exact prefixed ids**, and compare configured
+fallback and reviewer ids with that same current served list. They do not prove that a
 model can actually answer, that the account has credit, or that enough
 independent publishers are available for all your simultaneous roles.
 
@@ -1079,7 +1092,8 @@ kubectl -n "$NS" exec -i "$POD" -c engine -- python3 -B - /etc/ticket-automation
 # setup-gateway-catalogue
 import json, os, sys, urllib.error, urllib.parse, urllib.request
 with open(sys.argv[1]) as source:
-    selection = json.load(source)["model_selection"]
+    config = json.load(source)
+selection = config["model_selection"]
 gateway = selection["gateway"]
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -1119,14 +1133,26 @@ matches = sorted(prefix + row["id"] for row in public
 print(json.dumps({"served": len(served), "tool_text_matches": len(matches), "first_20_matches": matches[:20]}))
 if not matches:
     sys.exit("no current matching models; check the prefix and eligible publishers")
+configured = []
+fallback = selection.get("fallback", {}).get("model")
+if fallback:
+    configured.append(fallback)
+for role in config.get("roles", []):
+    for process in role.get("processes", []):
+        env = process.get("env", {})
+        reviewers = [name.strip() for name in env.get("REVIEW_MODELS", "").replace(",", "\n").splitlines() if name.strip()]
+        configured.extend(reviewers or ([env["REVIEW_MODEL"]] if env.get("REVIEW_MODEL") else []))
+missing = sorted(set(configured) - served)
+if missing:
+    sys.exit("configured fallback or review models are not served: " + ", ".join(missing))
 PY
 ```
 
 Select the fallback chat model and the independent review model from the
 gateway's current list, with their exact prefixed ids. The reviewer must be
 outside `model_selection.authors`; it will therefore **not** be in the
-matching working-model sample above. Confirm the review model's availability
-with the gateway operator as well. Finally, run an explicitly authorized
+matching working-model sample above. The check nevertheless requires the
+configured fallback and reviewer ids to exist in the served list. Finally, run an explicitly authorized
 small request before unattended intake; a successful catalogue check is not
 an end-to-end model test.
 
@@ -1308,6 +1334,129 @@ Each check has an answer you can see. One that cannot be answered is a
 blocker, not something to note and pass. The intake is still closed, so
 nothing here can start a request.
 
+### Inspecting the queue without starting work
+
+From a checkout of this repository, use the source-shipped helper below.
+It needs Python 3 on the workstation and in the selected container, and
+kubectl on the workstation. Keep `idle-check.sh`, `copy-queue.sh` and
+`queue_helper.py` in `operations/` together;
+they are not part of the host bundle. Set `CONTEXT`, `NS`, `POD`, `CONTAINER`
+and the absolute `QUEUE` path to the intended installation first. No context
+or workload is selected implicitly.
+
+```sh
+sh deploy/ticket-engine/operations/idle-check.sh \
+  --context "$CONTEXT" --namespace "$NS" --pod "$POD" \
+  --container "$CONTAINER" --queue "$QUEUE"
+```
+
+The one JSON line contains counts only: `jobs`, `running`, `waiting`,
+`unfinished`, `stopped`, `stop_report_pending`, `unknown`, and `idle`.
+Exit 0 means no pending work was observed in those local records; exit 1
+means recorded work or uncertainty remains; exit 2 means the check could
+not be performed. A nonempty live directory counts as running, even if it
+might be stale. Waiting requests are not idle for this conservative check.
+Unreadable, missing or conflicting histories and linked paths are unknown,
+not completed work; a missing or unreadable accepted issue record is unknown
+too. An unfinished stop report is not idle either. Without
+a stop-report history, a recorded stop is unknown: this helper does not read
+configuration to assume the reporter was disabled. Inspect that case
+separately if no reporter is configured.
+Use the status page's individual job history to investigate nonzero counts;
+this helper does not dump that history.
+
+This is an observation of local bookkeeping, not a process supervisor or
+the engine's completion/stop-authorization decision. It does not contact the
+tracker, prove delivery, stop a request, or authorize deployment. Records can
+change immediately after the check. It sends no credential value as an
+argument and does not print request text or remote command diagnostics.
+Use `--timeout SECONDS` to bound the remote read (default 300).
+
+### Reading Backlog issues without exposing credentials
+
+The source-shipped `operations/read-issues.sh` and `file-ticket.sh` require
+their adjacent `tracker_helper.py`, Python 3 on both sides and local kubectl.
+They are not in the host bundle. These commands support **Backlog only**;
+they reject GitHub or mixed configurations. They read the selected Pod's
+configuration and refer to its existing credential environment by name.
+Neither the credential value nor the issue text is put in a command argument
+or printed to the workstation's terminal. Do not enable shell tracing.
+
+Set the explicit cluster target variables above, `CONFIG` to the absolute
+Pod configuration path, `PROJECT_ID` to its intake project, `TRACKER_BIN` to
+the installed absolute tracker CLI path (normally
+`/opt/ticket-automation/bundle/bin/ticket-tracker`), and `READ_OUTPUT` to a
+new absolute workstation directory whose parent exists:
+
+```sh
+sh deploy/ticket-engine/operations/read-issues.sh \
+  --context "$CONTEXT" --namespace "$NS" --pod "$POD" \
+  --container "$CONTAINER" --source backlog --config "$CONFIG" \
+  --project-id "$PROJECT_ID" --tracker-bin "$TRACKER_BIN" \
+  --output "$READ_OUTPUT"
+```
+
+The installed CLI reads all issue pages; the helper preserves the complete
+successful list and refuses duplicate or out-of-project identities. Add
+`--issue-id NUMBER` for each issue whose complete comment list is needed;
+each must belong to the returned project. No issue or comment is posted by
+this command. A missing CLI, failed later page, invalid response or nonzero
+remote exit is failure, not a successful partial list.
+
+New directories are private (0700), files 0600. `intent.json` records the
+selection and start time; `received.jsonl` retains received evidence;
+`result.json` exists only after successful completion. Default issue data
+contains IDs, keys, status/category/assignee IDs, hours and update times;
+comments contain IDs only. Add `--native` only when native issue/comment
+bodies are needed in these private files. Console output contains counts
+only. Keep all output outside a public checkout and do not paste it into
+logs or PRs. Even full pagination is not an atomic snapshot of a changing
+tracker, and this aggregate list is **not** the URL-per-page offline GET
+fixture required by section 10.
+
+### Explicitly creating one Backlog issue
+
+Use `file-ticket.sh` only after deciding to create a new request. It does not
+run automatically after a read or a failed request. Supply the intended
+`TYPE_ID` and `PRIORITY_ID`; the helper verifies they are present in the
+project's issue-type list and priority list and never selects the first
+entry. `PROJECT_ID` must equal the selected configuration's intake project.
+The first version accepts summary/description only: projects with mandatory
+custom fields are not supported, and no field value is guessed.
+
+Prepare ordinary single-link UTF-8 `SUMMARY_FILE` and `DESCRIPTION_FILE` on
+the workstation. The summary must be nonempty; an empty description is
+allowed. The file contents travel as JSON data over stdin, not shell code,
+environment assignments or command arguments. Set `CREATE_OUTPUT` to a new
+absolute private-output directory under an existing real parent:
+
+```sh
+sh deploy/ticket-engine/operations/file-ticket.sh \
+  --context "$CONTEXT" --namespace "$NS" --pod "$POD" \
+  --container "$CONTAINER" --source backlog --config "$CONFIG" \
+  --project-id "$PROJECT_ID" --type-id "$TYPE_ID" --priority-id "$PRIORITY_ID" \
+  --summary-file "$SUMMARY_FILE" --description-file "$DESCRIPTION_FILE" \
+  --output "$CREATE_OUTPUT"
+```
+
+There is one POST at most, no automatic retry and no HTTP redirect following.
+After a valid creation receipt, its minimal identity is streamed into the
+private evidence before one readback GET. Success means that identity was
+created and read back; it does not mean the engine accepted or delivered the
+request. The command does not change intake configuration or deployment.
+
+Both commands reserve their output before remote execution and retain it
+on failure. Existing outputs, linked local inputs/ancestors, hardlinks and
+special input files are refused; nothing is deleted or overwritten. Even
+if no remote callback arrives, the same output cannot be reused. A nonzero
+create result **does not prove that no issue was created**: timeout, broken
+receipt, failed readback or local disk failure can follow a successful POST.
+Check the selected project and retained evidence before deciding what to do;
+using a fresh output is not proof that resubmission is safe. There is no
+automatic transaction recovery or duplicate repair. The remote mounted
+configuration may use platform symlinks; it is only read inside the Pod.
+`--timeout SECONDS` bounds the local wait (default 300); it does not guarantee cancellation of remote processing.
+
 ### The configuration, as the engine reads it
 
 First run the check of section 4 inside the Pod, on the configuration the
@@ -1460,27 +1609,84 @@ Expect `Seccomp` 2, `Seccomp_filters` 1, `CapEff` and `CapPrm` all zeros,
 `request_file` `probe-original`, `workspace_write` an error number (1, 13 or
 30; `ALLOWED` fails the check), and `unshare_return` -1.
 
-**Egress, both ways.** `<kubernetes-service-ip>` is
-`kubectl -n default get service kubernetes -o jsonpath='{.spec.clusterIP}'`;
-with a gateway, add its host to the targets:
+### Observing connections from the selected Pod
 
-```sh
-kubectl -n "$NS" exec "$POD" -c engine -- python3 -B -c '
-import json, socket
-targets = {"tracker": ("<space>.backlog.com", 443), "models": ("openrouter.ai", 443),
-           "delivery": ("github.com", 443), "delivery-api": ("api.github.com", 443),
-           "metadata": ("169.254.169.254", 80), "cluster-api": ("<kubernetes-service-ip>", 443)}
-result = {}
-for name, address in targets.items():
-    try:
-        with socket.create_connection(address, timeout=3): result[name] = "connected"
-    except OSError as error: result[name] = type(error).__name__
-print(json.dumps(result))'
+Use the source-shipped `operations/egress-check.sh` with its adjacent
+`network_probe.py` and `tracker_helper.py`. Prepare a private JSON file of
+the endpoints your installation should reach and refuse, for example:
+
+```json
+[
+  {"name": "model", "url": "https://allowed.example:8443", "expect": "connected"},
+  {"name": "restricted", "url": "https://denied.example", "expect": "refused"}
+]
 ```
 
-The first four (and the gateway) must be `connected`, `metadata` and
-`cluster-api` `ConnectionRefusedError`. An applied manifest is not evidence
-that anything is refused; this is.
+Replace these example endpoints. Include the tracker, model/gateway and delivery
+endpoints actually used, and destinations your network operator expects to be
+refused. Both expectations must be present; URLs must contain no credentials,
+query or fragment. URL paths are not tested. No target is inferred from prose
+inside the configuration. Explicit ports and IPv6 URLs are supported.
+
+```sh
+sh deploy/ticket-engine/operations/egress-check.sh \
+  --context "$CONTEXT" --namespace "$NS" --pod "$POD" --container "$CONTAINER" \
+  --targets "$TARGETS" --output "$BEFORE_NETWORK"
+```
+
+`TARGETS` and the new output directory are absolute local paths. The helper
+resolves and tests each returned address inside that container. It saves
+addresses and results privately in `result.json`; console output contains only
+the overall result. Exit 0 requires every target to match its expectation.
+`connected` requires at least one successful address; `refused` requires refusal
+at every resolved address. DNS failures, timeouts and incomplete observations
+are never treated as refusals.
+A refusal proves neither which component refused it nor that a firewall rule
+caused it. A connection proves neither TLS, authentication nor application health.
+The observation is limited to the selected endpoints at that time.
+
+### Read checks after an independently performed deployment
+
+Before an authorized deployment, retain a successful network result as above
+and a successful metadata-only `read-issues.sh` result from section 7. After
+the deployment, use `operations/after-deploy.sh` (Backlog only):
+
+```sh
+sh deploy/ticket-engine/operations/after-deploy.sh \
+  --context "$CONTEXT" --namespace "$NS" --pod "$POD" --container "$CONTAINER" \
+  --targets "$TARGETS" --output "$AFTER_CHECKS" \
+  --config "$CONFIG" --engine-bin "$ENGINE_BIN" --tracker-bin "$TRACKER_BIN" \
+  --queue "$QUEUE" --project-id "$PROJECT_ID" \
+  --egress-baseline "$BEFORE_NETWORK/result.json" \
+  --issues-baseline "$BEFORE_ISSUES/result.json" \
+  --status-url "$STATUS_HEALTH_URL" 200 --status-url "$STATUS_ROOT_URL" 401
+```
+
+Set the absolute installed binary/configuration/queue paths explicitly.
+Status URLs are credential-free HTTPS URLs observed from the workstation;
+TCP observations are from the Pod. Supply the HTTP codes expected for your
+configuration (an expected 401 does not prove authenticated page health).
+The helper does not follow redirects, supply credentials or read response bodies.
+
+It runs the network check, the engine's existing `--check`, the status reads,
+the existing issue-read helper and the existing conservative idle check. It
+also compares network targets/outcomes and issue metadata with the two explicit
+successful baselines. DNS address rotation alone is not a mismatch. Baseline
+equality does not prove the same account, immutable source or atomic snapshot;
+use baselines from the intended installation. Changed issue metadata may be
+normal activity and is not automatically blamed on deployment.
+
+Every required check must pass for exit 0. An earlier failure is retained even
+if later checks pass. The new private output keeps `result.json`, `network.json`
+and successful issue-read evidence; no existing output or baseline is overwritten.
+Missing or failed baselines are not replaced with the current observation.
+Use `--timeout SECONDS` (default 60) per child command/HTTP read; this bounds
+local waits, not the lifetime of a remote process after disconnection.
+
+Neither helper deploys, repairs, changes intake, posts a ticket nor authorizes a
+deployment. An idle check can become stale immediately. Configuration acceptance
+and baseline equality do not establish end-to-end delivery; still run the
+separately authorized acceptance request described below.
 
 **The credentials, by name only.** Read the names the final configuration
 actually references, plus the mirror's delivery credential. For gateway-only
@@ -1792,6 +1998,11 @@ records themselves.
 
 ## 9. Stopping a request
 
+The read-only Backlog helper in section 7 can retain issue/comment evidence
+before investigating a stop. It does not stop or resume work. The separate
+creation helper is an explicit new request, never an automatic retry of the
+stopped one; follow the authorization and new-request procedure below.
+
 The issue's creator, or a user in `intake.stop_user_ids`, posts a comment
 whose first non-blank line is exactly `停止`. A reason can follow on later
 lines. Within one poll interval:
@@ -1814,6 +2025,15 @@ branch, an open pull request or a merge stays. It is permanent: deleting the
 comment does not resume the request, and there is no resume command. To try
 again, file a new issue. Quoted text, mentions and comments by anyone else
 are not stops.
+
+The [queue inspection helper](#inspecting-the-queue-without-starting-work)
+also distinguishes unfinished stop reporting from a stopped original run.
+An `idle` result does not verify the stop comment's authority or its report's
+content; retain the original stop and both histories for inspection.
+
+The read checks in section 7 can collect observations after a separately
+authorized repair or deployment. They neither resume stopped work nor prove
+that its report or delivery is correct.
 
 ## 10. Upgrading to a new image
 
@@ -1867,13 +2087,35 @@ what it tried to do.
    unstarted, and the engine starts it.
 
    ```sh
-   kubectl -n "$NS" exec "$POD" -c engine -- sh -c 'cd /var/lib/ticket-automation/queue &&
-     find . -type f -not -path "*/workspace/*" -not -path "*/.source-*" -not -path "*/homes/*" \
-       -not -path "*/live/*" -not -name engine.log -not -name runner.lock -print0 | tar --null -T - -cf -' > queue-copy.tar
-   mkdir queue-copy && tar -xf queue-copy.tar -C queue-copy
+   sh deploy/ticket-engine/operations/copy-queue.sh \
+     --context "$CONTEXT" --namespace "$NS" --pod "$POD" \
+     --container "$CONTAINER" --queue "$QUEUE" \
+     --output /absolute/path/to/new-queue-copy
    kubectl -n "$NS" get configmap <consumer>-ticket-engine-operator \
      -o jsonpath='{.data.operator\.json}' > operator-current.json
    ```
+
+   Run from a source checkout as in [section 7](#inspecting-the-queue-without-starting-work).
+   The output directory must not exist, and its parent must already be a real
+   directory. Source and destination paths must be absolute and must not pass
+   through symbolic links. The helper rejects links, special files, archive
+   traversal and duplicate archive paths; it does not remove or overwrite an
+   existing destination. It keeps every regular record regardless of size and
+   preserves file modification times. Excluded working directories are not a
+   backup of undelivered work.
+
+   A remote failure produces no output directory. Local extraction starts only
+   after the remote copy and archive validation succeed. A local write failure
+   returns nonzero and leaves any new partial output for inspection; do not
+   rehearse against it. Success is exit 0, not merely a directory existing.
+   The records are private (directories 0700, files 0600) and can contain task
+   text or configuration. Keep them out of public logs and commits.
+
+   This is not an atomic snapshot or a backup: the controller may change
+   different files during the read. Use your agreed quiescent-copy or storage
+   snapshot procedure when consistency is required. The helper never pauses
+   the controller or changes cluster resources. Use the chosen output path
+   instead of `queue-copy` in the commands below.
 
 2. Build the engine for your workstation from the new commit (Go 1.25 or
    later; the output directory must not exist yet):
@@ -1892,30 +2134,99 @@ what it tried to do.
    ```
 
    It must end with `the configuration is accepted; nothing was started`.
-   Then run it over the copy with an empty environment, so it holds no
-   credential, for two or three poll intervals, and stop it with Ctrl-C:
+   The source-shipped offline helper observes the candidate without executing
+   configured role commands, including queues with waiting or unfinished work:
 
    ```sh
-   env -i PATH=/usr/bin:/bin /absolute/path/to/new-bundle/bin/ticket-engine \
-     --config operator-current.json --watch --run-dir queue-copy 2>&1 | tee rehearsal.log
+   python3 -B deploy/ticket-engine/operations/rehearse.py \
+     --source /absolute/path/to/clean-candidate-checkout \
+     --commit FULL_COMMIT_ID --queue /absolute/path/to/queue-copy \
+     --config /absolute/path/to/operator-current.json \
+     --reads /absolute/path/to/offline-reads.json \
+     --output /absolute/path/to/new-rehearsal-output --seconds 2
    ```
 
-   Without a credential every tracker call fails before it leaves your
-   machine, and the engine logs each write it could not make. Lines with
-   `not set`, `not announced`, `not declared`, `not recorded`, `not handed`
-   or `not confirmed` name a request and a change the new image would make
-   on the issue. The `intake: ...` line opens every start. `issue discovery unavailable`,
-   `stop instructions could not be read`,
-   `work paused while stop instructions are unavailable` and
-   `the runtime's own tracker account is unknown` are only the missing
-   credential speaking; the last one also means hand-overs of the assignee
-   are not tried in this run.
+   The source must already be a clean checkout of that full commit, including
+   no untracked or ignored files, and ship its own `rehearsal_test.go` support. The helper
+   does not fetch, switch commits, create/remove worktrees or inject a test
+   from a different version. Keep it beside `queue_helper.py`. It needs Python
+   3, Git and an already installed Go toolchain meeting the candidate's module
+   requirement. Toolchain/module downloads are disabled. The output must be
+   new, outside the checkout and input queue, with a real existing parent.
+   Input paths must be absolute without symbolic links.
 
-This procedure was checked against a small queue made for the purpose (one
-request delivered before its queue's notice kinds began, one after, never
-announced): the log named a status change for both and the model list for the
-second only, and the copy recorded the first one's list as predating its kind.
-It has not been run as written against a real queue.
+   Supply the GET responses you intend to assume in `offline-reads.json`.
+   This helper does not collect them, contact the tracker or treat the old
+   accepted `issue.json` as the tracker's current state. For example, this
+   synthetic Backlog entry assumes no newly discoverable issues in one project:
+
+   ```json
+   {
+     "reads": [
+       {
+         "url": "https://tracker.example/api/v2/issues?count=100&offset=0&order=asc&projectId%5B%5D=7&sort=created",
+         "body": [],
+         "min_reads": 2
+       }
+     ]
+   }
+   ```
+
+   Use the actual configured endpoint and explicit query values for your
+   offline assumptions, not the example project or endpoint. Each entry is
+   an HTTPS GET URL, a native JSON response body and a positive `min_reads`.
+   All entries are required to be observed at least that often. Query ordering
+   is normalized; omit `apiKey` and every credential value. An optional `link`
+   contains the pagination Link header; supply every requested page separately.
+   Replies are HTTP 200 only. Account, issue, comment, model-budget or other
+   reads needed by the configuration must also be supplied. Unknown GETs,
+   incomplete coverage and unreadable replies fail, rather than receiving
+   invented empty responses. This applies to the configured tracker using its
+   native response shapes; it does not translate a Backlog snapshot to GitHub.
+
+   Normally readable done, waiting and unfinished records are admitted, as are
+   authorized saved stops. Missing/conflicting histories and unreadable saved
+   stop reports fail. Empty queues are not rehearsal coverage. The helper
+   copies the input again into a private temporary directory, retains file
+   times and leaves the input unchanged. Links, hardlinks and special files
+   are rejected. Every configured role command is independently removed from
+   the in-memory configuration and checked before observation. Every non-GET
+   attempt is blocked and fails the rehearsal, including comments, status and
+   assignment changes. A required read count, the requested observation time,
+   normal cancellation and unchanged terminal records are separate checks.
+   Unfinished work can record failed or interrupted attempts because its role
+   commands are deliberately absent; this does not test the roles' execution.
+   A stopped request with a required but unfinished report is observed too.
+   Every HTTP write attempt still fails the rehearsal, even if it would be an
+   expected next action of unfinished work; inspect the details before deciding
+   whether it is a regression. A copied live record is not a live process here.
+
+   Exit 0 means no write was observed under the supplied offline assumptions;
+   a failure is nonzero. The JSON summary contains counts and elapsed time,
+   not request text, hosts or diagnostics. `full_tick_coverage` is always false:
+   neither elapsed time nor read counts prove every job completed every tick.
+   This is not deployment approval, a check of live tracker consistency, role
+   results, or a sandbox for arbitrary candidate source, package initialization
+   or toolchain code. Execute only a candidate/toolchain you trust, or use your
+   separately enforced sandbox. No operator credentials are inherited by the
+   Go check; configuration-named API credentials use synthetic values.
+
+   The new output retains private configuration/read copies, a result on
+   success, a log and toolchain scratch data. After observation, including a
+   failed one, `observations.json` names every blocked request's method and URL
+   without credentials, distinguishing writes from missing GET responses and
+   listing unmet read counts. `collector.log` retains the controller's own
+   diagnostics. An unconfirmed notification is retried every 25 ms tick here,
+   so one restart notice can appear as dozens of POST attempts; the log
+   distinguishes its initial "restart notice" from retries of an "earlier notice".
+   Request bodies and headers are not recorded. These private
+   files identify the affected issue; do not paste them into public logs.
+   Keep all output out of public logs and
+   commits. The observation's temporary queue is removed by the test; the
+   original input and any new partial output are never deleted by the helper.
+   A failed run must not be treated as a successful queue-copy or deployment
+   check merely because its output directory exists. These helpers have been
+   checked with synthetic fixtures, not a real installation.
 
 ### Rolling it out
 

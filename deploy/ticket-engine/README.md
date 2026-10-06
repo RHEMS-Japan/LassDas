@@ -16,6 +16,9 @@ the failures that were met.
 | `statefulset.yaml.example` | the workload: init containers, the mirror, the engine, the status page |
 | `egress-configmap.yaml.example` | this Pod's own firewall rules |
 | `operator-scripts-configmap.yaml.example` | the operator's programs the shipped ordered configuration calls: `build`, `test` and the report check `confirm-report` |
+| `operations/idle-check.sh`, `operations/copy-queue.sh`, `operations/queue_helper.py` | read-only queue inspection and a new private copy of its records; explicit Pod selection, no deployment or engine launch (SETUP.md, sections 7, 9 and 10) |
+| `operations/read-issues.sh`, `operations/file-ticket.sh`, `operations/tracker_helper.py` | Backlog-only complete reads or one explicitly requested issue creation; Pod-local credentials, stdin text, private evidence and no POST retry (SETUP.md, sections 7 and 9) |
+| `operations/egress-check.sh`, `operations/after-deploy.sh`, `operations/network_probe.py` | explicit TCP observations and read-only post-deployment checks; reuses adjacent tracker/queue helpers, no deployment or repair (SETUP.md, sections 7 and 9) |
 | `secrets.yaml.example` | the two Secrets' keys, without values, and where each value comes from |
 | `status-service.yaml.example` | a cluster-internal address for the status page |
 | `status-ingress.yaml.example` | optional: the status page at a host name; exposing it is the operator's choice |
@@ -94,10 +97,12 @@ Proposed, or simply not measured. Check each one before trusting it:
   without limit. A full volume stops progress quietly, because saving
   history is retried rather than abandoned. Record `df` before going live and
   look again after the first real requests.
-- Time. A role's launch has no time limit unless its `timeout_minutes` sets
-  one. A launch that runs long without failing is reported to the requester
-  by the no-progress notice, and the status page shows its output as it
-  arrives.
+- Time. A role's `timeout_minutes` bounds that launch. The optional
+  `intake.max_active_minutes` also bounds an accepted request's total active
+  work. Time-limited requests resume automatically after a forced exit until
+  `intake.max_hard_exits` (default 3) pauses them for an authorized resume.
+  The status page shows confirmed time and restart counts separately from
+  requests that need attention. See the runtime README's active-work limits.
 
 ## Before it accepts work
 

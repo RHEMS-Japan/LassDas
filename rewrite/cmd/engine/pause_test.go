@@ -210,7 +210,7 @@ func TestPauseResumeRefusesAnUnexpectedHistoryOrTerminalRequest(t *testing.T) {
 
 func TestWorkPauseKeepsItsReasonAndEarlierControlReceipts(t *testing.T) {
 	cfg, issue, directory, record := pausedFixture(t, chain.State{})
-	if err := recordWorkPause(directory, unmeasuredPause, time.Now()); err != nil {
+	if err := recordWorkPause(directory, hardExitPause, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := readWorkLimit(directory)
@@ -220,15 +220,15 @@ func TestWorkPauseKeepsItsReasonAndEarlierControlReceipts(t *testing.T) {
 	if err := applyPauseResume(context.Background(), cfg, issue, directory, noticeRequest, &record, issueComment(901, 55, "再開")); err != nil {
 		t.Fatal(err)
 	}
-	if err := recordWorkPause(directory, unmeasuredPause, time.Now()); err != nil {
+	if err := recordWorkPause(directory, hardExitPause, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	got, err := readWorkLimit(directory)
-	if err != nil || len(got.Pauses) != 2 || !got.held() || got.Pauses[1].Reason != unmeasuredPause {
+	if err != nil || len(got.Pauses) != 2 || !got.held() || got.Pauses[1].Reason != hardExitPause {
 		t.Fatalf("the next episode was lost: %+v %v", got, err)
 	}
-	if text := pausedWorkText(got.Pauses[1]); !strings.Contains(text, "上限に達したと確認したわけではありません") || !strings.Contains(text, "再開") || !strings.Contains(text, "停止") {
-		t.Fatalf("the uncertain clock was presented as a reached limit: %s", text)
+	if text := pausedWorkText(got.Pauses[1], got.Clock); !strings.Contains(text, "強制終了が設定の回数上限に達した") || !strings.Contains(text, "再開") || !strings.Contains(text, "停止") {
+		t.Fatalf("the pause lost its forced-exit reason or choices: %s", text)
 	}
 }
 
@@ -285,7 +285,7 @@ func TestPauseUsesTheActualPostedNoticeAndKeepsALaterResume(t *testing.T) {
 	if len(state.History) != 1 || state.History[0].Output != "再開\nnew words" || state.Pending == nil || state.Done {
 		t.Fatalf("release changed the pending action or repeated its words: %+v", state)
 	}
-	if remote.count(pausedWorkText(record.Pauses[0])) != 1 || remote.count(workResumeText) != 1 {
+	if remote.count(pausedWorkText(record.Pauses[0], record.Clock)) != 1 || remote.count(workResumeText) != 1 {
 		t.Fatalf("the restart repeated a control notice: %v", remote.all())
 	}
 }
@@ -550,7 +550,7 @@ func TestPauseDuplicateControlsDoNotAnswerTheQuestion(t *testing.T) {
 			rows := []json.RawMessage{accepted, duplicate}
 			wantHistory := 1
 			if variant == "multiple pauses" {
-				record.Pauses = append(record.Pauses, pauseEpisode{Reason: unmeasuredPause, At: time.Now().UTC(), NoticeID: 910})
+				record.Pauses = append(record.Pauses, pauseEpisode{Reason: hardExitPause, At: time.Now().UTC(), NoticeID: 910})
 				if err := saveWorkLimit(directory, record); err != nil {
 					t.Fatal(err)
 				}

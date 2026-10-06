@@ -171,7 +171,7 @@ func (s *IssueScope) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	data, err := s.source.Forward(r.Context(), r.Method, requested, query, form, expected)
 	if err != nil {
 		status := http.StatusBadGateway
-		var missing *githubError
+		var missing *trackerError
 		if errors.As(err, &missing) && missing.Status == http.StatusNotFound {
 			status = http.StatusNotFound
 		}

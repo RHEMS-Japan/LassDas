@@ -58,7 +58,7 @@ data:
     a restart notice. A check that wants the report last fails on every launch
     once one of them follows it, and the run then never ends.
 
-    Exits 0 when one comment matches and 1 otherwise. What it found is printed
+    Exits 0 when one comment matches a nonempty report and 1 otherwise. What it found is printed
     and joins the run's history. It never posts, edits or deletes anything.
     """
     import json
@@ -94,10 +94,12 @@ data:
         report = Path(os.environ["TASK_WORKSPACE"]) / "report" / "result.md"
         if not report.is_file():
             finish(1, "no report/result.md in the workspace")
+        wanted = report.read_text(encoding="utf-8").strip()
+        if not wanted:
+            finish(1, "report/result.md is empty; write and post the report before confirming it")
         stored = stored_comments()
         if not stored:
             finish(1, "no comment is stored on the issue")
-        wanted = report.read_text(encoding="utf-8").strip()
         # The tracker tool lists comments oldest first; the newest are read first here.
         for later, comment in enumerate(reversed(stored)):
             if (comment.get("content") or "").strip() == wanted:

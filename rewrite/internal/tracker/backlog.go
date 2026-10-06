@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type Backlog struct {
@@ -52,6 +53,9 @@ func RequestText(data []byte) (string, error) {
 // AddComment sends ordinary prose once. An ambiguous transport result is not
 // permission to repeat a visible post: inspect Comments before deciding.
 func (b Backlog) AddComment(ctx context.Context, issue, content string) (json.RawMessage, error) {
+	if !utf8.ValidString(content) {
+		return nil, errors.New("comment contains invalid UTF-8; it was not sent")
+	}
 	data, err := b.call(ctx, http.MethodPost, "/issues/"+url.PathEscape(issue)+"/comments", nil,
 		url.Values{"content": {content}}, http.StatusCreated)
 	if err != nil {
@@ -288,19 +292,6 @@ func (b Backlog) call(ctx context.Context, method, path string, query, form url.
 		return nil, &trackerError{Status: response.StatusCode, Body: redact(string(data))}
 	}
 	return data, nil
-}
-
-// trackerError is an answer with a status other than the one expected, kept
-// whole so a caller can tell one refusal from another.
-type trackerError struct {
-	Status int
-	Body   string
-}
-
-func (e *trackerError) Error() string {
-	// Body is already redacted. Keep it whole for refusal handling below, but
-	// do not put the entire service response into logs or requester notices.
-	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, clip(e.Body, 200))
 }
 
 // patchIssue changes fields of one issue and has confirm read the answer.

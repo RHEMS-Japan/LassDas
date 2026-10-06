@@ -516,10 +516,34 @@ func TestRepliesBetweenQuestionPostAndNextWatchReadAreNotLost(t *testing.T) {
 	}
 }
 
-func TestQuestionWithoutAReceiptDoesNotDiscardNewReplies(t *testing.T) {
+func TestQuestionWithoutAReceiptRecordsTheLatestComment(t *testing.T) {
 	source := watchConfiguration(t).source()
 	issue := sourceIssue{ID: 51}
-	for _, receipt := range []string{`{"after":null}`, `{"after":-1}`, `not json`} {
+	for _, receipt := range []string{"", `{"after":null}`} {
+		directory := t.TempDir()
+		if receipt != "" {
+			if err := os.Mkdir(filepath.Join(directory, "run"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "run", "question-post.json"), []byte(receipt), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := recordQuestion(source, directory, []json.RawMessage{issueComment(901, 55, "earlier comment")}, issue); err != nil {
+			t.Fatalf("absent receipt %q prevents waiting: %v", receipt, err)
+		}
+		raw, err := os.ReadFile(filepath.Join(directory, "question.json"))
+		var boundary questionBoundary
+		if err != nil || json.Unmarshal(raw, &boundary) != nil || boundary.After == nil || *boundary.After != 901 {
+			t.Fatalf("latest comment not recorded: %s %v", raw, err)
+		}
+	}
+}
+
+func TestQuestionWithAnUnreadableReceiptDoesNotInventABoundary(t *testing.T) {
+	source := watchConfiguration(t).source()
+	issue := sourceIssue{ID: 51}
+	for _, receipt := range []string{`{"after":-1}`, `not json`} {
 		directory := t.TempDir()
 		if err := os.Mkdir(filepath.Join(directory, "run"), 0700); err != nil {
 			t.Fatal(err)
@@ -534,4 +558,76 @@ func TestQuestionWithoutAReceiptDoesNotDiscardNewReplies(t *testing.T) {
 			t.Fatalf("invented a boundary: %v", err)
 		}
 	}
+}
+
+func TestQuestionRoleWithoutAPostReceiptResumesOnALaterReply(t *testing.T) {
+	cfg := questionConfiguration(t)
+	cfg.Roles[0].Processes[0].Command = []string{"/bin/sh", "-c", "exit 0"}
+	cfg.Roles[0].Processes[0].Env = nil
+	root := t.TempDir()
+	var mu sync.Mutex
+	comments := []json.RawMessage{issueComment(700, 55, "earlier note")}
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Host == "watch-tracker.example" {
+			if strings.HasSuffix(r.URL.Path, "/comments") {
+				if r.Method != http.MethodGet {
+					t.Error("a question was posted again instead of waiting")
+				}
+				if len(comments) == 1 {
+					state, err := loadWatchState(root, 51)
+					if err == nil {
+						for _, result := range state.History {
+							if result.Role == "ask_requester" && result.Speaker != "runtime" && result.Error == "" {
+								// The service saved the post after this launch, but
+								// its receipt never reached the local observer.
+								raw, err := os.ReadFile(filepath.Join(root, "jobs", "51", "run", "question-post.json"))
+								var boundary questionBoundary
+								if err != nil || json.Unmarshal(raw, &boundary) != nil || boundary.After != nil || boundary.Before != 700 {
+									t.Error("fixture did not start from an unacknowledged post", err)
+								}
+								comments = append(comments, issueComment(702, 900, postedQuestion))
+								break
+							}
+						}
+					}
+				}
+				return selectionReply(r, 200, append([]json.RawMessage{}, comments...)), nil
+			}
+			if strings.HasSuffix(r.URL.Path, "/users/myself") {
+				return selectionReply(r, 200, map[string]any{"id": 900, "name": "engine"}), nil
+			}
+			return selectionReply(r, 200, []any{watchedIssue(51, "Original conditions", "2026-01-03T00:00:00Z")}), nil
+		}
+		var input struct{ State chain.State }
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			return nil, err
+		}
+		choice := "ask_requester"
+		for _, result := range input.State.History {
+			if result.Speaker == "requester" {
+				choice = "done"
+			}
+		}
+		return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
+	})
+	log := &lockedLog{}
+	finish := startStopQueue(t, cfg, root, 20*time.Millisecond, log)
+	defer finish()
+	waitFor(t, func() bool {
+		state, err := loadWatchState(root, 51)
+		after, recorded := questionBoundaryAt(t, root)
+		return err == nil && state.Waiting && recorded && after == 702
+	})
+	mu.Lock()
+	comments = append(comments, issueComment(703, 55, requesterAnswer))
+	mu.Unlock()
+	waitFor(t, func() bool { state, err := loadWatchState(root, 51); return err == nil && state.Done })
+	finish()
+	state, err := loadWatchState(root, 51)
+	if err != nil || state.Waiting || len(state.History) != 2 || state.History[1].Speaker != "requester" || state.History[1].Output != requesterAnswer || log.starts() != 2 {
+		t.Fatalf("reply did not resume the same request once: %+v starts=%d err=%v", state, log.starts(), err)
+	}
+	t.Logf("done=%t requester_reply=%q starts=%d", state.Done, state.History[1].Output, log.starts())
 }
