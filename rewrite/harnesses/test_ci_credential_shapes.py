@@ -6,6 +6,7 @@ file too, and it has no exceptions.
 """
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/scripts/scan-credential-shapes.py"
+IDENTIFIER_SCAN = ROOT / ".github/scripts/scan-commit-messages.sh"
+READ = re.compile(r"the (?:messages|added lines) of (\d+) commit")
 
 # A made-up value for every shape the scan reads, with the name it reports.
 FOUND = (
@@ -27,6 +30,7 @@ FOUND = (
     ("Anthropic key", "sk-ant-" + "x" * 20),
     ("Anthropic key", "sk-ant-api03-" + "x" * 90),
     ("AWS access key ID", "AKIA" + "X" * 16),
+    ("AWS access key ID", "ASIA" + "X" * 16),
     ("private key block", "-" * 5 + "BEGIN PRIVATE KEY" + "-" * 5),
     ("private key block", "-" * 5 + "BEGIN RSA PRIVATE KEY" + "-" * 5),
     ("private key block", "-" * 5 + "BEGIN OPENSSH PRIVATE KEY" + "-" * 5),
@@ -34,9 +38,13 @@ FOUND = (
     ("Slack token", "xoxb-" + "0" * 10 + "-" + "x" * 24),
     ("Slack token", "xoxp-" + "0" * 10 + "-" + "x" * 32),
     ("Slack token", "xoxa-2-" + "x" * 30),
+    ("Slack token", "xoxe-1-" + "x" * 30),
+    ("Slack token", "xapp-1-" + "x" * 30),
+    ("Slack webhook URL", "https://hooks.slack.com/services/T" + "0" * 8 + "/B" + "0" * 8 + "/" + "x" * 24),
     ("apiKey or api_key value", "?apiKey=" + "x" * 64),
     ("apiKey or api_key value", '"api_key": "' + "x" * 32 + '"'),
     ("apiKey or api_key value", "apiKey := '" + "x" * 40 + "'"),
+    ("apiKey or api_key value", 'export BACKLOG_API_KEY="' + "x" * 64 + '"'),
 )
 
 # Text next to each shape that is not one, and passes.
@@ -50,15 +58,19 @@ PASSED = (
     "sk-or-v1-" + "x" * 64,  # not hexadecimal
     "sk-ant-" + "x" * 19,
     "AKIA" + "X" * 15,
+    "ASIA" + "X" * 15,
     "AKIA" + "x" * 16,
     "-" * 5 + "BEGIN PUBLIC KEY" + "-" * 5,
     "-" * 5 + "BEGIN CERTIFICATE" + "-" * 5,
     "xoxb-",
     "xoxb-" + "x" * 9,
-    "xoxz-" + "0" * 10 + "-" + "x" * 24,
+    "xoxB-" + "0" * 10 + "-" + "x" * 24,
+    "https://hooks.slack.com/services/...",
+    "https://hooks.slack.com/services/T000/B000/XXXX",
     "apiKey=" + "x" * 31,
     "apiKey" + "x" * 64,  # a longer name, not a value
     "apiKey: ${{ secrets.API_KEY }}",
+    "x-api-key: " + "x" * 40,  # another name
 )
 
 
@@ -83,7 +95,7 @@ class CredentialShapeScanTests(unittest.TestCase):
 
     def git(self, *arguments, message=None, directory=None):
         return subprocess.run(["git", *arguments], cwd=directory or self.repository, env=environment(),
-                              input=message, capture_output=True, text=True, check=True,
+                              input=message, capture_output=True, encoding="utf-8", check=True,
                               timeout=30).stdout.strip()
 
     def track(self, name, content):
@@ -101,13 +113,35 @@ class CredentialShapeScanTests(unittest.TestCase):
     def scan(self, *arguments, directory=None, **settings):
         done = subprocess.run([sys.executable, "-B", str(SCRIPT), *arguments],
                               cwd=directory or self.repository, env=environment(**settings),
-                              capture_output=True, text=True, timeout=120)
+                              capture_output=True, encoding="utf-8", errors="backslashreplace", timeout=120)
         return done.returncode, done.stdout + done.stderr
 
     def assertNotShown(self, value, output):
         """No ten characters in a row of the value reach the output."""
         for start in range(len(value) - 9):
             self.assertNotIn(value[start:start + 10], output)
+
+    def pushes(self):
+        """A main whose published commit carries a made-up key in its message,
+        a branch with a clean commit and one whose message carries a key, and
+        six pushes: their settings, the status the message scan ends with, how
+        many commits it reads, and which of them it reports."""
+        first = self.commit("Start\n")
+        published = self.commit("Published\n\n" + FOUND[9][1] + "\n")
+        self.git("update-ref", "refs/remotes/origin/main", published)
+        self.git("checkout", "-q", "-b", "topic")
+        clean = self.commit("A clean change\n")
+        leaked = self.commit("A change\n\n" + FOUND[0][1] + "\n")
+        topic = {"DEFAULT_BRANCH": "main", "GITHUB_REF": "refs/heads/topic"}
+        main = {"DEFAULT_BRANCH": "main", "GITHUB_REF": "refs/heads/main"}
+        return (first, published, clean, leaked), (
+            ("a push to a branch", dict(topic, RANGE_BASE=clean, RANGE_HEAD=leaked), 1, 1, [leaked]),
+            ("a range reaching into main", dict(topic, RANGE_BASE=first, RANGE_HEAD=leaked), 1, 2, [leaked]),
+            ("the first push of a branch", dict(topic, RANGE_BASE="0" * 40, RANGE_HEAD=leaked), 1, 2, [leaked]),
+            ("a clean push", dict(topic, RANGE_BASE=published, RANGE_HEAD=clean), 0, 1, []),
+            ("a push to main", dict(main, RANGE_BASE=first, RANGE_HEAD=published), 1, 1, [published]),
+            ("a forced push to main", dict(main, RANGE_BASE="", RANGE_HEAD=published), 1, 2, [published]),
+        )
 
     def test_each_shape_fails_the_scan_by_place_and_name_never_by_text(self):
         for number, (shape, value) in enumerate(FOUND, 1):
@@ -166,36 +200,89 @@ class CredentialShapeScanTests(unittest.TestCase):
         self.assertEqual(status, 0, output)
         self.assertIn("read the messages of 1 commit; none holds a credential shape", output)
 
-    def test_the_pushed_range_is_the_one_the_identifier_scan_reads(self):
-        first = self.commit("Start\n")
-        published = self.commit("Published\n\n" + FOUND[9][1] + "\n")
-        self.git("update-ref", "refs/remotes/origin/main", published)
+    def test_a_key_added_and_removed_within_one_push_is_found_in_the_added_lines(self):
+        base = self.commit("Start\n")
+        self.git("update-ref", "refs/remotes/origin/main", base)
         self.git("checkout", "-q", "-b", "topic")
-        clean = self.commit("A clean change\n")
-        leaked = self.commit("A change\n\n" + FOUND[0][1] + "\n")
-        topic = {"DEFAULT_BRANCH": "main", "GITHUB_REF": "refs/heads/topic"}
-        main = {"DEFAULT_BRANCH": "main", "GITHUB_REF": "refs/heads/main"}
-        for case, settings, expected, commits, reported in (
-            ("a push to a branch", dict(topic, RANGE_BASE=clean, RANGE_HEAD=leaked), 1, 1, [leaked]),
-            ("a range reaching into main", dict(topic, RANGE_BASE=first, RANGE_HEAD=leaked), 1, 2, [leaked]),
-            ("the first push of a branch", dict(topic, RANGE_BASE="0" * 40, RANGE_HEAD=leaked), 1, 2, [leaked]),
-            ("a clean push", dict(topic, RANGE_BASE=published, RANGE_HEAD=clean), 0, 1, []),
-            ("a push to main", dict(main, RANGE_BASE=first, RANGE_HEAD=published), 1, 1, [published]),
-            ("a forced push to main", dict(main, RANGE_BASE="", RANGE_HEAD=published), 1, 2, [published]),
-        ):
+        self.track("notes.txt", "a line without a key\n" + "".join(value + "\n" for _, value in FOUND))
+        added = self.commit("Add notes\n")
+        self.git("rm", "-q", "notes.txt")
+        removed = self.commit("Remove the notes\n")
+        kept_shape, kept = FOUND[11]
+        self.track("kept.txt", kept + "\n")
+        head = self.commit("Keep one key\n")
+        added, removed, head = (self.git("rev-parse", "--short", sha) for sha in (added, removed, head))
+        topic = {"DEFAULT_BRANCH": "main", "GITHUB_REF": "refs/heads/topic", "RANGE_HEAD": "HEAD"}
+        for setting in (base, "0" * 40):  # a push to the branch, and its first push
+            with self.subTest(base=setting[:7]):
+                status, output = self.scan("added", **dict(topic, RANGE_BASE=setting))
+                self.assertEqual(status, 1, output)
+                for number, (shape, value) in enumerate(FOUND, 2):
+                    self.assertIn("commit %s notes.txt:%d: %s\n" % (added, number, shape), output)
+                    self.assertNotShown(value, output)
+                self.assertEqual(output.count("commit %s notes.txt:" % added), len(FOUND), output)
+                self.assertNotIn("commit %s " % removed, output)
+                self.assertIn("commit %s kept.txt:1: %s\n" % (head, kept_shape), output)
+                self.assertIn("reading the added lines of 3 commits", output)
+        # Neither the tree nor a message holds the removed values.
+        status, output = self.scan("tree")
+        self.assertEqual(status, 1, output)
+        self.assertIn("kept.txt:1: %s\n" % kept_shape, output)
+        self.assertNotIn("notes.txt", output)
+        self.assertNotShown(kept, output)
+        status, output = self.scan("messages", **dict(topic, RANGE_BASE=base))
+        self.assertEqual(status, 0, output)
+
+    def test_added_lines_are_read_whatever_the_names_and_the_lines_look_like(self):
+        # In the diff the second line starts with "+++ ", as the line naming a file does.
+        self.track('メモ "q" 1.txt', "first\n++ " + FOUND[0][1] + "\n")
+        self.track("blob.bin", b"\x00\xff\n" + FOUND[9][1].encode() + b"\n")
+        commit = self.git("rev-parse", "--short", self.commit("Add\n"))
+        status, output = self.scan("added", "HEAD")
+        self.assertEqual(status, 1, output)
+        self.assertIn('commit %s メモ "q" 1.txt:2: GitHub token\n' % commit, output)
+        self.assertIn("commit %s blob.bin:2: AWS access key ID\n" % commit, output)
+        self.assertIn("reading the added lines of 1 commit -", output)
+        self.assertNotShown(FOUND[0][1], output)
+
+    def test_the_pushed_range_follows_the_rules_of_the_identifier_scan(self):
+        commits, pushes = self.pushes()
+        for case, settings, expected, count, reported in pushes:
             with self.subTest(case):
                 status, output = self.scan("messages", **settings)
                 self.assertEqual(status, expected, output)
-                self.assertIn("the messages of %d commit" % commits, output)
-                for commit in (first, published, clean, leaked):
+                self.assertIn("the messages of %d commit" % count, output)
+                for commit in commits:
                     self.assertEqual("commit %s line 3: " % commit in output, commit in reported, output)
+
+    @unittest.skipUnless(shutil.which("bash"), "requires Bash")
+    def test_both_message_scans_and_the_added_lines_read_as_many_commits(self):
+        _, pushes = self.pushes()
+        for case, settings, _, count, _ in pushes:
+            with self.subTest(case):
+                identifier = subprocess.run(
+                    ["bash", str(IDENTIFIER_SCAN)], cwd=self.repository, capture_output=True, encoding="utf-8",
+                    env=environment(ENGINE_PURITY_TOKENS="absent from every message", **settings), timeout=60)
+                self.assertEqual(identifier.returncode, 0, identifier.stdout + identifier.stderr)
+                _, messages = self.scan("messages", **settings)
+                self.assertEqual([int(n) for n in READ.findall(identifier.stdout + messages)], [count, count],
+                                 identifier.stdout + messages)
+                status, added = self.scan("added", **settings)
+                self.assertEqual(status, 0, added)
+                if case == "a forced push to main":
+                    self.assertIn("the added lines of that range are not read", added)
+                    self.assertEqual(READ.findall(added), [], added)
+                else:
+                    self.assertEqual([int(n) for n in READ.findall(added)], [count], added)
 
     def test_a_range_that_cannot_be_told_and_wrong_use_do_not_pass(self):
         self.commit("Start\n")
+        topic = {"DEFAULT_BRANCH": "main", "GITHUB_REF": "refs/heads/topic", "RANGE_HEAD": "HEAD"}
         for arguments, settings, reason in (
             (["messages"], {}, "is not set"),
-            (["messages"], {"DEFAULT_BRANCH": "main", "GITHUB_REF": "refs/heads/topic", "RANGE_HEAD": "HEAD"},
-             "cannot be told apart"),
+            (["added"], {}, "is not set"),
+            (["messages"], topic, "cannot be told apart"),
+            (["added"], topic, "cannot be told apart"),
             ([], {}, "usage:"),
             (["tree", "extra"], {}, "usage:"),
             (["files"], {}, "usage:"),
