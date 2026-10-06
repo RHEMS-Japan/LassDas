@@ -896,7 +896,9 @@ stop comment, not by a limit.
 
 The reviewer is asked to label findings in ordinary prose as **Act on**
 (must fix before delivery), **Consider**, **Noted** or **Dismissed**, with a
-reason. Only a must-fix defect justifies a blocking verdict; the other labels
+reason. It is asked to write the Act on findings first, since only the first
+6,000 characters of the findings are printed, while `review.md` keeps them
+whole. Only a must-fix defect justifies a blocking verdict; the other labels
 are not reasons to block. It should examine two signs of a design problem:
 the same workaround repeated in unrelated places, and callers having to know
 an implementation's internal rules to use it safely. Explain the concrete

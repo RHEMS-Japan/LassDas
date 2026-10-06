@@ -341,6 +341,9 @@ class AdversarialReviewTests(unittest.TestCase):
             (False, "Consider: consolidate later.\nNoted: tests cover input.\nDismissed: style is not a defect."),
             (True, "src/tool.py returns the wrong result; no category is supplied."),
             (True, "Act on: the same workaround in src/alpha.py, src/beta.py and src/gamma.py loses valid input; callers must know internal rules."),
+            # Labels that disagree with the verdict: the exit status still follows the verdict.
+            (False, "Act on: src/alpha.py drops the word missing from valid input."),
+            (True, "Noted: src/beta.py keeps its earlier output.\nDismissed: renaming src/gamma.py is outside scope."),
         )
         for blocking, findings in cases:
             with self.subTest(findings=findings):
@@ -349,7 +352,10 @@ class AdversarialReviewTests(unittest.TestCase):
                 finished = self.run_review(service)
                 self.assertEqual(finished.returncode, int(blocking), finished.stderr)
                 sent = service.requests[0]["body"]["messages"]
-                for phrase in ("Act on", "Consider", "Noted", "Dismissed", "unrelated places", "callers must know internal"):
+                for phrase in ("Act on", "Consider", "Noted", "Dismissed", "Write the Act on findings first",
+                               "Only an Act on defect justifies blocking", "unrelated places",
+                               "callers must know internal", "speculative redesign",
+                               "not an additional response schema"):
                     self.assertIn(phrase, sent[0]["content"])
                 for name in ("alpha", "beta", "gamma"):
                     self.assertIn("src/" + name + ".py", sent[1]["content"])
