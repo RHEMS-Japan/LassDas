@@ -307,6 +307,13 @@ func (c Chain) Run(ctx context.Context) error {
 		if record, staged := state.stageRecord(next, results); staged {
 			results = append(results, record)
 		}
+		if asking && len(results) == 0 {
+			// The question role is not a stage and gets no record of its own,
+			// so a launch that returned nothing would leave no trace that the
+			// question was chosen, and a restart would ask the decision again.
+			results = append(results, Result{Role: next.Role, Speaker: "runtime", Instruction: next.Instruction,
+				Error: "The question's launch returned no result at all.", StartedAt: launched, FinishedAt: time.Now().UTC()})
+		}
 		paced := failedFast(results) && failedFastBefore(state.History, next.Role)
 		state.History = append(state.History, results...)
 		state.Pending, state.PendingSince = nil, time.Time{}

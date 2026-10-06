@@ -1215,8 +1215,10 @@ nothing measures what the role found, and a model that ignores the wording can
 still choose the delivery.
 
 Choosing the first stage returns the work to requirements. Every later stage
-runs again, this one included, so a new change gets a decision of its own; a
-reply given about an earlier change does not settle a later one.
+runs again, this one included, so a new change is read and decided on again.
+That a reply given about an earlier change does not settle a later one is what
+the instructions to the stage and to the decision service say; the runtime
+reads no reply's words.
 `workflow.confirmation_rework_limit` bounds how often the first stage can be
 chosen at these decisions: omitted or zero means two, counted until a new
 requester reply. At the limit that choice is left out there and one runtime
@@ -1246,8 +1248,9 @@ refusal leads back to requirements, not to delivery.
 
 A stage marked `"confirm": true` must be a model stage and not the first
 stage, and the run needs `intake.question_role`; anything else is refused
-before work is accepted. Without such a stage nothing changes, and the
-question is offered only after the first stage. Each pass through the stage
+before work is accepted. Without such a stage nothing changes: the question
+is offered only after the first stage, and neither the decision service nor
+any role is told anything about such a stage. Each pass through the stage
 costs one working-role launch and one decision, for an internal change too.
 Connected workflows have no such stage.
 
@@ -1260,7 +1263,9 @@ it and does not run the preparation (`git_workspace.py`) the other roles run:
 a model stage that did not exit 0 runs again, so a lost workspace prepared
 afresh at this stage would let the delivery go on as if the review had passed
 on the lost work. The delivery's own preparation finds the loss instead and
-sends the work back to requirements. The question role's instructions there give the
+sends the work back to requirements. Until then this stage reads the empty
+directory that stands for the lost workspace, so the decision after it may ask
+the requester once about a change that could not be read. The question role's instructions there give the
 question for a change a fixed closing sentence in Japanese, and the report
 says whether the requester's confirmation was asked: `依頼者の確認: なし` with
 the reason, or the question and the reply.

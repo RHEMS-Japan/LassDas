@@ -20,8 +20,10 @@ launch did, and nothing is delivered before it: a question that posted
 nothing, did not exit 0 or was cut short by a restart waits as well, and the
 engine posts its own notice asking for a comment. The reply goes back to the
 stage that asked. A correction or a refusal leads back to requirements, after
-which every later stage runs again, so a reply covers only the change it was
-given about.
+which every later stage runs again, so a new change is read and decided on
+again. That a reply covers only the change it was given about is what the
+instructions to the stage and to the decision service say; the runtime reads
+no reply's words.
 
 The limits on the choices after the first stage,
 `intake.question_no_post_limit` and `workflow.entrance_rework_limit`, do not

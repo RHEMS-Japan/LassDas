@@ -157,6 +157,9 @@ workspace's current changes. Its overview, the board, shows the requests in
 columns by stage. The page holds no credential and changes nothing.
 
 - Used in: README.md:1240, START.md:131
+- Other uses: START.md also says 画面 for the screens of the product a change
+  alters, in 操作の流れ・画面・公開 API, which decides whether the requester
+  sees a change before delivery.
 - Avoid: none.
 
 ## Roles and how they run

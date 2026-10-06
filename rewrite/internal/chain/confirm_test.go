@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"sort"
 	"strings"
@@ -43,10 +45,12 @@ type confirmDecision struct {
 	offered []string
 }
 
-// confirmJudge stands in for the decision service. After the first stage it
-// hands the work on. After the stage that reads the change it asks the
-// requester, and delivers only once a requester comment is in the record. The
-// choices are scripted: what is under test is what the runtime lets happen.
+// confirmJudge stands in for the decision service. Where the delivery is not
+// offered it hands the work on. Where it is, after the change was read, it
+// asks the requester the first time and delivers every later time, with or
+// without a reply: any way back to that decision before the requester's words
+// arrive then shows up as a delivery. The choices are scripted; what is under
+// test is what the runtime lets happen.
 func confirmJudge(decisions *[]confirmDecision) testJudge {
 	return func(_ context.Context, state State, _ string, choices map[string]string) (string, error) {
 		var offered []string
@@ -54,20 +58,40 @@ func confirmJudge(decisions *[]confirmDecision) testJudge {
 			offered = append(offered, name)
 		}
 		sort.Strings(offered)
-		*decisions = append(*decisions, confirmDecision{after: state.Step, offered: offered})
-		if state.Step != "confirm_change" {
-			return "work", nil
-		}
-		for _, result := range state.History {
-			if result.Speaker == "requester" {
-				return "deliver", nil
+		asked := 0
+		for _, decision := range *decisions {
+			if slices.Contains(decision.offered, "deliver") {
+				asked++
 			}
 		}
-		if _, ok := choices["ask_requester"]; ok {
+		*decisions = append(*decisions, confirmDecision{after: state.Step, offered: offered})
+		if _, confirmation := choices["deliver"]; !confirmation {
+			return "work", nil
+		}
+		if _, ok := choices["ask_requester"]; ok && asked == 0 {
 			return "ask_requester", nil
 		}
 		return "deliver", nil
 	}
+}
+
+// stopAfterQuestionStore stops the engine right after the result of a launch
+// of the question role is saved, as a restart at that moment would.
+type stopAfterQuestionStore struct {
+	memoryStore
+	stop  func()
+	armed bool
+}
+
+func (s *stopAfterQuestionStore) Save(state State) error {
+	if err := s.memoryStore.Save(state); err != nil {
+		return err
+	}
+	if s.armed && state.Step == "ask_requester" && state.Pending == nil && !state.Waiting {
+		s.armed = false
+		s.stop()
+	}
+	return nil
 }
 
 // The requester is to see the change before it is delivered. Whatever becomes
@@ -76,10 +100,17 @@ func confirmJudge(decisions *[]confirmDecision) testJudge {
 // a restart, a tracker that cannot be read, nor a question role that the limit
 // after the first stage had already taken out of the choices.
 func TestNoDeliveryWithoutTheRequestersWordsAfterAConfirmationQuestion(t *testing.T) {
-	for _, scenario := range []string{"posted", "nothing-posted", "launch-failed", "no-result", "interrupted", "unreadable", "no-post-limit-reached"} {
+	for _, scenario := range []string{"posted", "nothing-posted", "launch-failed", "no-result", "no-result-then-restart", "interrupted", "unreadable", "no-post-limit-reached"} {
 		t.Run(scenario, func(t *testing.T) {
 			flow := confirmFlow(t)
-			store := &memoryStore{state: State{Request: "Show the item count on the list screen."}}
+			stopping := &stopAfterQuestionStore{memoryStore: memoryStore{state: State{Request: "Show the item count on the list screen."}}}
+			store := &stopping.memoryStore
+			var engineStore Store = store
+			if scenario == "no-result-then-restart" {
+				// The engine stops right after the launch that returned nothing
+				// is saved, and starts again from what was saved.
+				stopping.armed, engineStore = true, stopping
+			}
 			if scenario == "no-post-limit-reached" {
 				store.state.QuestionsWithoutPost, store.state.QuestionUnavailable = 2, "ask_requester"
 			}
@@ -87,7 +118,7 @@ func TestNoDeliveryWithoutTheRequestersWordsAfterAConfirmationQuestion(t *testin
 			launches := map[string]int{}
 			var order []string
 			var cancel context.CancelFunc
-			engine := Chain{Store: store, Workflow: flow, WaitAfter: "ask_requester", RetryDelay: time.Millisecond,
+			engine := Chain{Store: engineStore, Workflow: flow, WaitAfter: "ask_requester", RetryDelay: time.Millisecond,
 				QuestionPosted: func(context.Context) (QuestionObservation, error) {
 					switch scenario {
 					case "unreadable":
@@ -105,8 +136,8 @@ func TestNoDeliveryWithoutTheRequestersWordsAfterAConfirmationQuestion(t *testin
 						switch scenario {
 						case "launch-failed":
 							return []Result{{Role: a.Role, Speaker: "questioner", Error: "comment submission not confirmed"}}
-						case "no-result":
-							return nil // An executor that returned nothing leaves no record of the launch.
+						case "no-result", "no-result-then-restart":
+							return nil // An executor that returned nothing leaves no result of its own.
 						case "interrupted":
 							cancel() // The engine stops while the question is being put.
 							return []Result{{Role: a.Role, Speaker: "questioner", Error: "signal: killed", Interrupted: true}}
@@ -120,10 +151,10 @@ func TestNoDeliveryWithoutTheRequestersWordsAfterAConfirmationQuestion(t *testin
 				timeout = 300 * time.Millisecond
 			}
 			ctx, stop := context.WithTimeout(context.Background(), timeout)
-			cancel = stop
+			cancel, stopping.stop = stop, stop
 			err := engine.Run(ctx)
 			stop()
-			if scenario == "interrupted" && errors.Is(err, context.Canceled) {
+			if (scenario == "interrupted" || scenario == "no-result-then-restart") && errors.Is(err, context.Canceled) {
 				// The restart: the same request, read back from the store.
 				ctx, stop = context.WithTimeout(context.Background(), timeout)
 				cancel = stop
@@ -613,15 +644,103 @@ func TestTheRuntimeSaysWhatTheConfirmationReadsAndWhenItAsks(t *testing.T) {
 	if text := (State{Request: "r", Workflow: flow, Step: "elicit", History: []Result{{Role: "elicit", Speaker: "fixture"}}}).stageInstruction("ask_requester"); text != "" {
 		t.Fatalf("a question after the first stage gained an instruction: %q", text)
 	}
-	confirmationWordsPresent(t, "the routing instructions", routingInstructions,
-		"after a stage that confirms the change before delivery, about that change",
+	confirmationWordsPresent(t, "the decision instructions", decisionInstructions(read),
+		"afterwards ask only about newly needed authority or, after a stage that confirms the change before delivery, about that change, never routine recovery choices",
+		"supported by the actual failure, or, after a stage that confirms the change before delivery, about that change.",
 		"After a stage that confirms the change before delivery, read its report",
 		"how a person operates the product, what a screen shows or does, or the public API",
 		"or when the report cannot tell, including when the change could not be read whole",
 		"A reply given about an earlier change does not accept a later one",
 		"a question that was not posted, a tracker that could not be read or a reached limit is not a reply")
-	confirmationWordsPresent(t, "every role's prompt", processPrompt(Role{}, Process{}, Assignment{}, State{}),
+	confirmationWordsPresent(t, "every role's prompt", processPrompt(Role{}, Process{}, Assignment{}, read),
 		"after a stage that confirms the change before delivery, about that change")
+}
+
+// An installation whose run has no stage that confirms the change is told
+// nothing about one: every decision and every role receive the same words
+// as before the stage existed.
+func TestOnlyARunThatConfirmsIsToldAboutTheConfirmation(t *testing.T) {
+	confirming := State{Request: "r", Workflow: confirmFlow(t)}
+	for name, state := range map[string]State{
+		"ordered run without the stage": {Request: "r", Workflow: stagesWorkflow()},
+		"connected run":                 {Request: "r", Workflow: entranceWorkflow()},
+		"no workflow":                   {Request: "r"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if decisionInstructions(state) != routingInstructions {
+				t.Fatal("the decision instructions changed for a run that does not confirm")
+			}
+			for what, text := range map[string]string{"decision": decisionInstructions(state), "role": processPrompt(Role{}, Process{}, Assignment{}, state)} {
+				if strings.Contains(text, "confirms the change") {
+					t.Fatalf("the %s text speaks of a stage that confirms the change", what)
+				}
+			}
+		})
+	}
+	if strings.Contains(routingInstructions, "confirms the change") || !strings.Contains(decisionInstructions(confirming), "confirms the change") {
+		t.Fatal("the confirmation words are not added for a run that confirms, and only for it")
+	}
+	// The decision service is handed these words through the router itself.
+	var seen []string
+	router := DecisionRouter{Roles: confirmPurposes(), Judge: testJudge(func(_ context.Context, _ State, text string, choices map[string]string) (string, error) {
+		seen = append(seen, text)
+		for name := range choices {
+			return name, nil
+		}
+		return "", errors.New("no choices")
+	})}
+	plain := State{Request: "r", Workflow: stagesWorkflow(), Step: "elicit", History: []Result{{Role: "elicit", Speaker: "fixture"}}}
+	plain.Workflow.Question = "ask_requester"
+	asked := confirming
+	asked.Step, asked.History = "confirm_change", []Result{{Role: "elicit", Speaker: "fixture"}, {Role: "work", Speaker: "fixture"},
+		{Role: "review", Speaker: "fixture"}, {Role: "confirm_change", Speaker: "fixture"}}
+	for _, state := range []State{plain, asked} {
+		if _, err := router.Next(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(seen) != 2 || strings.Contains(seen[0], "confirms the change") || !strings.Contains(seen[1], "After a stage that confirms the change before delivery, read its report") {
+		t.Fatalf("the router did not hand on the words for the run it decides for: %d", len(seen))
+	}
+	// The chat route hands them on the same way, as its system message.
+	t.Setenv("CONFIRM_CHAT_KEY", "synthetic-confirm-chat")
+	var systems []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+			Tools []struct {
+				Function struct {
+					Parameters struct {
+						Properties struct {
+							Role struct {
+								Enum []string `json:"enum"`
+							} `json:"role"`
+						} `json:"properties"`
+					} `json:"parameters"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Messages) == 0 || len(body.Tools) == 0 {
+			t.Errorf("unreadable chat request: %v", err)
+			return
+		}
+		systems = append(systems, body.Messages[0].Content)
+		arguments, _ := json.Marshal(Assignment{Role: body.Tools[0].Function.Parameters.Properties.Role.Enum[0]})
+		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"tool_calls": []any{
+			map[string]any{"function": map[string]string{"name": "handoff", "arguments": string(arguments)}}}}}}})
+	}))
+	defer server.Close()
+	chat := ChatRouter{Service: Jev{URL: server.URL, Model: "fixture", KeyEnv: "CONFIRM_CHAT_KEY", Client: server.Client()}, Roles: confirmPurposes()}
+	for _, state := range []State{plain, asked} {
+		if _, err := chat.Next(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(systems) != 2 || strings.Contains(systems[0], "confirms the change") || !strings.Contains(systems[1], "After a stage that confirms the change before delivery, read its report") {
+		t.Fatalf("the chat route did not hand on the words for the run it decides for: %d", len(systems))
+	}
 }
 
 func TestAConfirmationThatCouldOnlyDeliverIsRefused(t *testing.T) {

@@ -316,8 +316,8 @@ const stagesClaim = "Everything is done, verified and delivered; the request is 
 
 // Changes of the same nature as two real deliveries, and an internal one.
 const stagesOptionChange = "lister: new option --compact, one line per entry; the help text gains: --compact  print one line per entry\n"
-const stagesOrderChange = "lister --count --total: the count line now follows the total line, and English output says 1 entry for one\n"
-const stagesOrderKept = "lister --count --total: the count line stays before the total line; English output says 1 entry for one\n"
+const stagesOrderChange = "lister --tally --sum: the tally line now follows the sum line, and English output says 1 item for one\n"
+const stagesOrderKept = "lister --tally --sum: the tally line stays before the sum line; English output says 1 item for one\n"
 const stagesInternalChange = "an unexported helper renamed and a unit test added; no option, output or file format changed\n"
 const stagesNoConfirmation = "\n依頼者の確認: なし (操作の流れ・画面・公開 API は変わらない)\n"
 const stagesChangeQuestion = "納品の前に確認してください。一覧のコマンドの使い方か出力が変わります。\n1. このまま納品する\n2. 直してほしい点を書く\n3. 納品しない\n返答があるまで納品しません。\n"
