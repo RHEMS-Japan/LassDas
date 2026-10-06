@@ -16,6 +16,7 @@ running installations or saved requests.
 - [Configure a Kubernetes installation](deploy/ticket-engine/SETUP.md).
 - [Engine configuration and observed behavior](rewrite/README.md).
 - [Runtime isolation and prerequisites](rewrite/RUNTIME.md).
+- [Glossary of the engine's terms](rewrite/GLOSSARY.md).
 - [Current development handover](docs/HANDOVER.md).
 - [Product direction](docs/PRODUCT_DIRECTION.md).
 
