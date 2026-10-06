@@ -11,8 +11,9 @@ import (
 // A stage is satisfied by something the runtime observed, never by what a role
 // wrote. A command stage is satisfied when its configured commands all exit 0.
 // A model stage is satisfied when its processes ran without a process error:
-// its words are not read at all, and the command stage that follows is what
-// proves the work. There is no counter and no failing end state.
+// its words do not prove completed work. At the entrance the decision model
+// reads the report before handing over; later commands prove the work.
+// Entrance re-selection is bounded; process failures are not failing end states.
 const (
 	ModelStage   = "model"
 	CommandStage = "command"
@@ -33,8 +34,8 @@ type Stage struct {
 
 // StageRouter advances an ordered run on observed facts. It calls no model of
 // its own. The single judgment left to a model is at the entrance, where the
-// configured decision router chooses between the operator's question role and
-// the next stage; it is never offered done, so a question cannot end a request.
+// configured decision router chooses another requirements pass, the operator's
+// question role or the next stage; it is never offered done.
 type StageRouter struct {
 	Entrance Router
 }
@@ -110,6 +111,26 @@ func stageAt(stages []Stage, name string) (Stage, int) {
 	return Stage{}, -1
 }
 
+// Count immediate re-selection of a successful entrance, not the initial
+// pass, returns from a question, or required recovery after a failed launch.
+func (s State) entranceReworks() int {
+	first := s.Workflow.Stages[0].Name
+	for i := len(s.History) - 1; i >= 0; i-- {
+		if s.History[i].Speaker == "requester" {
+			s.History = s.History[i+1:]
+			break
+		}
+	}
+	count, previous := 0, stageRun{}
+	for _, run := range s.stageRuns() {
+		if run.role == first && previous.role == first && previous.satisfied {
+			count++
+		}
+		previous = run
+	}
+	return count
+}
+
 // stageActions reports what may run next. Everything here comes from results
 // the runtime observed; no text written by any role is read or compared.
 func (s State) stageActions() []string {
@@ -147,8 +168,8 @@ func (s State) stageActions() []string {
 	case index >= 0 && !last.satisfied:
 		// A model stage that could not run, or was interrupted, runs again.
 		return []string{stage.Name}
-	case index == 0 && s.Workflow.Question != "" && s.Workflow.Question != s.QuestionUnavailable && next != "done":
-		return []string{s.Workflow.Question, next}
+	case index == 0 && s.Workflow.Question != "" && next != "done":
+		return []string{stage.Name, s.Workflow.Question, next}
 	}
 	return []string{next}
 }
@@ -166,6 +187,8 @@ func (s State) stageInstruction(name string) string {
 	fmt.Fprintf(&text, "Stage %d of %d in the configured run: %s.\n", index+1, len(stages), stage.Name)
 	if stage.Kind == CommandStage {
 		text.WriteString("The runtime launches this stage's configured commands and records what they returned. Their exit status is the only thing that satisfies this stage.\n")
+	} else if index == 0 && s.Workflow.Question != "" {
+		text.WriteString("The configured decision model reads your requirements report and chooses another requirements pass, a question or the next stage. Use ordinary prose; the runtime does not grade its wording. A later command stage proves completed work.\n")
 	} else {
 		text.WriteString("Nothing you write is read, decoded or graded, and saying the work is done advances nothing. ")
 		if follow, ok := followingCommand(stages, index); ok {
@@ -243,10 +266,11 @@ func (w *Workflow) validateStages(roles map[string]string) error {
 // next stage to read, not a format anything has to produce, and it says
 // nothing about whether the work is any good.
 func (s State) stageRecord(assignment Assignment, results []Result) (Result, bool) {
-	if s.Workflow == nil || len(s.Workflow.Stages) == 0 {
+	if s.Workflow == nil {
 		return Result{}, false
 	}
-	if _, staged := stageAt(s.Workflow.Stages, assignment.Role); staged < 0 {
+	_, staged := stageAt(s.Workflow.Stages, assignment.Role)
+	if staged < 0 && (len(s.Workflow.Stages) > 0 || s.Workflow.LaunchLimit[assignment.Role] == 0) {
 		return Result{}, false
 	}
 	record := Result{Role: assignment.Role, Speaker: "runtime", Instruction: assignment.Instruction,
@@ -257,7 +281,11 @@ func (s State) stageRecord(assignment Assignment, results []Result) (Result, boo
 		return record, true
 	}
 	var text strings.Builder
-	fmt.Fprintf(&text, "Runtime record for stage %s, written by the engine from what it observed.\n", assignment.Role)
+	kind := "stage"
+	if staged < 0 {
+		kind = "role"
+	}
+	fmt.Fprintf(&text, "Runtime record for %s %s, written by the engine from what it observed.\n", kind, assignment.Role)
 	for _, result := range results {
 		name := result.Speaker
 		if name == "" {

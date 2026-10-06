@@ -24,6 +24,9 @@ type Workflow struct {
 	// to. The engine fills it from intake.question_role, so the accepted run
 	// says by itself where a person may be asked; it is not a stage.
 	Question string `json:"question,omitempty"`
+	// EntranceReworkLimit bounds immediate re-selection of the first ordered
+	// stage. Zero uses two repeats; a requester reply starts the count over.
+	EntranceReworkLimit int `json:"entrance_rework_limit,omitempty"`
 	// LaunchLimit caps how many times a named role may be launched for one
 	// request (a reply from the requester starts the count over). A role at
 	// its cap is not offered at the next decision, so a review that keeps
@@ -38,6 +41,9 @@ type Workflow struct {
 func (w *Workflow) Validate(roles map[string]string) error {
 	if w == nil {
 		return nil
+	}
+	if w.EntranceReworkLimit < 0 || w.EntranceReworkLimit != 0 && len(w.Stages) == 0 {
+		return errors.New("workflow.entrance_rework_limit needs an ordered run and must not be negative")
 	}
 	if len(w.Stages) > 0 {
 		if len(w.LaunchLimit) > 0 {
@@ -106,7 +112,7 @@ func (w *Workflow) Validate(roles map[string]string) error {
 
 func (w *Workflow) clone() *Workflow {
 	copy := &Workflow{Start: slices.Clone(w.Start), After: map[string][]string{}, Recover: map[string][]string{},
-		Stages: slices.Clone(w.Stages), Question: w.Question}
+		Stages: slices.Clone(w.Stages), Question: w.Question, EntranceReworkLimit: w.EntranceReworkLimit}
 	if w.LaunchLimit != nil {
 		copy.LaunchLimit = make(map[string]int, len(w.LaunchLimit))
 		for role, limit := range w.LaunchLimit {
@@ -171,8 +177,15 @@ func (s State) launches(role string) int {
 }
 
 func (s State) atLaunchLimit(role string) bool {
-	if s.Workflow == nil || len(s.Workflow.Stages) > 0 {
+	if s.Workflow == nil {
 		return false
+	}
+	if len(s.Workflow.Stages) > 0 {
+		limit := s.Workflow.EntranceReworkLimit
+		if limit == 0 {
+			limit = 2
+		}
+		return role == s.Workflow.Stages[0].Name && s.entranceReworks() >= limit
 	}
 	limit, capped := s.Workflow.LaunchLimit[role]
 	return capped && s.launches(role) >= limit
@@ -205,7 +218,27 @@ func (s State) offered(action string) bool {
 // requester last answered. The note is the runtime's own plain text; nothing
 // in it judges what the role wrote.
 func (s State) launchLimitNotes() []Result {
-	if s.Workflow == nil || len(s.Workflow.LaunchLimit) == 0 || len(s.Workflow.Stages) > 0 {
+	if s.Workflow == nil {
+		return nil
+	}
+	if len(s.Workflow.Stages) > 0 {
+		role := s.Workflow.Stages[0].Name
+		if !s.atLaunchLimit(role) || s.offered(role) {
+			return nil
+		}
+		for i := len(s.History) - 1; i >= 0; i-- {
+			result := s.History[i]
+			if result.Speaker == "requester" {
+				break
+			}
+			if result.Speaker == "runtime" && result.Role == "router" && strings.Contains(result.Output, "entrance rework limit") {
+				return nil
+			}
+		}
+		return []Result{{Role: "router", Speaker: "runtime", FinishedAt: time.Now().UTC(),
+			Output: fmt.Sprintf("%s reached the entrance rework limit after %d repeats; this choice stays unavailable until a new requester reply. Choose among the remaining actions without weakening the original requirements.", role, s.entranceReworks())}}
+	}
+	if len(s.Workflow.LaunchLimit) == 0 {
 		return nil
 	}
 	var notes []Result
