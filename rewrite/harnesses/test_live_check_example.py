@@ -1,6 +1,8 @@
 """Exercise the live check example (rewrite/examples/live-check) against its
 fictional service on 127.0.0.1. Nothing here reaches another host."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -84,14 +86,14 @@ class LiveCheckExampleTests(unittest.TestCase):
     def assertGone(self, launch):
         state = self.record(launch, "state.json")
         deadline = time.monotonic() + 5
-        while self.tool.process_state(state["pid"], state["token"]) != "gone":
+        while self.tool.process_state(state) != "gone":
             self.assertLess(time.monotonic(), deadline, "the service %d is still running" % state["pid"])
             time.sleep(0.02)
 
     def stop_what_is_left(self):
         for launch in self.launches():
             state = json.loads((launch / "state.json").read_text()) if (launch / "state.json").exists() else None
-            if state and self.tool.process_state(state["pid"], state["token"]) == "ours":
+            if state and self.tool.process_state(state) == "ours":
                 os.kill(state["pid"], signal.SIGKILL)
         users = self.home / "live-check-store" / "users"
         if users.is_dir():
@@ -162,7 +164,7 @@ class LiveCheckExampleTests(unittest.TestCase):
         check.communicate(timeout=10)
         [killed] = self.launches()
         state = self.record(killed, "state.json")
-        self.assertEqual(self.tool.process_state(state["pid"], state["token"]), "ours")
+        self.assertEqual(self.tool.process_state(state), "ours")
         self.assertEqual(len(self.users()), 1)
         self.assertFalse((killed / "stopped.json").exists())
         self.hold.unlink()
@@ -222,6 +224,77 @@ class LiveCheckExampleTests(unittest.TestCase):
         self.assertIn("止めていない", result.stdout)
         self.assertIsNone(other.poll())
         self.assertFalse(self.record(launch, "stopped.json")["ok"])
+
+    def fake_process(self, root, pid, status, start, arguments, name="python3"):
+        """One process as Linux's /proc shows it: stat with the state (field 3)
+        and the start time (field 22) among the 52 fields of proc(5), and the
+        arguments, each ended by a NUL, in cmdline."""
+        directory = root / str(pid)
+        directory.mkdir(parents=True, exist_ok=True)
+        fields = [status] + ["0"] * 18 + [start] + ["0"] * 30
+        (directory / "stat").write_text("%d (%s) %s\n" % (pid, name, " ".join(fields)))
+        (directory / "cmdline").write_bytes(b"".join(argument.encode() + b"\0" for argument in arguments))
+
+    def test_the_linux_reading_knows_its_own_service_by_its_start_time(self):
+        """CI on Linux saw the service the check had signalled with no arguments
+        left to read while it was ending, and the check took it for another
+        process. The start time decides; the arguments only without it."""
+        root = self.base / "proc"
+        (root / "self").mkdir(parents=True)
+        token = "0123456789abcdef"
+        server = ["python3", "-B", "server.py", "--token", token]
+        rows = [  # state, start time, arguments, recorded start time, judged
+            ("S", "777", server, "777", "ours"),
+            ("R", "777", [], "777", "ours"),
+            ("D", "777", [], "777", "ours"),
+            ("Z", "777", [], "777", "gone"),
+            ("X", "777", [], "777", "gone"),
+            ("S", "999", ["sleep", "60"], "777", "reused"),
+            ("R", "999", [], "777", "reused"),
+            ("S", "999", server, "777", "reused"),
+            ("S", "777", server, None, "ours"),
+            ("S", "777", ["sleep", "60"], None, "other"),
+            ("R", "777", [], None, "ending"),
+            ("Z", "777", [], None, "gone"),
+        ]
+        with mock.patch.object(self.tool, "PROC", root):
+            self.assertEqual(self.tool.process_state({"pid": 3999999, "token": token, "start": "777"}), "gone")
+            for number, (status, start, arguments, recorded, judged) in enumerate(rows):
+                pid = 4000000 + number
+                # A command's name can hold ") (": the fields are read after the last ")".
+                self.fake_process(root, pid, status, start, arguments, name="py) (x" if number == 0 else "python3")
+                with self.subTest(state=status, start=start, arguments=arguments, recorded=recorded):
+                    self.assertEqual(self.tool.process_state({"pid": pid, "token": token, "start": recorded}), judged)
+            self.assertEqual(self.tool.process_start(4000000), "777")
+            self.assertIsNone(self.tool.process_start(3999999))
+
+    def test_stop_on_linux_stops_its_ending_service_and_leaves_a_reused_pid_alone(self):
+        root = self.base / "proc"
+        (root / "self").mkdir(parents=True)
+        token = "0123456789abcdef"
+        signalled = []
+
+        def kill(pid, number):
+            signalled.append((pid, number))
+            self.fake_process(root, pid, "Z", "777", [])  # the service ends
+
+        launches = {}
+        for name, pid, status, start, arguments in (("ending", 4100000, "R", "777", []),
+                                                    ("reused", 4100001, "S", "999", ["sleep", "60"])):
+            launches[name] = self.base / name
+            launches[name].mkdir()
+            (launches[name] / "state.json").write_text(json.dumps({"pid": pid, "token": token, "start": "777"}))
+            self.fake_process(root, pid, status, start, arguments)
+        printed = io.StringIO()
+        with mock.patch.object(self.tool, "PROC", root), mock.patch.object(self.tool.os, "kill", kill), \
+                contextlib.redirect_stdout(printed):
+            self.assertEqual(self.tool.stop(launches["ending"]), 0)
+            self.assertEqual(self.tool.stop(launches["reused"]), 0)
+        self.assertEqual(signalled, [(4100000, signal.SIGTERM)])
+        self.assertIn("後始末: サービス (プロセス 4100000) を止めた。", printed.getvalue())
+        self.assertIn("後始末: サービス (プロセス 4100001) は止まっていた。その番号は今は別のプロセスのもので、触っていない。", printed.getvalue())
+        for launch in launches.values():
+            self.assertTrue(self.record(launch, "stopped.json")["ok"])
 
     def test_what_is_missing_is_named_and_the_service_is_still_stopped(self):
         environment = dict(self.environment)

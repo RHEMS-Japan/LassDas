@@ -1115,8 +1115,17 @@ been tried on a cluster. So let each `run` first look for the directories of
 earlier launches that have no record of a finished `stop`, and run `stop` on
 them. Processes inside the sandbox end with it, since Linux ends every
 process of the sandbox's PID namespace when its first process ends; test data
-in a database or on another host does not, and only that next `run` removes
-it.
+in a database or on another host does not, and only the next `run` of the same
+request removes it. Each request has a home of its own, so what a request
+recorded stays when it ends or is stopped before its `verify` stage runs
+again.
+
+Know the service you started by the time it began, recorded when you start
+it, not by its arguments. On Linux a process that is ending, as the service
+is right after the group's SIGTERM, has no arguments left to read, so a check
+that looks for its own arguments takes its own service for another process
+and fails although nothing is left. When another process holds the recorded
+PID now, yours has ended: leave that process alone.
 
 **Add it to your copy.** Append this process to the `verify` role's
 `processes`, with your own values in place of the example's:
@@ -1171,9 +1180,11 @@ recorded before that stay in the history.
 **After the merge.** This checks the change before it is merged. To check the
 integration branch after the merge as well, add the same command as one more
 line of `VERIFY_COMMANDS` in `verify_merged` (each line runs without a shell).
-That is a separate run against a different state; the shipped report
-instructions ask for the checked revision and environment of each
-observation.
+That is a separate run against a different state, and its output is the
+merged check's, not the `verify` stage's. The shipped instructions ask the
+report to name the checked revision and environment under Observable results
+only; to have the report say which state a live check saw, say so in the
+project guidance.
 
 **A working example.** `rewrite/examples/live-check/` checks a fictional
 project on `127.0.0.1`: `verify_feature.py` has `run` and the five
@@ -1187,7 +1198,8 @@ since what it prints is quoted in the report. Its tests
 feature that does not work, SIGTERM while it waits for an answer, a killed
 launch whose leftovers the next launch removes, a cleanup that fails, a
 process it did not start, a missing preparation, and a run through the
-merged check's command runner.
+merged check's command runner. A made-up `/proc` gives it what Linux shows of
+a service that is ending and of a PID another process holds now.
 
 ### With a gateway in front of the models
 

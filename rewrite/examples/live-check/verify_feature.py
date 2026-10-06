@@ -32,6 +32,12 @@ operation under way; the evidence is still printed and the cleanup still
 done, and run exits 1. The observation is printed last, because the engine's
 record and the merged check keep the end of a long output.
 
+A launch knows the service it started again by the time that process began,
+which state.json records, not by its arguments: on Linux a process that is
+ending, as one that has just been sent SIGTERM is, has no arguments left to
+read. When another process holds the recorded PID now, the launch's own has
+ended; stop leaves that process alone and finds nothing of the launch left.
+
 Each launch writes in a directory of its own under $TASK_HOME/logs/live-check,
 which the engine keeps when it trims a finished request's home. The service's
 data, where the test users are, is $TASK_HOME/live-check-store.
@@ -61,6 +67,10 @@ SHOWN = 200  # characters of an answer shown in the observation; response.txt ha
 
 # Loopback only, whatever proxy the environment names.
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+# Where Linux describes its processes. The tests point it at a directory of
+# their own, to give process_state what Linux can show.
+PROC = Path("/proc")
 
 
 class Interrupted(Exception):
@@ -128,25 +138,75 @@ def feature_row(map_path):
     return None
 
 
-def process_state(pid, token):
-    """'gone', 'ours' or 'other': whether the recorded process still runs, and
-    whether it is the one the launch started, whose arguments carry the token.
-    A process that has ended but not been collected counts as gone."""
-    if Path("/proc/self").is_dir():
+def ps(pid, *fields):
+    """The words ps reports for the process in the C locale; none when it has ended."""
+    arguments = ["ps"]
+    for field in fields:
+        arguments += ["-o", field + "="]
+    listed = subprocess.run(arguments + ["-p", str(pid)], stdin=subprocess.DEVNULL, capture_output=True,
+                            text=True, env=dict(os.environ, LC_ALL="C"))
+    return listed.stdout.split() if listed.returncode == 0 else []
+
+
+def linux_stat(pid):
+    """The fields of /proc/<pid>/stat after the command's name, or None."""
+    try:
+        return (PROC / str(pid) / "stat").read_text().rpartition(")")[2].split()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+
+
+def process_start(pid):
+    """When the process began, as the system reports it (on Linux the 22nd
+    field of /proc/<pid>/stat, elsewhere ps's start time), or None once it has
+    ended. A launch records it, to know its own process again later."""
+    if (PROC / "self").is_dir():
+        fields = linux_stat(pid)
+        return fields[19] if fields and len(fields) > 19 else None
+    return " ".join(ps(pid, "lstart")) or None
+
+
+def process_state(state):
+    """What runs at the recorded PID now, judged from one reading:
+
+    'gone'    nothing does, or only a process that has ended and is not yet
+              collected;
+    'ours'    the process the launch started: it began at the recorded time.
+              Its arguments are not read for this. On Linux a process that is
+              ending has none left to read, and it is still the launch's own;
+    'reused'  another process, which began at another time: the launch's own
+              process has ended, and the PID went to someone else;
+    and for a record without a start time, which only the arguments can tell:
+    'ours' when they carry the launch's token, 'ending' when there are none
+    left to read, and 'other' otherwise."""
+    pid, token, started = state["pid"], state.get("token", ""), state.get("start")
+    if (PROC / "self").is_dir():
+        fields = linux_stat(pid)
+        if not fields or fields[0][:1] in ("Z", "X", "x"):
+            return "gone"
+        if started:
+            return "ours" if len(fields) > 19 and fields[19] == started else "reused"
         try:
-            status = Path("/proc/%d/stat" % pid).read_text().rpartition(")")[2].split()[0]
-            arguments = Path("/proc/%d/cmdline" % pid).read_bytes().split(b"\0")
-        except (FileNotFoundError, ProcessLookupError, IndexError):
+            arguments = (PROC / str(pid) / "cmdline").read_bytes().split(b"\0")
+        except (FileNotFoundError, ProcessLookupError):
             return "gone"
-        if status in ("Z", "X"):
+        words = [argument.decode("utf-8", "replace") for argument in arguments if argument]
+    else:
+        listed = ps(pid, "stat", "lstart", "command")
+        if len(listed) < 6 or listed[0].startswith("Z"):
             return "gone"
-        return "ours" if token.encode() in arguments else "other"
-    listed = subprocess.run(["ps", "-o", "stat=", "-o", "command=", "-p", str(pid)],
-                            stdin=subprocess.DEVNULL, capture_output=True, text=True)
-    status, _, command = listed.stdout.strip().partition(" ")
-    if listed.returncode != 0 or not status or status.startswith("Z"):
-        return "gone"
-    return "ours" if token in command.split() else "other"
+        if started:
+            return "ours" if " ".join(listed[1:6]) == started else "reused"
+        words = listed[6:]
+    if token and token in words:
+        return "ours"
+    return "ending" if not words else "other"
+
+
+def ended(state):
+    """Whether the launch's own process has ended; collected when it is ours."""
+    collect(state["pid"])
+    return process_state(state) in ("gone", "reused")
 
 
 def collect(pid):
@@ -159,7 +219,7 @@ def collect(pid):
 
 def start(out):
     state = read_json(out / "state.json")
-    if state and process_state(state["pid"], state["token"]) == "ours":
+    if state and process_state(state) == "ours":
         say("起動: すでに起動している (プロセス %d)" % state["pid"])
         return 0
     token = secrets.token_hex(8)
@@ -175,7 +235,10 @@ def start(out):
         except OSError as error:
             say("起動: 失敗: server.py を起動できない (%s)" % error)
             return 1
-    write_json(out / "state.json", {"pid": service.pid, "token": token, "started_at": now(), "checkout": os.getcwd()})
+    # The start time is what tells this process from any later one that gets
+    # its PID; the token in its arguments is for a record without it.
+    write_json(out / "state.json", {"pid": service.pid, "token": token, "start": process_start(service.pid),
+                                    "started_at": now(), "checkout": os.getcwd()})
     deadline = time.monotonic() + START_SECONDS
     while time.monotonic() < deadline:
         if service.poll() is not None:
@@ -201,7 +264,7 @@ def start(out):
 def diagnose(out, map_path):
     missing = []
     state = read_json(out / "state.json")
-    if not state or not state.get("url") or process_state(state["pid"], state["token"]) != "ours":
+    if not state or not state.get("url") or process_state(state) != "ours":
         missing.append("起動方法: server.py が起動していない")
     elif request("GET", state["url"] + "/health")[0] != 200:
         missing.append("起動方法: /health が 200 を返さない")
@@ -271,7 +334,7 @@ def evidence(out, map_path=None, note=""):
                        "note": note or "操作していない", "observed_at": now()}
         write_json(out / "observation.json", observation)
     expected = observation.get("expected")
-    say("ライブ確認 (マージ前の変更を、この checkout から起動したサービスで確かめた。本番ではない)")
+    say("ライブ確認 (この checkout から起動したサービスで確かめた。本番ではない)")
     say("機能: %s (%s)" % (FEATURE, map_path or "Feature Map"))
     say("要求: " + (observation["request"] or "送っていない (%s)" % observation.get("note", "")))
     if state:
@@ -296,13 +359,24 @@ def stop(out):
     done, problems = [], []
     state = read_json(out / "state.json")
     if state:
-        pid, token = state["pid"], state["token"]
-        found = process_state(pid, token)
-        if found == "other":
-            problems.append("プロセス %d は、この起動が渡した乱数を引数に持たない別のプロセスなので止めていない" % pid)
-        elif found == "gone":
+        pid = state["pid"]
+        found = process_state(state)
+        # A process with no arguments left is ending. Whose it is cannot be
+        # told without a start time, so it is waited for, not signalled.
+        deadline = time.monotonic() + STOP_SECONDS
+        while found == "ending" and time.monotonic() < deadline:
+            time.sleep(0.02)
+            collect(pid)
+            found = process_state(state)
+        if found == "gone":
             collect(pid)
             done.append("サービス (プロセス %d) は止まっていた" % pid)
+        elif found == "reused":
+            done.append("サービス (プロセス %d) は止まっていた。その番号は今は別のプロセスのもので、触っていない" % pid)
+        elif found == "ending":
+            problems.append("プロセス %d は %d 秒たっても終わりきらない。この起動のものか分からないので止めていない" % (pid, STOP_SECONDS))
+        elif found == "other":
+            problems.append("プロセス %d は、この起動が渡した乱数を引数に持たない別のプロセスなので止めていない" % pid)
         else:
             for sent, wait in ((signal.SIGTERM, STOP_SECONDS), (signal.SIGKILL, 1)):
                 try:
@@ -310,14 +384,11 @@ def stop(out):
                 except ProcessLookupError:
                     pass
                 deadline = time.monotonic() + wait
-                while time.monotonic() < deadline:
-                    collect(pid)
-                    if process_state(pid, token) == "gone":
-                        break
+                while time.monotonic() < deadline and not ended(state):
                     time.sleep(0.02)
-                if process_state(pid, token) == "gone":
+                if ended(state):
                     break
-            if process_state(pid, token) == "gone":
+            if ended(state):
                 done.append("サービス (プロセス %d) を止めた" % pid)
             else:
                 problems.append("サービス (プロセス %d) が止まらない" % pid)
