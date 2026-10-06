@@ -106,8 +106,8 @@ jobs:
           test "$GO_RESULT" = success
           test "$PYTHON_RESULT" = success
 
-  # Consumer-identifier scans are separate from execution tests so that
-  # both report their results even when one fails.
+  # Consumer-identifier and credential-shape scans are separate from
+  # execution tests so that both report their results even when one fails.
   identifier-scans:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -121,7 +121,7 @@ jobs:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
         with:
           persist-credentials: false
-          fetch-depth: 0 # The commit-message scan reads the pushed range.
+          fetch-depth: 0 # The commit-message scans read the pushed range.
       - name: Read the Go the shipped image builds with
         id: image-go
         working-directory: .
@@ -185,6 +185,23 @@ jobs:
           RANGE_HEAD: ${{ github.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: bash .github/scripts/scan-commit-messages.sh
+      # Credentials are found by their shapes, with no list to provide, so
+      # these two run in every repository and on pull requests from other
+      # repositories, whatever the scans above did. The script's tests are
+      # rewrite/harnesses/test_ci_credential_shapes.py.
+      - name: Scan the tracked files for credential shapes
+        if: ${{ !cancelled() }}
+        working-directory: .
+        run: python3 -B .github/scripts/scan-credential-shapes.py tree
+      - name: Scan commit messages for credential shapes
+        # The range the commit-message scan above reads.
+        if: ${{ !cancelled() }}
+        working-directory: .
+        env:
+          RANGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          RANGE_HEAD: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python3 -B .github/scripts/scan-credential-shapes.py messages
 
   # rewrite/START.md says the engine builds with the Go its go.mod names or
   # later, while the jobs above run on the Go the shipped image builds with.
