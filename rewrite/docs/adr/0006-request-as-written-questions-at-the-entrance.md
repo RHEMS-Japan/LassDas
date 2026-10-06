@@ -41,7 +41,11 @@ not have.
 
 ## Status
 
-Accepted.
+Accepted. Narrowed by
+[0011](0011-the-requester-sees-a-change-before-delivery-only-when-it-alters-use.md):
+in an ordered run, the question is also offered after a stage that confirms
+the change before delivery, and a question chosen there holds the delivery
+until the requester comments.
 
 ## Source
 

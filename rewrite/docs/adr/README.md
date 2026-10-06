@@ -27,6 +27,7 @@ changed since, find the passage by the section name given beside the lines.
 | [0008](0008-pull-request-description-kept-with-the-run.md) | The pull request description is kept with the run, not committed to the consumer repository | README, "A pull request description from the run's reports" |
 | [0009](0009-forced-exits-resume-up-to-a-set-count.md) | After a forced exit, a time-limited request resumes by itself up to a set count | README, "Active-work limits and recovery" |
 | [0010](0010-worker-writes-the-checkout-but-not-git.md) | The worker may write the whole checkout, but not its `.git` | RUNTIME.md, "Linux role launch" |
+| [0011](0011-the-requester-sees-a-change-before-delivery-only-when-it-alters-use.md) | The requester sees a change before delivery only when it alters how the product is used | README, "Confirming the change before delivery" |
 
 ## Considered and not recorded
 
