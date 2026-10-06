@@ -62,6 +62,19 @@ class DescriptionTests(unittest.TestCase):
         self.assertNotIn("description_retained", self.fixture.receipt())
         self.assertEqual(sum(method == "PATCH" for method, _ in self.fixture.state["requests"]), 1)
 
+    def test_observations_tests_and_live_limits_reach_the_pull_request_unchanged(self):
+        for live in ("なし (導入先に検証の手段が無い)",
+                     "架空の検証先: command output = Hello; 本番ではありません"):
+            with self.subTest(live=live):
+                text = ("観察できる結果\n保存値の読み戻し: Hello\n"
+                        "単体テスト\nfixture check: exit 0\nライブ確認\n" + live + "\n")
+                self.explain(text)
+                result = self.deliver()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith(text))
+                self.assertEqual((self.fixture.home / "pull-request-description.md").read_text(),
+                                 self.fixture.state["pulls"][0]["body"])
+
     def test_uncertain_update_and_another_work_round_keep_the_full_explanation(self):
         self.explain("First explanation\n")
         self.assertEqual(self.deliver().returncode, 0)

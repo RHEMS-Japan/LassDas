@@ -1167,6 +1167,24 @@ commands in its final ordinary report. No special headings or model answer
 schema are required. With no role selected, the fixed delivery description
 is unchanged.
 
+For both that explanation and the final requester report, the shipped role
+instructions separate **observable results**, **unit tests** and **live
+verification**. State the actual command output, displayed behavior or saved
+value read back; identify the checked revision and environment. Unit-test
+success alone is not live verification. If the installation supplies no live
+verification method, say `なし (導入先に検証の手段が無い)` explicitly. If a
+method exists but was not run or failed, say so with the reason instead of
+calling it absent. Include performance results only when the request concerns
+performance. A work report written before later checks must mark those checks
+as not yet run; the final report can use their observed results.
+
+These are instructions to the reporting models, not required headings parsed
+by the engine. Review the account against the actual records; the delivery
+helper preserves the selected role's ordinary text without grading its prose.
+Providing no live method does not itself fail a request, but it does not prove
+a requested deployed behavior either. No live-check configuration or new
+verification method is introduced here.
+
 This uses the runtime's read-only `TASK_HISTORY` reference, not a document in
 the consumer's repository. Configure this option only with a runtime that
 supplies that reference to both commands. The latest contiguous set of reports

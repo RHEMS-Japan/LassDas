@@ -51,6 +51,24 @@ func gatewayExample(t *testing.T) config {
 	return loadExample(t, "../../examples/operator-gateway.json")
 }
 
+func TestExamplesAskForObservedResultsSeparateFromTestsAndLiveChecks(t *testing.T) {
+	for _, name := range []string{"operator.json", "operator-gateway.json", "operator-github.json", "operator-stages.json", "operator-github-stages.json"} {
+		cfg := loadExample(t, "../../examples/"+name)
+		for _, role := range cfg.Roles {
+			if !slices.Contains([]string{"work", "implement", "report", "draft_report"}, role.Name) {
+				continue
+			}
+			for _, process := range role.Processes {
+				for _, phrase := range []string{"Observable results", "Unit tests", "Live verification", "なし (導入先に検証の手段が無い)", "not yet run", "performance"} {
+					if !strings.Contains(process.Instructions, phrase) {
+						t.Errorf("%s/%s: reporting instructions omit %q", name, role.Name, phrase)
+					}
+				}
+			}
+		}
+	}
+}
+
 // Both shipped examples are held to the same boundaries. The expected
 // credential names are written here, not read back out of the file.
 var operatorExamples = []struct {
