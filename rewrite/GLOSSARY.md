@@ -511,7 +511,10 @@ tracker account: on acceptance, start and resume when `intake.announce` is
 on, when a stage with an `announce` sentence begins, after a restart, when
 work pauses and resumes, when no stage has completed for a long time (the
 stall notice, 停滞通知), and the declarations and the list of the models
-used. No model writes them, and none of them ends a request.
+used. While a request waits for its requester, the engine also says when the
+question about a change was not seen posted, and again after each interval set
+by `intake.question_reminder_minutes`. No model writes them, and none of them
+ends a request.
 
 - Used in: README.md:1581, START.md:133
 - Avoid: `announcement`

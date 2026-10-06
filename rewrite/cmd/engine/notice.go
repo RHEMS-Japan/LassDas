@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -269,6 +271,14 @@ func postableKinds(cfg config) []string {
 	}
 	if stallWindow(cfg) > 0 {
 		kinds = append(kinds, stallNotice)
+	}
+	if cfg.Workflow != nil && slices.ContainsFunc(cfg.Workflow.Stages, func(stage chain.Stage) bool { return stage.Confirm }) {
+		// Only a run with a stage that confirms the change waits without a
+		// seen question; a queue without one keeps its record as it was.
+		kinds = append(kinds, unseenQuestionNotice)
+	}
+	if cfg.Intake.QuestionReminderMinutes > 0 {
+		kinds = append(kinds, reminderNotice)
 	}
 	if cfg.Intake.Announce {
 		kinds = append(kinds, acceptedNotice, startedNotice, resumedNotice, modelsNotice)
@@ -678,6 +688,69 @@ func stallWindow(cfg config) time.Duration {
 	return time.Duration(minutes) * time.Minute
 }
 
+// A request that waits for the requester says so in fixed words: once when
+// the question chosen before delivery was not seen posted, and again after
+// each configured interval of waiting. Neither moves the recorded point after
+// which an answer is read, approves anything or ends the wait.
+const (
+	unseenQuestionNotice = "unseen-question"
+	reminderNotice       = "question-reminder"
+	unseenQuestionText   = "納品の前に、この変更を依頼者に確認していただく必要があると判断しましたが、確認の質問を投稿できたことを確かめられませんでした。このまま納品してよいか、直してほしい点があるか、納品しないかを、このチケットにコメントしてください。コメントがあるまで納品しません。"
+)
+
+// reminderClock is the time a wait is measured against; tests replace it.
+var reminderClock = time.Now
+
+// reminderText says how long the request has waited: in hours when the
+// interval is whole hours, in minutes otherwise.
+func reminderText(waited time.Duration) string {
+	length := fmt.Sprintf("%d 分", int64(waited/time.Minute))
+	if waited%time.Hour == 0 {
+		length = fmt.Sprintf("%d 時間", int64(waited/time.Hour))
+	}
+	return "この依頼は、依頼者の返答を待っています（待ち始めてから " + length + "）。返答があるまで、自動で納品したり、依頼を終わらせたりはしません。止める場合は、1 行目に「停止」とだけ書いてコメントしてください。"
+}
+
+// noticeWaitingRequest says, on a tick of a request that waits for the
+// requester and has no answer yet, what it has not said. The wait began with
+// the last record before it. Each notice is one event of its kind, recorded
+// before it is submitted, so another tick or a restart repeats nothing.
+func noticeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, directory string, state chain.State, observe func(string)) {
+	if cfg.Intake == nil || !state.Waiting || len(state.History) == 0 {
+		return
+	}
+	n := requestNotices(cfg, issue, directory)
+	began := state.History[len(state.History)-1].FinishedAt
+	wait := strconv.Itoa(len(state.History))
+	unsaid := func(kind, event string) func(noticeLog, time.Time) bool {
+		return func(log noticeLog, _ time.Time) bool {
+			return !slices.ContainsFunc(log.Notices, func(said noticeRecord) bool { return said.Kind == kind && said.Event == event })
+		}
+	}
+	if state.WaitingWithoutQuestion {
+		text := unseenQuestionText
+		if page := requestPage(cfg, issue); page != "" {
+			text += "\n変更の内容はこちらで見られます: " + page
+		}
+		if err := n.say(ctx, unseenQuestionNotice, text, "", began, unsaid(unseenQuestionNotice, wait), wait); err != nil {
+			observe("the wait without a seen question was not announced: " + err.Error())
+		}
+	}
+	every := time.Duration(cfg.Intake.QuestionReminderMinutes) * time.Minute
+	if every <= 0 || began.IsZero() {
+		return
+	}
+	intervals := int64(reminderClock().Sub(began) / every)
+	if intervals < 1 {
+		return
+	}
+	waited := time.Duration(intervals) * every
+	event := wait + ":" + strconv.FormatInt(intervals, 10)
+	if err := n.say(ctx, reminderNotice, reminderText(waited), "", began.Add(waited), unsaid(reminderNotice, event), event); err != nil {
+		observe("the reminder of the wait was not posted: " + err.Error())
+	}
+}
+
 // noteStall says once that nothing has completed for a while. It changes no
 // routing and ends nothing: the request keeps trying to recover.
 func noteStall(ctx context.Context, cfg config, n notices, directory string, running bool, began time.Time) error {
@@ -849,6 +922,12 @@ func validateNotices(cfg config) error {
 	}
 	if cfg.Intake.StallNoticeMinutes != nil && *cfg.Intake.StallNoticeMinutes < 0 {
 		return errors.New("intake.stall_notice_minutes must not be negative")
+	}
+	if !validWorkMinutes(cfg.Intake.QuestionReminderMinutes) {
+		return errors.New("intake.question_reminder_minutes must be zero or a positive duration in minutes")
+	}
+	if cfg.Intake.QuestionReminderMinutes > 0 && cfg.Intake.QuestionRole == "" {
+		return errors.New("intake.question_reminder_minutes needs intake.question_role")
 	}
 	if err := validateEndpoint(modelCreditURL(cfg)); err != nil {
 		return err

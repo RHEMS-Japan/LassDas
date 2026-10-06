@@ -32,7 +32,11 @@ type intakeConfig struct {
 	StoppedWorkspaceRetentionHours int     `json:"stopped_workspace_retention_hours,omitempty"`
 	QuestionRole                   string  `json:"question_role,omitempty"`
 	QuestionNoPostLimit            *int    `json:"question_no_post_limit,omitempty"`
-	IssueIDs                       []int64 `json:"issue_ids,omitempty"`
+	// QuestionReminderMinutes is how long a request may wait for the
+	// requester's answer before the wait is said again, and again after each
+	// further interval. Absent or zero says nothing.
+	QuestionReminderMinutes int     `json:"question_reminder_minutes,omitempty"`
+	IssueIDs                []int64 `json:"issue_ids,omitempty"`
 	// MaxActiveMinutes limits each delegated interval of newly accepted work.
 	// Zero leaves it unlimited. Stage outcomes never reset the saved clock.
 	MaxActiveMinutes int `json:"max_active_minutes,omitempty"`
@@ -473,6 +477,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 					continue
 				}
 				if !resume {
+					noticeWaitingRequest(ctx, cfg, issue, directory, state, say)
 					continue
 				}
 				// A stop is not an answer. The request runs again only for the

@@ -571,8 +571,10 @@ other report. Only the first comment after the recorded point becomes the
 answer; further comments are not appended, and a later question moves the point
 past them. While a request waits, each poll reads that issue's comments inside
 the collector loop, so a slow tracker delays the loop by up to one interval for
-every waiting request, and for every request held for the model budget. Nothing notifies the requester beyond the posted comment
-itself, and an unanswered question waits indefinitely unless someone stops it.
+every waiting request, and for every request held for the model budget. Unless
+`intake.question_reminder_minutes` is set (see "What the requester is told at
+night"), nothing notifies the requester beyond the posted comment itself, and
+either way an unanswered question waits indefinitely unless someone stops it.
 
 ### Stages instead of roles
 
@@ -1224,8 +1226,9 @@ show the requester what the change does, with the choices to deliver it as it
 is, to name what to change, or not to deliver it. Whatever that launch does,
 the request then waits for the requester's comment. A question seen posted is
 waited on as described above. When no post is seen, when the launch did not
-exit 0 or when a restart cut it short, the request waits all the same and the
-history says so. Such a launch does not count toward
+exit 0 or when a restart cut it short, the request waits all the same, the
+history says so, and the engine posts a fixed notice asking for a comment (see
+"What the requester is told at night"). Such a launch does not count toward
 `intake.question_no_post_limit`, and a question role that this limit left out
 of the choices after the first stage is still offered here. Only a comment
 with words from the requester, or from an account in
@@ -1790,12 +1793,47 @@ untouched by it.
 All three go out through the controller's own tracker credential, the same one
 the stop report uses. No role is given the means to post them.
 
+Two more fixed notices concern a request that waits for the requester. They
+are recorded, matched and posted in the same way, through the same credential.
+
+**When the question about the change was not seen posted.** After the decision
+that follows a stage confirming the change chose to ask the requester (see
+"Confirming the change before delivery") and no posted question was seen, the
+request waits for the requester's comment, and the controller posts once:
+
+> 納品の前に、この変更を依頼者に確認していただく必要があると判断しましたが、確認の質問を投稿できたことを確かめられませんでした。このまま納品してよいか、直してほしい点があるか、納品しないかを、このチケットにコメントしてください。コメントがあるまで納品しません。
+
+With `intake.status_page` set, a line follows it with the request's own page,
+where the change can be seen. A comment with words from the requester ends the
+wait as an answer does; this notice itself is never taken for one.
+
+**While a question waits.** `intake.question_reminder_minutes` is how long a
+request may wait for the requester's answer before the wait is said again.
+Absent or zero says nothing; it needs `intake.question_role`. The wait is
+measured from the last record before it: the question's launch, or the note
+that no posted question was seen. Each time a further interval has passed, the
+controller posts once:
+
+> この依頼は、依頼者の返答を待っています（待ち始めてから <n>）。返答があるまで、自動で納品したり、依頼を終わらせたりはしません。止める場合は、1 行目に「停止」とだけ書いてコメントしてください。
+
+The reminder for each interval is recorded as a notice of its own, so another
+tick or a restart within the same interval does not repeat it. A reminder whose
+interval ended before the queue's engines began posting reminders is not
+posted, so setting the value for the first time does not send one to every
+request already waiting: the next interval's reminder is the first. Reminders
+apply to every waiting question, the first stage's included. They leave the
+recorded point after which an answer is read where it was, and they are never
+taken for an answer, even where the controller's own account filed the issue.
+Passing an interval approves nothing and ends nothing: only an answer resumes
+the request, and a stop still stops it.
+
 What this does not do: these notices say what the engine recorded, not that
 the work is being tried at that moment or that it will succeed. They are
 posted from the collector loop, so a slow tracker delays that loop while one
 is being submitted. A request recorded as waiting for the requester's answer
-is not stalled and says nothing further; a question whose launch has not
-returned yet is not recorded as waiting, so a notice can follow it.
+is not stalled and says nothing further beyond the two notices about waiting
+above; a question whose launch has not returned yet is not recorded as
+waiting, so a notice can follow it.
 Nothing here notices a crash loop that never reaches the collector at all, a
 full disk, or a provider that answers quickly and uselessly. The budget reader
 has been exercised against a local fixture of the documented response shape,
