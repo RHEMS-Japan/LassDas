@@ -131,6 +131,15 @@ func TestLiveCheckRoleHelper(t *testing.T) {
 		}
 	case "review":
 		fmt.Println("Review by fixture/reviewer: PASSED. Send-backs so far: 0 of at most 2.")
+	case "confirm_change":
+		// The change only alters the greeting's text, nothing the requester
+		// operates; the decision after this stage is the test's.
+		greeting, err := os.ReadFile("src/greeting.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("The change read from the checkout: src/greeting.txt says %q.", greeting)
+		fmt.Print(stagesNoConfirmation)
 	case "deliver":
 		write(os.Getenv("LIVE_CHECK_RECEIPT"), "delivered src/greeting.txt\n")
 	case "verify_merged":
@@ -305,8 +314,9 @@ func startLiveCheckRun(t *testing.T, options liveCheckOptions) *liveCheckRun {
 				}
 				return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
 			case "/api/v1/chat/completions":
-				// After elicitation the decision always goes on to the work.
-				return routingSelectionReply(r, chain.Assignment{Role: "work"}), nil
+				// The decisions of a run that asks the requester nothing: the
+				// work after elicitation, the delivery after the confirmation.
+				return routingSelectionReply(r, chain.Assignment{Role: orderedRunChoice(t, r)}), nil
 			}
 		}
 		return nil, fmt.Errorf("unexpected fixture destination %s %s", r.Method, r.URL.Path)
@@ -469,7 +479,7 @@ func TestALiveCheckNotSuppliedAndOneThatFailsAreDifferentRecords(t *testing.T) {
 					if i+1 < len(launches) && launches[i+1].role != "elicit" {
 						t.Fatalf("after a failed live check the run went to %s, not elicitation", launches[i+1].role)
 					}
-				case "review", "deliver", "verify_merged", "report", "confirm_report":
+				case "review", "confirm_change", "deliver", "verify_merged", "report", "confirm_report":
 					t.Fatalf("the %s stage ran although every live check failed", launch.role)
 				}
 			}
@@ -743,7 +753,7 @@ func liveCheckFailuresGoBack(t *testing.T, launches []stageLaunch) (checks []cha
 			if !passed && i+1 < len(launches) && launches[i+1].role != "elicit" {
 				t.Fatalf("after a live check that did not exit 0 the run went to %s, not elicitation", launches[i+1].role)
 			}
-		case "review", "deliver", "verify_merged", "report", "confirm_report":
+		case "review", "confirm_change", "deliver", "verify_merged", "report", "confirm_report":
 			if !passed {
 				t.Fatalf("the %s stage ran after a live check that did not exit 0", launch.role)
 			}
