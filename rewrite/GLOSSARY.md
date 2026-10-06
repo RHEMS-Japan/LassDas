@@ -13,8 +13,8 @@ examples. It fails when one of them appears, unless the word is listed under
 "Waiting for rewording" at the end. It also fails when a word of an entry is
 not used in those documents, or when a file listed after "Used in" no longer
 uses it. The line numbers after "Used in" are where the word was when the
-entry was written; the scan says where it is now if it has moved, without
-failing.
+entry was written. When one has moved, the scan names the nearest line that
+uses the word, which may be a different sentence, and does not fail.
 
 The scan matches words this way:
 
@@ -207,8 +207,9 @@ time limit unless `timeout_minutes` sets one.
 
 A later launch of a stage that has already run for this request, because a
 later stage sent the work back or because the stage's own launch did not
-exit 0. With `declare_models`, the engine's declaration for a rerun reads,
-for example, 要件確定をやり直します.
+exit 0. With `declare_models`, the engine declares a rerun only when its
+model differs from the one last declared for that stage, in words such as
+要件確定をやり直します.
 
 - Used in: README.md:690, README.md:1355
 - Not the same as: retry.
@@ -331,10 +332,13 @@ requester's answer settles requirements; it does not widen permissions.
 
 ### question / 質問
 
-A comment that the question role, `intake.question_role`, posts to the issue,
-listing the points only the requester can decide, each with concrete choices,
-so that one comment can answer them all. A general request for clarification
-is not a question. The request waits until it is answered or stopped.
+A comment that the question role, `intake.question_role`, posts to the issue.
+It lists every point that only the requester can decide and that can be
+answered now, numbered, each with a recommended answer and concrete choices; a
+point that depends on one not yet answered comes in a later comment, and a
+reply of `推奨で` accepts every recommendation in that comment. A general
+request for clarification is not a question. The request waits until it is
+answered or stopped.
 
 - Used in: README.md:539, START.md:122
 - Avoid: `打ち返`
@@ -347,7 +351,7 @@ history unchanged, as the requester's own words, and the request resumes.
 Beyond having words, its text is not checked, and a stop comment is never an
 answer.
 
-- Used in: README.md:554, START.md:124
+- Used in: README.md:556, START.md:124
 - Other uses: README.md also says reply for an answer, and answer for what a
   role returns at the end of a launch.
 - Avoid: `回答`; `返事`; `返信`
@@ -420,10 +424,12 @@ The `review` stage of the ordered examples. The command
 the diff and the test output to a model the operator names, normally from a
 different publisher than the working role's; the command does not check the
 publisher. It exits 1 on a blocking verdict and 0 on a verdict that does not
-object. Without a verdict it keeps asking or waits; it lets work through
-unreviewed only when the operator sets `REVIEW_UNAVAILABLE=pass`.
+object. With `PR_DESCRIPTION_ROLE`, an empty or oversized report chosen for
+the pull request description also exits 1, before any model is asked. Without
+a verdict it keeps asking or waits; it lets work through unreviewed only when
+the operator sets `REVIEW_UNAVAILABLE=pass`.
 
-- Used in: README.md:866, START.md:110, ../CLAUDE.md:86
+- Used in: README.md:866, README.md:942, START.md:110, ../CLAUDE.md:86
 - Avoid: none.
 
 ### send-back / 差し戻し
@@ -545,7 +551,9 @@ kind of word.
 These words to avoid still appear in the documents. A separate change rewords
 them and removes each word from this list together with its last use. Until
 then the scan reports where they are without failing, and it fails when a word
-listed here no longer appears.
+listed here no longer appears. `再実行` in README.md quotes the engine's own
+notice, cmd/engine/turns.go:249, so it leaves this list only together with a
+change to that text.
 
 - `creator`
 - `起票者`
