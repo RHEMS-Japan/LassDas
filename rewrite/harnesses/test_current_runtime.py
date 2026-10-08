@@ -40,6 +40,12 @@ class CurrentRuntimeTests(unittest.TestCase):
             self.assertNotIn("./cmd/lassdas", workflow)
         self.assertIn("bash .github/scripts/check-packaged-engine.sh", (
             ROOT / ".github/workflows/image.yml").read_text())
+        published = (ROOT / ".github/workflows/image.yml").read_text()
+        rust = published.index("bash .github/scripts/check-rust-toolchain.sh")
+        self.assertLess(published.index("docker build --platform linux/arm64"), rust)
+        self.assertLess(rust, published.index('docker push "$tag"'))
+        self.assertIn("bash .github/scripts/check-rust-toolchain.sh", (
+            ROOT / ".github/workflows/image-check.yml").read_text())
 
     def test_distribution_note_uses_this_build_without_the_removed_cli(self):
         workflow = (ROOT / ".github/workflows/image.yml").read_text()

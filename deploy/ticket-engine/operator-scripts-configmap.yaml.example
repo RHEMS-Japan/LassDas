@@ -17,8 +17,10 @@
 # VERIFY_COMMANDS names them. Write anything a build produces under $HOME (the
 # process's private directory, writable) or /tmp, not into the checkout, or
 # grant the verify process write access to those paths. The image carries Git,
-# Python 3, Go, and Node.js 22 with npm and pnpm (deploy/pod/Dockerfile); a
-# toolchain it lacks is not there for these scripts either.
+# Python 3, Go, Rust (rustc and cargo, with gcc as the linker), and Node.js 22
+# with npm and pnpm (deploy/pod/Dockerfile); a toolchain it lacks is not there
+# for these scripts either. cargo writes under $HOME unless CARGO_HOME and
+# CARGO_TARGET_DIR say otherwise; keep its build out of the checkout.
 # These roles do not inherit the delivery token or your workstation's package
 # credentials. Prepare private dependencies before opening intake; see
 # SETUP.md, "Dependencies and read-only builds". Do not solve a failed fetch by

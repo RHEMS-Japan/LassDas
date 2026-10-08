@@ -44,3 +44,7 @@ jobs:
         # The same check image.yml runs before it pushes; what passes is
         # written in the script.
         run: bash .github/scripts/check-packaged-engine.sh "$IMAGE"
+      - name: Build and test a small crate with the image's Rust
+        # The same check image.yml runs before it pushes; what passes is
+        # written in the script.
+        run: bash .github/scripts/check-rust-toolchain.sh "$IMAGE"

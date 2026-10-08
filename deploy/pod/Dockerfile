@@ -89,6 +89,41 @@ RUN cd /opt/hermes-src/web && npm ci --no-audit --no-fund \
 COPY --from=bundle /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
 
+# Rust for configured validation commands, pinned like the tools above: the
+# standalone components of one stable release (static.rust-lang.org's
+# channel-rust-stable.toml of RUST_DIST_DATE names each file and its sha256),
+# installed under /usr/local. A role runs with a cleared environment, so this
+# is not rustup: cargo and rustc are the real programs on the role's PATH and
+# need no RUSTUP_HOME or CARGO_HOME; cargo writes only under the role's HOME
+# (or the CARGO_HOME and CARGO_TARGET_DIR a command sets). gcc and libc6-dev
+# are the linker rustc calls. clippy and rustfmt are there for a role that runs
+# them; no check of this image requires them.
+ARG RUST_VERSION=1.99.0
+ARG RUST_DIST_DATE=2026-10-01
+ARG RUSTC_SHA256=89c0f1a3a44df63c95e5d5f2ba093d0a12c5f5f57f8635f8a7a0ce50cf86600e
+ARG RUST_STD_SHA256=1cf7e2ef58ed1cfa6f1adea18e155cbf254c1951f39e5f5e3376879f55fd64a4
+ARG CARGO_SHA256=113229fcc16cc1ba004923a4cc275fbf3281dafaaf8b97269f9c00189d497fd4
+ARG CLIPPY_SHA256=42e49dc02d29949395c0c072585961f6c9b5408110236087828d4e2f94ca96ef
+ARG RUSTFMT_SHA256=4b9162fef99fd5246d2f83a2430c144e9bb9095aac6d1de0aaebde45ec01e09a
+RUN { test "$(uname -m)" = "aarch64" || { echo "deploy/pod/Dockerfile builds linux/arm64 only (the Rust components are pinned for aarch64)" >&2; exit 1; }; } \
+    && apt-get update -qq && apt-get install -y -q --no-install-recommends gcc libc6-dev xz-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir /tmp/rust-install && cd /tmp/rust-install \
+    && for component in "rustc ${RUSTC_SHA256}" "rust-std ${RUST_STD_SHA256}" "cargo ${CARGO_SHA256}" \
+                        "clippy ${CLIPPY_SHA256}" "rustfmt ${RUSTFMT_SHA256}"; do \
+         name="${component% *}" && sum="${component#* }" \
+         && file="${name}-${RUST_VERSION}-aarch64-unknown-linux-gnu.tar.xz" \
+         && curl -fsSL -o "$file" "https://static.rust-lang.org/dist/${RUST_DIST_DATE}/${file}" \
+         && echo "${sum}  ${file}" | sha256sum -c - \
+         && tar -xJf "$file" \
+         && "./${file%.tar.xz}/install.sh" --prefix=/usr/local --disable-ldconfig >/dev/null \
+         || exit 1; \
+       done \
+    && cd / && rm -rf /tmp/rust-install /usr/local/share/doc/rust \
+    && cc --version | head -n 1 \
+    && rustc --version && cargo --version && cargo clippy --version && rustfmt --version \
+    && test "$(rustc --version | cut -d' ' -f2)" = "${RUST_VERSION}"
+
 # The role-chain bundle, its fixed delivery processes and the role syscall
 # policy. All three stay outside every model-writable directory: a role
 # receives them as explicit read-only runtime paths (rewrite/RUNTIME.md,
