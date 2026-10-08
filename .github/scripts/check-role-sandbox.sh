@@ -8,7 +8,10 @@
 # every capability dropped, seccomp and AppArmor unconfined and /proc unmasked,
 # the settings the shipped StatefulSet gives the engine container. Without the
 # compiled role syscall policy the launcher's sandbox is the plain bubblewrap
-# one; the mounts are the same.
+# one; the mounts are the same. The launcher is given --network inherit, as
+# the shipped verify processes are: with every capability dropped, bubblewrap
+# cannot bring up loopback in a network namespace of its own (the first run
+# failed on "loopback: Failed RTM_NEWADDR"), and the container has no network.
 #
 # Usage: bash .github/scripts/check-role-sandbox.sh IMAGE
 # image-check.yml runs it on every pull request; image.yml runs it after the
@@ -26,7 +29,7 @@ output="$(docker run --rm --network none --platform linux/arm64 --read-only --tm
   PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin TASK_WORKSPACE=/work TASK_HOME=/tmp/home \
   bash -c 'set -euo pipefail
     mkdir -p "$TASK_HOME"
-    python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py --runtime /opt/ticket-automation/bundle --network none -- \
+    python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py --runtime /opt/ticket-automation/bundle --network inherit -- \
       /bin/sh -c "set -eu; cd /work; cc --version | head -n 1; readlink -f /usr/bin/cc; export CARGO_TARGET_DIR=\$HOME/target; cargo build --locked --offline --all-targets && cargo test --locked --offline"' 2>&1)" || status=$?
 printf 'exit status %s\n%s\n' "$status" "$output"
 if [ "$status" -ne 0 ]; then
