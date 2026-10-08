@@ -17,7 +17,9 @@ if [ "$#" -ne 1 ]; then
 fi
 crate="$(cd "$(dirname "$0")/rust-toolchain-check" && pwd)" || exit 1
 status=0
-output="$(docker run --rm --network none --platform linux/arm64 --read-only --tmpfs /tmp \
+# Docker mounts a --tmpfs noexec unless told otherwise; a role's HOME is not
+# noexec, and cargo test runs the test programs it builds there.
+output="$(docker run --rm --network none --platform linux/arm64 --read-only --tmpfs /tmp:rw,exec,nosuid,size=2g \
   -v "$crate:/work:ro" --workdir /work --entrypoint /usr/bin/env "$1" -i \
   PATH=/runtime-policy/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin HOME=/tmp/home \
   bash -c 'set -euo pipefail
