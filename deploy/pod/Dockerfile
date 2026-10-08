@@ -120,6 +120,11 @@ RUN { test "$(uname -m)" = "aarch64" || { echo "deploy/pod/Dockerfile builds lin
          || exit 1; \
        done \
     && cd / && rm -rf /tmp/rust-install /usr/local/share/doc/rust \
+    # Debian's /usr/bin/cc is a symlink through /etc/alternatives; a role sees
+    # /usr but only named files of /etc, so cc has to resolve inside /usr for
+    # rustc to find its linker there (check-rust-toolchain.sh holds it to that).
+    && ln -sfn gcc /usr/bin/cc \
+    && test "$(readlink /usr/bin/cc)" = gcc \
     && cc --version | head -n 1 \
     && rustc --version && cargo --version && cargo clippy --version && rustfmt --version \
     && test "$(rustc --version | cut -d' ' -f2)" = "${RUST_VERSION}"

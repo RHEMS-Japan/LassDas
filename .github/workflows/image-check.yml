@@ -48,3 +48,7 @@ jobs:
         # The same check image.yml runs before it pushes; what passes is
         # written in the script.
         run: bash .github/scripts/check-rust-toolchain.sh "$IMAGE"
+      - name: Build and test the small crate through the role launcher
+        # The same check image.yml runs before it pushes; what passes is
+        # written in the script.
+        run: bash .github/scripts/check-role-sandbox.sh "$IMAGE"

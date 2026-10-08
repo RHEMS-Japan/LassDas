@@ -61,6 +61,8 @@ jobs:
           bash .github/scripts/check-packaged-engine.sh "$tag"
           # Build and test a small crate with the image's own Rust, as a role would.
           bash .github/scripts/check-rust-toolchain.sh "$tag"
+          # The same crate through the real role launcher: what a role can run.
+          bash .github/scripts/check-role-sandbox.sh "$tag"
           docker push "$tag"
           digest="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" | grep "^$repo@sha256:" | head -n 1)"
           [ -n "$digest" ] || { echo "no digest for $tag" >&2; exit 1; }

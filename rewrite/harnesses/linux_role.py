@@ -12,6 +12,12 @@ import stat
 import sys
 
 
+# Debian's alternatives: /usr/bin/cc, awk and others are symlinks into this
+# directory, which point back into /usr. A sandbox that shows /usr without it
+# leaves those programs dangling (rustc found no `cc` in a role).
+ALTERNATIVES = Path("/etc/alternatives")
+
+
 def absolute(value):
     path = Path(value)
     if path.anchor != "/" or ".." in path.parts or path == Path("/"):
@@ -134,6 +140,8 @@ def command(args, environment):
                 descriptor = os.open(path, os.O_PATH)
                 descriptors.append(descriptor)
                 result += ["--ro-bind-fd", str(descriptor), str(path)]
+        if ALTERNATIVES.is_dir() and not ALTERNATIVES.is_symlink():
+            result += mount(ALTERNATIVES, directory=True)
         # Mount the private base first: a later /tmp would hide explicitly
         # granted work, home or SDK paths beneath it (including the preflight).
         result += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]

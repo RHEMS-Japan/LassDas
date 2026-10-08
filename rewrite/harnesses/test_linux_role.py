@@ -149,6 +149,33 @@ class DescriptorTests(unittest.TestCase):
                 for descriptor in descriptors:
                     os.close(descriptor)
 
+    def test_the_alternatives_directory_is_shown_read_only_when_the_system_has_one(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            base = Path(root)
+            work, home, alternatives = base / "work", base / "home", base / "alternatives"
+            for directory in (work, home, alternatives):
+                directory.mkdir()
+            args = argparse.Namespace(program=["--", "/bin/true"], write=[], create=[], runtime=[], network="none")
+            environment = {"TASK_WORKSPACE": str(work), "TASK_HOME": str(home)}
+            with patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"), \
+                    patch.object(launcher, "ALTERNATIVES", alternatives):
+                argv, _, descriptors = launcher.command(args, environment)
+            try:
+                position = argv.index(str(alternatives))
+                self.assertEqual(argv[position - 2], "--ro-bind-fd")
+                self.assertLess(position, argv.index("--proc"), "system paths are mounted before the private base")
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+            with patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"), \
+                    patch.object(launcher, "ALTERNATIVES", base / "absent"):
+                argv, _, descriptors = launcher.command(args, environment)
+            try:
+                self.assertNotIn(str(base / "absent"), argv)
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+
     def test_a_whole_workspace_grant_keeps_the_checkout_metadata_read_only(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as root:
             base = Path(root)
@@ -245,6 +272,32 @@ class HistoryIsolationTests(unittest.TestCase):
                     os.close(descriptor)
             self.assertEqual(history.read_text(), "canonical accepted answer")
             self.assertEqual(neighbor.read_text(), "not granted")
+
+    def test_a_program_behind_the_alternatives_directory_resolves_inside_the_sandbox(self):
+        # On a system with Debian's alternatives, /usr/bin/awk (or cc) is a
+        # symlink into /etc/alternatives; the sandbox shows /usr, and without
+        # /etc/alternatives the link is dangling inside it.
+        behind = [path for path in (Path("/usr/bin/awk"), Path("/usr/bin/cc"), Path("/usr/bin/pager"))
+                  if path.is_symlink() and "/etc/alternatives/" in os.path.realpath(path) + "/"
+                  or path.is_symlink() and str(os.readlink(path)).startswith("/etc/alternatives/")]
+        if not behind:
+            self.skipTest("no program on this system is linked through /etc/alternatives")
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            work, home = root / "workspace", root / "home"
+            work.mkdir()
+            home.mkdir()
+            program = ["--", "/bin/sh", "-c", 'target=$(readlink -f "$1") && test -x "$target"', "resolver", str(behind[0])]
+            args = argparse.Namespace(program=program, write=[], create=[], runtime=[], network="none")
+            argv, environment, descriptors = launcher.command(args, {
+                "TASK_WORKSPACE": str(work), "TASK_HOME": str(home), "PATH": os.environ["PATH"]})
+            try:
+                result = subprocess.run(argv, env=environment, pass_fds=descriptors, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, "%s did not resolve to an executable inside the sandbox: %s"
+                                 % (behind[0], result.stdout + result.stderr))
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
 
 
 if __name__ == "__main__":
