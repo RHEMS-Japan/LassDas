@@ -12,6 +12,9 @@
 # the shipped verify processes are: with every capability dropped, bubblewrap
 # cannot bring up loopback in a network namespace of its own (the first run
 # failed on "loopback: Failed RTM_NEWADDR"), and the container has no network.
+# On a runner whose kernel.apparmor_restrict_unprivileged_userns is 1, the
+# uid map write fails ("setting up uid map: Permission denied") whatever the
+# container's settings; the workflows set that sysctl to 0 first.
 #
 # Usage: bash .github/scripts/check-role-sandbox.sh IMAGE
 # image-check.yml runs it on every pull request; image.yml runs it after the
