@@ -5,7 +5,11 @@
 # the image's own files read-only, no network, the image's user. cargo writes
 # its build into HOME (CARGO_TARGET_DIR), never into the checkout. It shows
 # that rustc links with the image's gcc, that a unit test and a doc test run,
-# and which versions the image carries. Anything else fails here.
+# and which versions the image carries. It also holds cc, gcc, cargo, rustc and
+# python3 to resolving inside /usr without any link through /etc: a role sees
+# /usr but only named files of /etc, so a program linked through
+# /etc/alternatives (Debian's /usr/bin/cc) is dangling in a role (rustc found
+# no linker there once). Anything else fails here.
 #
 # Usage: bash .github/scripts/check-rust-toolchain.sh IMAGE
 # image-check.yml runs it on every pull request; image.yml runs it after the
@@ -24,6 +28,21 @@ output="$(docker run --rm --network none --platform linux/arm64 --read-only --tm
   PATH=/runtime-policy/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin HOME=/tmp/home \
   bash -c 'set -euo pipefail
     mkdir -p "$HOME"
+    for program in cc gcc cargo rustc python3; do
+      path=$(command -v "$program") || { echo "no $program on the role PATH"; exit 1; }
+      hops=0
+      while [ -L "$path" ]; do
+        next=$(readlink "$path")
+        case "$next" in /*) ;; *) next="$(dirname "$path")/$next" ;; esac
+        path=$next
+        hops=$((hops + 1))
+        case "$path" in /etc/*) echo "$program resolves through $path, which a role does not see"; exit 1 ;; esac
+        [ "$hops" -lt 16 ] || { echo "$program: too many links"; exit 1; }
+      done
+      case "$path" in /usr/*) ;; *) echo "$program resolves to $path, outside /usr"; exit 1 ;; esac
+      [ -x "$path" ] || { echo "$program resolves to $path, which is not executable"; exit 1; }
+      echo "$program -> $path"
+    done
     cc --version | head -n 1
     rustc --version; cargo --version; cargo clippy --version; rustfmt --version
     export CARGO_TARGET_DIR="$HOME/target"

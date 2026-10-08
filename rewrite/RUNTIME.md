@@ -91,8 +91,9 @@ only their required outputs.
 Optional `git_workspace.py -- ...` goes before this launcher, in the trusted
 controller context, to prepare an empty checkout. Do not run it as a model tool.
 
-The role starts in an empty filesystem namespace, with system tools, certificate
-configuration and explicit runtime paths read-only. Only its workspace, chosen
+The role starts in an empty filesystem namespace, with system tools (`/usr` and
+the system's `/etc/alternatives` links into it), certificate configuration and
+explicit runtime paths read-only. Only its workspace, chosen
 writable paths, private home, `/proc`, `/dev` and temporary directory are added.
 Path components are opened without following symlinks and passed as descriptors
 to bubblewrap. The role is PID 1 of its namespace; it cannot create further user

@@ -48,3 +48,14 @@ jobs:
         # The same check image.yml runs before it pushes; what passes is
         # written in the script.
         run: bash .github/scripts/check-rust-toolchain.sh "$IMAGE"
+      - name: Let an unprivileged process map a user namespace on this runner
+        # Ubuntu 24.04's apparmor_restrict_unprivileged_userns strips the
+        # capabilities of a user namespace an unconfined process creates, and
+        # bubblewrap then cannot write its uid map (seen on this runner, even
+        # with --privileged). The runner is a throwaway machine; the cluster
+        # nodes the engine runs on do not set it.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Build and test the small crate through the role launcher
+        # The same check image.yml runs before it pushes; what passes is
+        # written in the script.
+        run: bash .github/scripts/check-role-sandbox.sh "$IMAGE"

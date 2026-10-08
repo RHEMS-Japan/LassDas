@@ -46,6 +46,11 @@ class CurrentRuntimeTests(unittest.TestCase):
         self.assertLess(rust, published.index('docker push "$tag"'))
         self.assertIn("bash .github/scripts/check-rust-toolchain.sh", (
             ROOT / ".github/workflows/image-check.yml").read_text())
+        sandbox = published.index("bash .github/scripts/check-role-sandbox.sh")
+        self.assertLess(rust, sandbox)
+        self.assertLess(sandbox, published.index('docker push "$tag"'))
+        self.assertIn("bash .github/scripts/check-role-sandbox.sh", (
+            ROOT / ".github/workflows/image-check.yml").read_text())
 
     def test_distribution_note_uses_this_build_without_the_removed_cli(self):
         workflow = (ROOT / ".github/workflows/image.yml").read_text()
