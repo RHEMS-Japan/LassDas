@@ -106,14 +106,25 @@ uncertain does not apply to recovery. A reply never changes filesystem, delivery
 or credential permissions.
 If a chosen alternative needs wider access, the operator must update that setting;
 otherwise the roles must use an agreed alternative inside the existing scope.
-When the runtime supports active-work limits, set positive
-`intake.max_active_minutes` and `intake.max_hard_exits` to bound attempts while
-operator changes are pending. The existing limit notice reports a pause, not
-completion; read the required permission change in the question and run record,
-fix the configuration, then have an authorized user post `再開` on its own
-first line. This grants another interval with the same saved cap; changing the
-configuration does not change an already accepted request's cap. Without a
-positive active-work limit, repeated attempts have no bound.
+Set positive `intake.max_active_minutes` and `intake.max_hard_exits` to bound
+attempts while operator changes are pending. `intake.max_hard_exits` (default 3)
+counts every forced exit of a time-limited request, at any stage. Without a time
+limit it counts only forced exits in a row at one stage, so a request cut off at
+the same stage after every restart still pauses. Another stage running in
+between does not break the row; the count starts again from one in any of three
+cases: a process of that stage ends by itself (successfully or not), the
+requester's words arrive, or a forced exit happens at another stage. Ordinary
+tool or verification failures are not forced exits, so neither count bounds
+those retries, and without a positive active-work limit, total active time has
+no bound. The limit notice reports a pause, not completion; read the required
+permission change in the question and run record, fix the configuration, then
+have an authorized user post `再開` on its own first line. This sets the count to
+zero and, for a time-limited request, grants another interval with the same
+saved cap. The cap and the forced-exit limit are saved at acceptance for a
+time-limited request; a request without a time limit saves its forced-exit
+limit at its first launch. A configuration change after that does not alter
+them. The status page does not show the count in a row at one stage; without a
+time limit, the pause notice names the stage and the count.
 Each failure adds a requirements launch and a routing decision, including ordinary
 repairs. A model process that exits with an error still retries its own stage.
 Existing installations need to update their four `on_failure` values and shared
