@@ -131,8 +131,20 @@ func TestWorkLimitSettingsAndAcceptanceRemainOwnerScoped(t *testing.T) {
 	if got := loadWorkLimit(t, unlimited); got.Clock != nil {
 		t.Fatal("zero created a cap")
 	}
-	if work, err := beginActiveWork(unlimited, func() { t.Fatal("unlimited work was canceled") }, newWorkTime().source()); err != nil || work != nil {
-		t.Fatalf("unlimited request changed: %v %v", work, err)
+	clock := newWorkTime()
+	work, err := beginActiveWork(unlimited, func() { t.Fatal("unlimited work was canceled") }, clock.source(), 0)
+	if err != nil || work == nil || work.timer != nil {
+		t.Fatalf("unlimited request was given a timer or no crash marker: %v %v", work, err)
+	}
+	if got := loadWorkLimit(t, unlimited); got.Clock != nil || got.StageExits == nil || got.StageExits.Max != 3 || got.StageExits.Active == nil || got.StageExits.Count != 0 {
+		t.Fatalf("a launch without a time limit did not keep only its crash marker: %+v", got.StageExits)
+	}
+	clock.advance(24 * time.Hour)
+	if err := work.finish(clock.source().now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadWorkLimit(t, unlimited); got.Clock != nil || got.StageExits.Active != nil || got.StageExits.Count != 0 || got.held() {
+		t.Fatalf("a run that returned was counted or charged: %+v", got.StageExits)
 	}
 }
 
@@ -183,7 +195,7 @@ func TestWorkLimitAccumulatesRunsAndExcludesEveryIdleGap(t *testing.T) {
 	var canceled atomic.Bool
 	for _, elapsed := range []time.Duration{20 * time.Second, 15 * time.Second, 25 * time.Second} {
 		clock.advance(9 * time.Hour) // slots, answers, credit and normal downtime
-		work, err := beginActiveWork(directory, func() { canceled.Store(true) }, clock.source())
+		work, err := beginActiveWork(directory, func() { canceled.Store(true) }, clock.source(), 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -199,10 +211,10 @@ func TestWorkLimitAccumulatesRunsAndExcludesEveryIdleGap(t *testing.T) {
 	if record.Clock.MaxMinutes != 1 || record.Pauses[0].Elapsed != time.Minute {
 		t.Fatal("pause lost measured values")
 	}
-	if _, err := beginActiveWork(directory, func() {}, clock.source()); !errors.Is(err, errWorkHeld) {
+	if _, err := beginActiveWork(directory, func() {}, clock.source(), 0); !errors.Is(err, errWorkHeld) {
 		t.Fatalf("cap relaunched: %v", err)
 	}
-	text := pausedWorkText(record.Pauses[0], record.Clock)
+	text := pausedWorkText(record.Pauses[0], record.Clock, nil)
 	if !strings.Contains(text, "確定済みの実稼働時間は 1 分 0 秒 です") {
 		t.Fatalf("pause does not use requester-facing time units: %s", text)
 	}
@@ -216,7 +228,7 @@ func TestWorkLimitHardExitIsUnknownAndNormalExitKeepsRemainingTime(t *testing.T)
 				t.Fatal(err)
 			}
 			clock := newWorkTime()
-			work, err := beginActiveWork(directory, func() {}, clock.source())
+			work, err := beginActiveWork(directory, func() {}, clock.source(), 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -242,7 +254,7 @@ func TestWorkLimitHardExitIsUnknownAndNormalExitKeepsRemainingTime(t *testing.T)
 					t.Fatalf("normal restart: %+v", record)
 				}
 				var canceled bool
-				next, err := beginActiveWork(directory, func() { canceled = true }, clock.source())
+				next, err := beginActiveWork(directory, func() { canceled = true }, clock.source(), 0)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -355,7 +367,7 @@ func TestWorkLimitSaveFailureStillCancelsAndRetainsRecoveryEvidence(t *testing.T
 			}
 			clock := newWorkTime()
 			var canceled bool
-			work, err := beginActiveWork(directory, func() { canceled = true }, clock.source())
+			work, err := beginActiveWork(directory, func() { canceled = true }, clock.source(), 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -395,7 +407,7 @@ func TestWorkLimitCancellationDoesNotWaitForStorage(t *testing.T) {
 	clock := newWorkTime()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	work, err := beginActiveWork(directory, cancel, clock.source())
+	work, err := beginActiveWork(directory, cancel, clock.source(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +463,7 @@ func TestWorkLimitResumeResetsOnlyItsAppliedTransition(t *testing.T) {
 				t.Fatalf("work changed: %+v", after)
 			}
 			clock := newWorkTime()
-			work, err := beginActiveWork(directory, func() {}, clock.source())
+			work, err := beginActiveWork(directory, func() {}, clock.source(), 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -477,7 +489,7 @@ func TestWorkLimitDamagedClockDoesNotRunAndAuthorizedStopWins(t *testing.T) {
 		if err := writeRuntimeFile(filepath.Join(directory, workLimitFile), raw); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := beginActiveWork(directory, func() {}, newWorkTime().source()); err == nil {
+		if _, err := beginActiveWork(directory, func() {}, newWorkTime().source(), 0); err == nil {
 			t.Fatal("damaged clock started")
 		}
 	}
@@ -692,7 +704,7 @@ func TestWorkLimitQuestionReceiptSurvivesTimeoutAndAnExplicitResume(t *testing.T
 		t.Fatal(err)
 	}
 	clock := newWorkTime()
-	work, err := beginActiveWork(directory, func() {}, clock.source())
+	work, err := beginActiveWork(directory, func() {}, clock.source(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -739,7 +751,7 @@ func TestWorkLimitRealTimerAndStartMarkerPrecedeTheChild(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	work, err := beginActiveWork(directory, cancel, activeWorkTime)
+	work, err := beginActiveWork(directory, cancel, activeWorkTime, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -765,7 +777,7 @@ func TestWorkLimitLateTimerCannotChargeTimeAfterTheChildEnded(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := newWorkTime()
-	work, err := beginActiveWork(directory, func() {}, clock.source())
+	work, err := beginActiveWork(directory, func() {}, clock.source(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -992,5 +1004,209 @@ func TestWorkLimitStartNoticeRequiresALaunchedChildAndCannotBlockItsTimer(t *tes
 				t.Fatal("the canceled child retained the execution slot")
 			}
 		})
+	}
+}
+
+// pickUp does to a pending action what the chain does when the request runs
+// again: the action becomes the runtime's note that it was cut short.
+func pickUp(state *chain.State) {
+	if state.Pending == nil {
+		return
+	}
+	state.Step, state.Recovering = state.Pending.Role, true
+	state.History = append(state.History, chain.Result{Role: state.Pending.Role, Speaker: "runtime", Interrupted: true,
+		Error: "The process stopped while this action was pending."})
+	state.Pending = nil
+}
+
+// cutOffAt leaves what a forced exit in a watched launch of the stage leaves:
+// the launch's crash marker, never cleared, and the chain's pending action.
+// An empty stage is a forced exit while the next action is being chosen.
+func cutOffAt(t *testing.T, directory, stage string, hardExits int, clock *manualWorkTime) {
+	t.Helper()
+	if _, err := beginActiveWork(directory, func() {}, clock.source(), hardExits); err != nil {
+		t.Fatal(err)
+	}
+	state := loadJobState(t, directory)
+	pickUp(&state)
+	if stage != "" {
+		state.Pending = &chain.Assignment{Role: stage}
+	}
+	writeJobHistory(t, directory, state)
+	clock.advance(time.Minute)
+}
+
+// A request without a time limit used to restart after every forced exit with
+// nothing to bound it, so a stage cut off at the same point every time ran all
+// night. Forced exits in a row at one stage now pause it at the saved count
+// with one notice, and one fewer goes on as before.
+func TestStageExitsWithoutATimeLimitPauseAtTheSavedCountWithOneNotice(t *testing.T) {
+	for _, configured := range []int{0, 1, 2} {
+		t.Run(fmt.Sprintf("configured=%d", configured), func(t *testing.T) {
+			cfg := watchConfiguration(t)
+			holdingWorker(&cfg)
+			cfg.Intake.MaxHardExits = configured
+			clock := newWorkTime()
+			useWorkTime(t, clock)
+			remote := &noticeTracker{}
+			remote.install(t, alwaysChoose("implement"))
+			root, directory := noticeJob(t, chain.State{})
+			issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
+			issue.Creator.ID = 55
+			limit := configured
+			if limit == 0 {
+				limit = 3
+			}
+			hold := func(want bool, when string) {
+				t.Helper()
+				for tick := 0; tick < 2; tick++ {
+					held, err := holdPausedRequest(context.Background(), cfg, issue, directory, noticeRequest, time.Second, func(string) {})
+					if err != nil || held != want {
+						t.Fatalf("%s tick=%d held=%t err=%v", when, tick, held, err)
+					}
+				}
+			}
+			for count := 1; count <= limit; count++ {
+				cutOffAt(t, directory, "implement", configured, clock)
+				hold(count == limit, fmt.Sprintf("forced exit %d", count))
+				exits := loadWorkLimit(t, directory).StageExits
+				if exits == nil || exits.Count != count || exits.Max != limit || exits.Stage != "implement" || exits.Active != nil {
+					t.Fatalf("forced exit %d counted twice, at another stage or with another limit: %+v", count, exits)
+				}
+				if count == limit-1 {
+					// One fewer than the limit goes on: the queue launches the
+					// stage again, and its ordinary shutdown is not a forced exit.
+					finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+					waitTestPID(t, filepath.Join(directory, "workspace", "child-pid"))
+					finish()
+					after := loadWorkLimit(t, directory)
+					if after.held() || after.StageExits.Count != count || after.StageExits.Active != nil {
+						t.Fatalf("an ordinary shutdown was counted or kept its marker: %+v", after.StageExits)
+					}
+					stopped := false
+					for _, result := range loadJobState(t, directory).History {
+						stopped = stopped || result.Role == "implement" && result.Speaker == "worker" && result.Interrupted
+					}
+					if !stopped {
+						t.Fatal("the shutdown did not leave the stage's process as stopped by the controller")
+					}
+					t.Logf("forced exit %d of %d: the queue launched the stage again; its shutdown left the count at %d", count, limit, count)
+				}
+			}
+			record := loadWorkLimit(t, directory)
+			if len(record.Pauses) != 1 || record.Pauses[0].Reason != hardExitPause || record.Clock != nil || loadJobState(t, directory).Done {
+				t.Fatalf("the count became completion or a time limit: %+v", record)
+			}
+			pauses := remote.withPrefix("この依頼の自動処理を一時停止しています。")
+			reason := fmt.Sprintf("「実装」の工程で強制終了が %d 回続き、上限の %d 回に達したためです。", limit, limit)
+			if limit == 1 {
+				reason = "「実装」の工程で強制終了が起き、上限の 1 回に達したためです。"
+			}
+			if len(pauses) != 1 || !strings.Contains(pauses[0], reason) || !strings.Contains(pauses[0], "「再開」") || !strings.Contains(pauses[0], "「停止」") || strings.Contains(pauses[0], "実稼働時間") {
+				t.Fatalf("pause notice: %q", pauses)
+			}
+			if posts := remote.withPrefix("強制終了から自動で再開"); len(posts) != 0 {
+				t.Fatalf("a request without a time limit was told of a remaining time: %q", posts)
+			}
+			hold(true, "held")
+			if _, err := beginActiveWork(directory, func() {}, clock.source(), configured); !errors.Is(err, errWorkHeld) {
+				t.Fatalf("a paused request could be launched: %v", err)
+			}
+			if posts := remote.withPrefix("この依頼の自動処理"); len(posts) != 1 {
+				t.Fatalf("the pause was said more than once: %q", posts)
+			}
+			remote.mu.Lock()
+			remote.rows = append(remote.rows, issueComment(990, 55, "再開"))
+			remote.mu.Unlock()
+			held, err := holdPausedRequest(context.Background(), cfg, issue, directory, noticeRequest, time.Second, func(string) {})
+			after := loadWorkLimit(t, directory)
+			if err != nil || held || after.held() || after.StageExits.Count != 0 || after.StageExits.Stage != "" || after.StageExits.Max != limit {
+				t.Fatalf("resume did not start the count again: held=%t err=%v exits=%+v", held, err, after.StageExits)
+			}
+			t.Logf("forced exit %d of %d at implement: paused with one notice %q; resume -> count 0", limit, limit, pauses[0])
+		})
+	}
+}
+
+// The count is of forced exits in a row at one stage. A forced exit at another
+// stage, a process of the stage that ended by itself, or the requester's words
+// start it again from one. The runtime's own notes, a process the controller
+// stopped and another stage that ran in between do not.
+func TestStageExitsCountAgainOnlyWhenTheStageMoves(t *testing.T) {
+	type step func(t *testing.T, directory string, clock *manualWorkTime)
+	cut := func(stage string) step {
+		return func(t *testing.T, directory string, clock *manualWorkTime) {
+			cutOffAt(t, directory, stage, 0, clock)
+			if err := recoverWorkClock(directory); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	ran := func(results ...chain.Result) step {
+		return func(t *testing.T, directory string, _ *manualWorkTime) {
+			state := loadJobState(t, directory)
+			pickUp(&state)
+			state.History = append(state.History, results...)
+			writeJobHistory(t, directory, state)
+		}
+	}
+	for _, test := range []struct {
+		name  string
+		steps []step
+		count int
+	}{
+		{"three in a row", []step{cut("implement"), cut("implement"), cut("implement")}, 3},
+		{"a routing note between", []step{cut("implement"), cut("implement"), ran(chain.Result{Role: "router", Speaker: "runtime", Error: "routing unavailable"}), cut("implement")}, 3},
+		{"stopped by the controller between", []step{cut("implement"), cut("implement"), ran(chain.Result{Role: "implement", Speaker: "worker", Interrupted: true, Error: "context canceled"}), cut("implement")}, 3},
+		{"another stage ran between", []step{cut("implement"), cut("implement"), ran(chain.Result{Role: "inspect", Speaker: "worker", Output: "looked at the tree"}), cut("implement")}, 3},
+		{"cut while choosing what runs next", []step{cut("implement"), cut(""), cut("implement")}, 3},
+		{"the stage ended by itself", []step{cut("implement"), cut("implement"), ran(chain.Result{Role: "implement", Speaker: "worker", Output: "built"}), cut("implement")}, 1},
+		{"the stage failed by itself", []step{cut("implement"), cut("implement"), ran(chain.Result{Role: "implement", Speaker: "worker", Error: "exit status 101"}), cut("implement")}, 1},
+		{"the requester's words", []step{cut("implement"), cut("implement"), ran(chain.Result{Role: "ask", Speaker: "requester", Output: "please go on"}), cut("implement")}, 1},
+		{"a forced exit at another stage", []step{cut("implement"), cut("implement"), cut("verify"), cut("implement")}, 1},
+		{"the stage moved and came back", []step{cut("implement"), ran(chain.Result{Role: "implement", Speaker: "worker", Output: "built"}, chain.Result{Role: "verify", Speaker: "worker", Error: "tests failed"}), cut("implement"), cut("implement")}, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, directory := noticeJob(t, chain.State{})
+			clock := newWorkTime()
+			for _, step := range test.steps {
+				step(t, directory, clock)
+			}
+			record := loadWorkLimit(t, directory)
+			if exits := record.StageExits; exits == nil || exits.Count != test.count || exits.Stage != "implement" || exits.Active != nil || record.held() != (test.count == 3) {
+				t.Fatalf("count=%+v held=%t, want %d at implement", exits, record.held(), test.count)
+			}
+		})
+	}
+}
+
+// A request with a time limit keeps its own count as before: forced exits are
+// counted across stages, each automatic recovery is said, the configured count
+// at a launch does not replace the saved one, and no stage count is kept.
+func TestStageExitsLeaveTheTimeLimitedCountAsItWas(t *testing.T) {
+	cfg := watchConfiguration(t)
+	clock := newWorkTime()
+	useWorkTime(t, clock)
+	remote := &noticeTracker{}
+	remote.install(t, alwaysChoose("implement"))
+	_, directory := noticeJob(t, chain.State{})
+	if err := acceptWorkLimit(directory, 120, 0); err != nil {
+		t.Fatal(err)
+	}
+	issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
+	issue.Creator.ID = 55
+	for i, stage := range []string{"implement", "verify", "deliver"} {
+		cutOffAt(t, directory, stage, 1, clock)
+		held, err := holdPausedRequest(context.Background(), cfg, issue, directory, noticeRequest, time.Second, func(string) {})
+		record := loadWorkLimit(t, directory)
+		if err != nil || held != (i == 2) || record.StageExits != nil || record.Clock.HardExits != i+1 || record.Clock.MaxHardExits != 3 {
+			t.Fatalf("forced exit %d at %s: held=%t err=%v clock=%+v exits=%+v", i+1, stage, held, err, record.Clock, record.StageExits)
+		}
+	}
+	if posts := remote.withPrefix("強制終了から自動で再開"); len(posts) != 2 || !strings.Contains(posts[1], "2 回目、上限 3 回") {
+		t.Fatalf("recovery notices: %q", posts)
+	}
+	if pauses := remote.withPrefix("この依頼の自動処理"); len(pauses) != 1 || !strings.Contains(pauses[0], "強制終了が上限の 3 回に達したためです。") || strings.Contains(pauses[0], "工程で強制終了") {
+		t.Fatalf("pause notice: %q", pauses)
 	}
 }

@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"ticket-runner/internal/chain"
+	"ticket-runner/internal/stagename"
 )
 
 // A clock belongs to the accepted request, not to the current configuration
@@ -19,6 +22,28 @@ type workClock struct {
 	MaxHardExits     int           `json:"max_hard_exits"`
 	HardExits        int           `json:"hard_exits"`
 	RecoveryNoticeAt *time.Time    `json:"recovery_notice_at,omitempty"`
+}
+
+// defaultHardExits is the forced-exit count selected when
+// intake.max_hard_exits is omitted or zero.
+const defaultHardExits = 3
+
+// stageExits bounds a request that has no time limit. Without a clock nothing
+// else stops a request that is cut off at the same place after every restart,
+// so its watched launches keep the same crash marker, and forced exits are
+// counted while they come one after another at one stage. Max is saved at the
+// first watched launch and, like a time cap, is not changed by later
+// configuration. Mark is the history's length when the last one was counted.
+type stageExits struct {
+	Max    int        `json:"max_hard_exits"`
+	Active *time.Time `json:"active_since,omitempty"`
+	Stage  string     `json:"stage,omitempty"`
+	Count  int        `json:"hard_exits"`
+	Mark   int        `json:"history_length"`
+}
+
+func (e *stageExits) valid() bool {
+	return e == nil || (e.Max > 0 && e.Count >= 0 && e.Count <= e.Max && e.Mark >= 0 && (e.Active == nil || !e.Active.IsZero()))
 }
 
 func validWorkMinutes(minutes int) bool {
@@ -49,7 +74,7 @@ func acceptWorkLimit(directory string, minutes, hardExits int) error {
 		return nil
 	}
 	if hardExits == 0 {
-		hardExits = 3
+		hardExits = defaultHardExits
 	}
 	return saveWorkLimit(directory, workLimitRecord{Version: 1, Clock: &workClock{MaxMinutes: minutes, MaxHardExits: hardExits}})
 }
@@ -58,13 +83,13 @@ func acceptWorkLimit(directory string, minutes, hardExits int) error {
 // interval after a crash is unknown, not proof of reaching the saved cap.
 func recoverWorkClock(directory string) error {
 	record, err := readWorkLimit(directory)
-	if err != nil || record.Clock == nil {
+	if err != nil || record.held() {
 		return err
 	}
-	if record.held() {
-		return nil
-	}
 	now := time.Now().UTC()
+	if record.Clock == nil {
+		return recoverStageExits(directory, record, now)
+	}
 	changed := false
 	if record.Clock.Active != nil {
 		record.Clock.Active = nil
@@ -88,6 +113,67 @@ func recoverWorkClock(directory string) error {
 	return nil
 }
 
+// recoverStageExits counts the forced exit a request without a time limit
+// left behind. The stage is the one its history shows running: the pending
+// action, or the stage it ran last. The count goes on only at the same stage
+// and only while none of that stage's processes has ended by itself and no
+// requester's words have arrived since the last count; otherwise this forced
+// exit is the first. At the saved count the request pauses, as it would at a
+// time-limited request's count. This never marks a request complete.
+func recoverStageExits(directory string, record workLimitRecord, now time.Time) error {
+	exits := record.StageExits
+	if exits == nil || exits.Active == nil {
+		return nil
+	}
+	state, err := savedHistory(directory)
+	if err != nil {
+		return err
+	}
+	stage := state.Step
+	if state.Pending != nil {
+		stage = state.Pending.Role
+	}
+	if exits.Count == 0 || stage != exits.Stage || exits.Mark > len(state.History) || stageMoved(state.History[exits.Mark:], stage) {
+		exits.Stage, exits.Count = stage, 0
+	}
+	exits.Active = nil
+	exits.Count++
+	exits.Mark = len(state.History)
+	if exits.Count >= exits.Max {
+		record.addPause(hardExitPause, now)
+	}
+	return saveWorkLimit(directory, record)
+}
+
+// stageMoved reports what ends a run of forced exits at one stage: a process
+// of that stage that ended by itself, successfully or not, or the requester's
+// words. The note the runtime leaves for an action a restart cut short, a
+// process the controller itself stopped and a routing note are none of these.
+func stageMoved(history []chain.Result, stage string) bool {
+	for _, result := range history {
+		if result.Speaker == "requester" || result.Role == stage && result.Speaker != "runtime" && !result.Interrupted {
+			return true
+		}
+	}
+	return false
+}
+
+// stageExitsReason names the stage as the requester's other notices do.
+func stageExitsReason(exits *stageExits) string {
+	where := ""
+	if exits.Stage != "" {
+		name, known := stagename.Japanese(exits.Stage)
+		if !known {
+			name = exits.Stage
+		}
+		where = "「" + name + "」の工程で"
+	}
+	if exits.Count == 1 {
+		return fmt.Sprintf("%s強制終了が起き、上限の %d 回に達したためです。", where, exits.Max)
+	}
+	return fmt.Sprintf("%s強制終了が %d 回続き、上限の %d 回に達したためです。", where, exits.Count, exits.Max)
+}
+
 type workTimer interface{ Stop() bool }
 
 // The narrow clock seam lets tests advance execution time without minute
@@ -109,16 +195,31 @@ type activeWork struct {
 
 var errWorkHeld = errors.New("the request's active-work interval is held")
 
-func beginActiveWork(directory string, cancel context.CancelFunc, clock workTimeSource) (*activeWork, error) {
+// hardExits is the configured intake.max_hard_exits. It is saved for a request
+// without a time limit at its first watched launch; a time limit's own count
+// was saved with its cap at acceptance.
+func beginActiveWork(directory string, cancel context.CancelFunc, clock workTimeSource, hardExits int) (*activeWork, error) {
 	record, err := readWorkLimit(directory)
 	if err != nil {
 		return nil, err
 	}
-	if record.held() || (record.Clock != nil && record.Clock.Active != nil) {
+	if record.held() || (record.Clock != nil && record.Clock.Active != nil) || (record.StageExits != nil && record.StageExits.Active != nil) {
 		return nil, errWorkHeld
 	}
 	if record.Clock == nil {
-		return nil, nil
+		// No timer: only the marker that tells a forced exit from a return.
+		if record.StageExits == nil {
+			if hardExits <= 0 {
+				hardExits = defaultHardExits
+			}
+			record.StageExits = &stageExits{Max: hardExits}
+		}
+		stamp := clock.now().UTC()
+		record.StageExits.Active = &stamp
+		if err := saveWorkLimit(directory, record); err != nil {
+			return nil, err
+		}
+		return &activeWork{directory: directory, record: record, save: saveWorkLimit}, nil
 	}
 	remaining := time.Duration(record.Clock.MaxMinutes)*time.Minute - record.Clock.Elapsed
 	if remaining <= 0 {
@@ -143,6 +244,10 @@ func beginActiveWork(directory string, cancel context.CancelFunc, clock workTime
 func (w *activeWork) finish(ended time.Time) error {
 	if w == nil {
 		return nil
+	}
+	if w.record.Clock == nil {
+		w.record.StageExits.Active = nil
+		return w.save(w.directory, w.record)
 	}
 	w.timer.Stop()
 	duration := ended.Sub(w.began)

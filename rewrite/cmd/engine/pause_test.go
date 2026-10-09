@@ -96,6 +96,11 @@ func TestDamagedPauseRecordsHoldWork(t *testing.T) {
 		`{"version":1,"pauses":[{"reason":"model says stop","at":"2026-01-02T03:04:05Z"}]}`,
 		`{"version":1,"pauses":[{"reason":"active-limit","at":"2026-01-02T03:04:05Z","notice_id":-1}]}`,
 		`{"version":1,"pauses":[{"reason":"active-limit","at":"2026-01-02T03:04:05Z","resume":{}}]}`,
+		`{"version":1,"stage_exits":{"max_hard_exits":0,"hard_exits":0,"history_length":0}}`,
+		`{"version":1,"stage_exits":{"max_hard_exits":3,"hard_exits":4,"history_length":0}}`,
+		`{"version":1,"stage_exits":{"max_hard_exits":3,"hard_exits":1,"history_length":-1}}`,
+		`{"version":1,"stage_exits":{"max_hard_exits":3,"hard_exits":1,"history_length":0,"active_since":"0001-01-01T00:00:00Z"}}`,
+		`{"version":1,"clock":{"max_minutes":2,"elapsed_ns":0,"max_hard_exits":3,"hard_exits":0},"stage_exits":{"max_hard_exits":3,"hard_exits":0,"history_length":0}}`,
 	} {
 		if err := writeRuntimeFile(filepath.Join(directory, workLimitFile), []byte(data)); err != nil {
 			t.Fatal(err)
@@ -227,7 +232,7 @@ func TestWorkPauseKeepsItsReasonAndEarlierControlReceipts(t *testing.T) {
 	if err != nil || len(got.Pauses) != 2 || !got.held() || got.Pauses[1].Reason != hardExitPause {
 		t.Fatalf("the next episode was lost: %+v %v", got, err)
 	}
-	if text := pausedWorkText(got.Pauses[1], got.Clock); !strings.Contains(text, "強制終了が設定の回数上限に達した") || !strings.Contains(text, "再開") || !strings.Contains(text, "停止") {
+	if text := pausedWorkText(got.Pauses[1], got.Clock, got.StageExits); !strings.Contains(text, "強制終了が設定の回数上限に達した") || !strings.Contains(text, "再開") || !strings.Contains(text, "停止") {
 		t.Fatalf("the pause lost its forced-exit reason or choices: %s", text)
 	}
 }
@@ -285,7 +290,7 @@ func TestPauseUsesTheActualPostedNoticeAndKeepsALaterResume(t *testing.T) {
 	if len(state.History) != 1 || state.History[0].Output != "再開\nnew words" || state.Pending == nil || state.Done {
 		t.Fatalf("release changed the pending action or repeated its words: %+v", state)
 	}
-	if remote.count(pausedWorkText(record.Pauses[0], record.Clock)) != 1 || remote.count(workResumeText) != 1 {
+	if remote.count(pausedWorkText(record.Pauses[0], record.Clock, record.StageExits)) != 1 || remote.count(workResumeText) != 1 {
 		t.Fatalf("the restart repeated a control notice: %v", remote.all())
 	}
 }
