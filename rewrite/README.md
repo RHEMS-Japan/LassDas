@@ -2269,6 +2269,25 @@ Provide these process settings explicitly:
   instead of passing an empty result to the next one.
 - Optional `NATIVE_MAX_TURNS`: the number of model calls after which the native
   agent stops. None is set unless the operator names one.
+- Optional `NATIVE_MAX_REPEATED_FAILURES` (default `5`, `0` turns it off): the
+  role ends when one tool call fails the same way that many times in a row,
+  the same tool with the same arguments returning the same result. Any other
+  call in between, or a success, starts the count again, so a check that fails
+  again after each edit is not stopped. The SDK only warns about such a loop:
+  a role once repeated a call that could not succeed, a wait for a background
+  process without naming it, for as long as it ran, while the build it had
+  started used up the memory. At the limit the SDK makes no further model
+  call; the bridge stops the processes the role started in the background,
+  adds `Stopped: the same failure repeated N times in a row: <tool>
+  <arguments>: <error>` to the report and to stderr, and exits 1, so the
+  runtime takes its next decision. The count extends the SDK's own tool-call
+  guardrail, which sees each result before the SDK's warning is added to it.
+  With an SDK that has no such guardrail, the bridge says so on stderr at
+  launch and the role runs without the stop. The SDK's own hard stop
+  (`tool_loop_guardrails` in its configuration) counts every failure of a
+  call however much happened in between and is left as the operator
+  configured it; a turn that it, or any other guardrail rule, ends also exits
+  1 with its reason.
 - Optional `NATIVE_LOG_PREFIX_CHARS` (default `2000`): how much of each tool
   call's arguments and result the harness prints as it happens; the lines reach
   stderr, so the runtime's live copy shows them, and only the tail of them

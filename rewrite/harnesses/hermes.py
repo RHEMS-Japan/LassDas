@@ -4,7 +4,10 @@ Run this inside the role's filesystem/network isolation. Make the installed
 ``run_agent`` module importable in that process; no personal installation path
 or model shortlist belongs here.
 """
+from collections.abc import Mapping
 import contextlib
+import dataclasses
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -55,6 +58,99 @@ def scrub(text, values):
     return text
 
 
+class RepeatedFailureStop:
+    """Ends the role when one tool call fails the same way a number of times
+    in a row.
+
+    The SDK warns the model about a call that keeps failing unchanged, but it
+    does not stop one unless its own hard stop is configured, and that one
+    counts every earlier failure of the call however much else happened in
+    between, so a check that fails again after an edit counts towards it too.
+    A role once repeated a call that could not succeed for as long as it ran,
+    while a build it had started in the background used up the memory.
+
+    This keeps the SDK's per-turn tool-call guardrail and adds one rule to it.
+    The guardrail sees every call the SDK ran, with its unaltered result and
+    the SDK's own verdict on whether it failed. The same tool with the same
+    arguments failing with the same result `limit` times in a row ends the
+    turn through the SDK's existing guardrail halt: no further model call is
+    made. Any other call in between, or a success, starts the count again.
+    """
+
+    def __init__(self, guardrails, limit):
+        self.guardrails = guardrails
+        self.limit = limit
+        self.last = None
+        self.count = 0
+        self.stopped = None
+        self.broken = False
+
+    def __getattr__(self, name):
+        # Anything else the SDK reads is the guardrail's own.
+        if name == "guardrails":
+            raise AttributeError(name)
+        return getattr(self.guardrails, name)
+
+    def reset_for_turn(self):
+        self.guardrails.reset_for_turn()
+        self.last, self.count = None, 0
+
+    def before_call(self, tool_name, args):
+        return self.guardrails.before_call(tool_name, args)
+
+    def after_call(self, tool_name, args, result, *, failed=None):
+        decision = self.guardrails.after_call(tool_name, args, result, failed=failed)
+        try:
+            return self.observe(tool_name, args, result, failed, decision)
+        except Exception as error:
+            # Counting must never take a tool result away from the SDK.
+            if not self.broken:
+                self.broken = True
+                print(f"\nRepeated-failure count unavailable, the role continues: {error}", file=sys.stderr)
+            return decision
+
+    def observe(self, tool_name, args, result, failed, decision):
+        # The SDK always passes its verdict; without one, nothing is counted.
+        if not failed:
+            self.last, self.count = None, 0
+            return decision
+        arguments = json.dumps(args if isinstance(args, Mapping) else {}, ensure_ascii=False,
+                               sort_keys=True, separators=(",", ":"), default=str)
+        text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
+        call = (tool_name, arguments, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest())
+        self.count = self.count + 1 if call == self.last else 1
+        self.last = call
+        if self.count < self.limit or getattr(decision, "should_halt", False):
+            return decision
+        halt = dataclasses.replace(
+            decision, action="halt", code="repeated_identical_failure", count=self.count,
+            message=(f"{tool_name} failed {self.count} times in a row with the same arguments and "
+                     "the same result. The role ends here."))
+        # Recorded only once the SDK has a halt to act on.
+        self.stopped = scrub(f"Stopped: the same failure repeated {self.count} times in a row: "
+                             f"{tool_name} {clip(arguments)}: {failure_summary(text)}", credentials())
+        return halt
+
+
+def clip(text, limit=300):
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def failure_summary(text):
+    """The error a tool result names, or the start of the result."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        if data.get("error"):
+            return clip(str(data["error"]))
+        if data.get("exit_code") is not None:
+            return clip(f"exit {data['exit_code']}: {data.get('output', '')}")
+    return clip(text)
+
+
 def save_transcript(result):
     """Keep the whole conversation the native agent had, for reading afterwards,
     and take the credentials out of what the native agent logged by itself.
@@ -102,6 +198,7 @@ def main():
     # changed. Use its existing switch, not a filter on the model's prose.
     # An explicit operator override remains authoritative.
     os.environ.setdefault("HERMES_FILE_MUTATION_VERIFIER", "0")
+    repeated_failure_limit = max(0, int(os.environ.get("NATIVE_MAX_REPEATED_FAILURES", "5")))
     with contextlib.redirect_stdout(sys.stderr):
         from run_agent import AIAgent
         from tools.process_registry import process_registry
@@ -135,6 +232,15 @@ def main():
             max_iterations=max(0, int(os.environ.get("NATIVE_MAX_TURNS", "0"))) or 1_000_000_000,
             skip_context_files=True, skip_memory=True, skip_background_review=True,
         )
+    repeated_failures = None
+    if repeated_failure_limit:
+        guardrails = getattr(agent, "_tool_guardrails", None)
+        if callable(getattr(guardrails, "after_call", None)):
+            repeated_failures = RepeatedFailureStop(guardrails, repeated_failure_limit)
+            agent._tool_guardrails = repeated_failures
+        else:
+            print("\nThe native agent has no tool-call guardrail to extend: "
+                  "a call that keeps failing the same way will not stop this role", file=sys.stderr)
 
     # Native terminal commands can have their own process groups. Give the
     # installed agent its existing hard-interrupt path before closing it.
@@ -169,15 +275,36 @@ def main():
         # can follow the report on stdout.
         finished.set()
         interrupter.join(timeout=1)
+        # A turn the SDK's tool-call guardrail ended did not finish the role's
+        # work, whichever rule stopped it. What the role started in the
+        # background is stopped first: it may be what was using up the machine.
+        halted = None
+        guardrail = result.get("guardrail")
+        if repeated_failures is not None and repeated_failures.stopped:
+            halted = repeated_failures.stopped
+        elif guardrail or result.get("turn_exit_reason") == "guardrail_halt":
+            details = guardrail if isinstance(guardrail, dict) else {}
+            halted = scrub(f"Stopped by the native agent's tool-call guardrail ({details.get('code', 'unknown')}): "
+                           f"{details.get('message', '')}", credentials())
+        if halted:
+            try:
+                with contextlib.redirect_stdout(sys.stderr):
+                    process_registry.kill_all()
+            except Exception as error:
+                print(f"\nBackground processes not stopped: {error}", file=sys.stderr)
         # No stripping, clipping, classification, JSON parsing or approval test.
         # Preserve partial work even when the native run failed, and publish the
         # report before cleanup so a cleanup error cannot erase it.
         response = result.get("final_response")
         if response is not None:
             sys.stdout.write(response)
+        if halted:
+            sys.stdout.write(("\n\n" if (response or "").strip() else "") + halted + "\n")
         sys.stdout.flush()
         if result.get("error"):
             print(result["error"], file=sys.stderr)
+        if halted:
+            print("\n" + halted, file=sys.stderr)
         # A run that ends without a report has not done the role's work: the
         # native agent gives up, for one, on an answer that stays cut off at
         # NATIVE_MAX_TOKENS after its continuations. Say so and fail, so the
@@ -185,13 +312,13 @@ def main():
         # sentence starts on a line of its own: the credential filter drops a
         # whole line, and the SDK's last write may not have ended one.
         signalled = stop_signal
-        empty = not signalled and not result.get("failed") and not (response or "").strip()
+        empty = not signalled and not halted and not result.get("failed") and not (response or "").strip()
         if empty:
             print("\nNative agent ended without a report (an answer cut off at NATIVE_MAX_TOKENS is one cause)", file=sys.stderr)
         elif not signalled and result.get("failed") and not result.get("error"):
             print("\nNative agent reported failure without a reason", file=sys.stderr)
         save_transcript(result)
-        return 128 + signalled if signalled else (1 if result.get("failed") or empty else 0)
+        return 128 + signalled if signalled else (1 if result.get("failed") or empty or halted else 0)
     finally:
         finished.set()
         interrupter.join(timeout=1)
