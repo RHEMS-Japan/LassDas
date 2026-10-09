@@ -442,6 +442,19 @@ testable conditions is returned to requirements by the configured decision
 model, not by a prose parser. This is an instruction to that model, not a
 guarantee that every model follows it.
 
+When a tool or environment needed to build or verify the requested result is
+missing at initial elicitation, the entrance roles include the choice that the
+operator provides it and the same request then continues, and recommend it:
+they say what must be prepared, and the request waits for the reply. A missing
+tool is an environment the operator can fix, not a reason to recommend that a
+person implement the work, to substitute another request or to lower the agreed
+verification; handing the work to a person is offered only when the requester
+explicitly wants that. A reply does not prove that the tool is now there, so the
+roles check it before relying on it. After handoff the existing restriction to
+questions about newly required authority still applies. These are instructions
+to the models; the engine installs nothing and the question and reply work as
+before.
+
 For ordered stages, `workflow.entrance_rework_limit` bounds how often the
 decision can immediately choose the first stage again: omitted or zero means
 two repeats; a positive value chooses another limit. The initial pass, a return
