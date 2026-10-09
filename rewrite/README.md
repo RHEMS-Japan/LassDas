@@ -2293,12 +2293,15 @@ Provide these process settings explicitly:
   leaves no report; the bridge then exits 1, so the runtime retries the role
   instead of passing an empty result to the next one.
 - Optional `NATIVE_MAX_TURNS`: the number of model calls after which the native
-  agent stops. None is set unless the operator names one.
-- Optional `NATIVE_MAX_REPEATED_FAILURES` (default `5`, `0` turns it off): the
-  role ends when one tool call fails the same way that many times in a row,
-  the same tool with the same arguments returning the same result. Any other
-  call in between, or a success, starts the count again, so a check that fails
-  again after each edit is not stopped. The SDK only warns about such a loop:
+  agent stops. None is set unless the operator names one, and `0` or a
+  negative number also sets none.
+- Optional `NATIVE_MAX_REPEATED_FAILURES` (default `5`, `0` or a negative
+  number turns it off): the role ends when one tool call fails the same way
+  that many times in a row, the same tool with the same arguments returning the
+  same result. Any other call in between, or a success, starts the count again,
+  so a check that fails again after each edit is not stopped, and neither are
+  two failing calls that take turns: each starts the other's count again. The
+  SDK only warns about such a loop:
   a role once repeated a call that could not succeed, a wait for a background
   process without naming it, for as long as it ran, while the build it had
   started used up the memory. At the limit the SDK makes no further model
@@ -2312,7 +2315,14 @@ Provide these process settings explicitly:
   (`tool_loop_guardrails` in its configuration) counts every failure of a
   call however much happened in between and is left as the operator
   configured it; a turn that it, or any other guardrail rule, ends also exits
-  1 with its reason.
+  1 with its reason. This setting and `NATIVE_MAX_TURNS` take a whole number:
+  any other value, an empty one included, ends the bridge at launch with
+  Python's `ValueError` on stderr and exit 1, before any model call, at every
+  launch until it is corrected. The image workflows hold the stop to the
+  image's own pinned Hermes before an image is accepted
+  (`.github/scripts/check-native-repeated-failures.sh`, which says what passes):
+  a Hermes that stops handing the bridge its verdict on a failed call, or has
+  no tool-call guardrail to extend, fails there.
 - Optional `NATIVE_LOG_PREFIX_CHARS` (default `2000`): how much of each tool
   call's arguments and result the harness prints as it happens; the lines reach
   stderr, so the runtime's live copy shows them, and only the tail of them

@@ -48,6 +48,8 @@ jobs:
         # The same check image.yml runs before it pushes; what passes is
         # written in the script.
         run: bash .github/scripts/check-rust-toolchain.sh "$IMAGE"
+      - name: Stop repeated failures through the packaged native SDK
+        run: bash .github/scripts/check-native-repeated-failures.sh "$IMAGE"
       - name: Let an unprivileged process map a user namespace on this runner
         # Ubuntu 24.04's apparmor_restrict_unprivileged_userns strips the
         # capabilities of a user namespace an unconfined process creates, and

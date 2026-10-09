@@ -61,6 +61,8 @@ jobs:
           bash .github/scripts/check-packaged-engine.sh "$tag"
           # Build and test a small crate with the image's own Rust, as a role would.
           bash .github/scripts/check-rust-toolchain.sh "$tag"
+          # The real pinned SDK must pass its failure observations to the bridge.
+          bash .github/scripts/check-native-repeated-failures.sh "$tag"
           # The same crate through the real role launcher: what a role can run.
           # The sysctl is what image-check.yml sets for it (see the note there).
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
