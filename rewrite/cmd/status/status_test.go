@@ -234,7 +234,7 @@ func TestWorkLimitStatusSeparatesMeasuredTimeFromAnOpenInterval(t *testing.T) {
 }
 
 func TestPausedRequestsShowTheReasonWithoutBecomingDoneOrRunning(t *testing.T) {
-	for _, variant := range []string{"active-limit", "hard-exit-limit", "resume intent", "resume saved", "released", "damaged", "unreadable", "history missing", "stopped", "delivered"} {
+	for _, variant := range []string{"active-limit", "hard-exit-limit", "stage-attempt-limit", "resume intent", "resume saved", "released", "damaged", "unreadable", "history missing", "stopped", "delivered"} {
 		t.Run(variant, func(t *testing.T) {
 			root := fixtureQueue(t)
 			directory := filepath.Join(root, "jobs", "7")
@@ -250,7 +250,7 @@ func TestPausedRequestsShowTheReasonWithoutBecomingDoneOrRunning(t *testing.T) {
 			}
 			at := time.Date(2026, 1, 2, 0, 20, 0, 0, time.UTC)
 			pause := map[string]any{"reason": "active-limit", "at": at, "notice_id": 900}
-			if variant == "hard-exit-limit" {
+			if variant == "hard-exit-limit" || variant == "stage-attempt-limit" {
 				pause["reason"] = variant
 			}
 			if variant == "damaged" {
@@ -288,12 +288,15 @@ func TestPausedRequestsShowTheReasonWithoutBecomingDoneOrRunning(t *testing.T) {
 			}
 			j := s.loadJob("7", at.Add(time.Minute), false)
 			switch variant {
-			case "active-limit", "hard-exit-limit":
+			case "active-limit", "hard-exit-limit", "stage-attempt-limit":
 				if j.Lane != "awaiting" || j.Status != "paused; waiting for an authorized resume instruction" || !strings.Contains(j.Attention, pauseResumeHelp) {
 					t.Fatalf("saved pause shown as something else: %+v", j)
 				}
 				if variant == "hard-exit-limit" && !strings.Contains(j.Attention, "forced-exit limit") {
 					t.Fatal("an unmeasured interval was shown as a reached limit")
+				}
+				if variant == "stage-attempt-limit" && (!strings.Contains(j.Attention, "launches in a row that did not end cleanly") || !strings.Contains(translate("ja", j.Attention), "正常に終わらなかった起動")) {
+					t.Fatalf("the stage's launches were not named: %q", j.Attention)
 				}
 				if !strings.Contains(translate("ja", j.Attention), "再開") || !strings.Contains(localize("ja", j.Status), "一時停止中") {
 					t.Fatal("the pause is not explained in the viewer's language")
