@@ -12,8 +12,9 @@ A decision is recorded only when all three of these hold:
 3. Alternatives were actually compared, and the README or the project
    instructions describe the choice.
 
-Line numbers in the records refer to commit 579970b. When the documents have
-changed since, find the passage by the section name given beside the lines.
+Line numbers in records 0001 to 0011 refer to commit 579970b; a later record
+names its own commit. When the documents have changed since, find the passage
+by the section name given beside the lines.
 
 | No. | Decision | Main source |
 | --- | --- | --- |
@@ -28,6 +29,7 @@ changed since, find the passage by the section name given beside the lines.
 | [0009](0009-forced-exits-resume-up-to-a-set-count.md) | After a forced exit, a time-limited request resumes by itself up to a set count | README, "Active-work limits and recovery" |
 | [0010](0010-worker-writes-the-checkout-but-not-git.md) | The worker may write the whole checkout, but not its `.git` | RUNTIME.md, "Linux role launch" |
 | [0011](0011-the-requester-sees-a-change-before-delivery-only-when-it-alters-use.md) | The requester sees a change before delivery only when it alters how the product is used | README, "Confirming the change before delivery" |
+| [0012](0012-forced-exits-in-a-row-at-one-stage-pause-a-request-without-a-time-limit.md) | Without a time limit, forced exits in a row at one stage pause a request | README, "Active-work limits and recovery" |
 
 ## Considered and not recorded
 
