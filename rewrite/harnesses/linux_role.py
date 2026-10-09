@@ -32,9 +32,9 @@ MIB = 1 << 20
 # memory the guard counts as in use.
 RECLAIMABLE = ("active_file", "inactive_file", "slab_reclaimable")
 # The fastest one process filled memory in a measurement (22 to 33 GiB/s,
-# transparent huge pages "always"). A tenth of a second between two looks can
-# miss that much growth, so the guard looks a hundred times a second once the
-# use is within it of the limit (always, in a container of 3.2 GiB or less).
+# transparent huge pages "always"). The guard looks again before the use
+# could reach the line it acts at even growing this fast: every tenth of a
+# second at most and every hundredth at least.
 FILL_RATE = 32 << 30  # bytes per second
 # Signals the controller sends to stop a role. The launcher passes them on to
 # bubblewrap and waits for it, so it is not left for the controller to collect.
@@ -218,14 +218,17 @@ def own_cgroup(cgroup=None, proc=None):
     return None, "this process is in no cgroup v2 hierarchy (%s has no 0:: line)" % (proc / "self" / "cgroup")
 
 
+def parse_reading(current, stat):
+    """The memory in use, less what the kernel reclaims before it stops a
+    process, and the anonymous memory in it, from the text of memory.current
+    and memory.stat. Anonymous and shared memory (a role's /tmp is shared
+    memory), kernel stacks, page tables and unreclaimable kernel memory stay in."""
+    fields = dict(line.split(None, 1) for line in stat.splitlines() if line.strip())
+    return int(current) - sum(int(fields.get(name, 0)) for name in RECLAIMABLE), int(fields["anon"])
+
+
 def memory_reading(directory):
-    """The cgroup's memory in use, less what the kernel reclaims before it
-    stops a process, and the anonymous memory in it. Anonymous and shared
-    memory (a role's /tmp is shared memory), kernel stacks, page tables and
-    unreclaimable kernel memory stay in."""
-    current = int((directory / "memory.current").read_text())
-    stat = dict(line.split(None, 1) for line in (directory / "memory.stat").read_text().splitlines() if line.strip())
-    return current - sum(int(stat.get(name, 0)) for name in RECLAIMABLE), int(stat["anon"])
+    return parse_reading((directory / "memory.current").read_text(), (directory / "memory.stat").read_text())
 
 
 def memory_in_use(directory):
@@ -364,33 +367,49 @@ def tell(pid, text, proc=None):
         os.close(descriptor)
 
 
-def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=0.1, near=0.01):
+def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=0.1, near=0.01, recheck=1.0):
     """Stop the role's largest process while the container's use is at or
     over the threshold, before the kernel's out-of-memory handling can stop
     the whole container (the kubelet asks for that on cgroup v2) and the
     controller with it. A stopped process is told why on its standard error,
     and the same line goes to report (the role's record).
 
-    It looks every interval while the use is further from the limit than one
-    process can fill in that time (FILL_RATE), and every near once it is
-    nearer, so one process taking a large block at once is seen within near;
+    It looks again after the time the use would take to reach the line it
+    acts at, growing at FILL_RATE, but no later than interval and no sooner
+    than near: one process taking a large block at once is seen in time, and
     over the threshold it looks again after near whether it stopped a process
     or not, so a second process growing beside the stopped one is seen too.
     While a stopped process is still ending, its memory counts as already
-    given back."""
+    given back when choosing, though not when pacing. The use is the one with
+    caches left out (memory.stat), read only when memory.current, which bounds
+    it from above and costs least, is within a tenth of a second's growth of
+    the line: file cache alone does not bring faster looks. The process table,
+    the costly part, is read only when the use is over the threshold; while
+    the memory over it is outside every role (nothing to stop yet, the line is
+    then the last resort), once every recheck: until then a role process is
+    stopped only at the last resort."""
     uid = os.getuid()
     last_resort = limits.limit - (limits.limit - limits.threshold) // 2
-    near_from = limits.limit - int(FILL_RATE * interval)
     stopped = set()  # (pid, start) of the processes this launcher stopped
     said = False
+    waiting_since = None  # when the table last showed only memory outside the roles over the threshold
     current = os.open(limits.directory / "memory.current", os.O_RDONLY | os.O_CLOEXEC)
+    statistics = os.open(limits.directory / "memory.stat", os.O_RDONLY | os.O_CLOEXEC)
     try:
         while alive():
-            # memory.current bounds the use from above; the full reading is needed only near the threshold.
             reading = int(os.pread(current, 64, 0))
-            if reading >= limits.threshold:
-                used, anon = memory_reading(limits.directory)
-                if used >= limits.threshold:
+            in_use = reading
+            waiting = waiting_since is not None and time.monotonic() - waiting_since < recheck
+            if waiting:
+                # As at the last reading of the table, a moment ago, unless the use may be at the last resort.
+                exact = reading >= last_resort
+            else:
+                exact = reading >= limits.threshold - FILL_RATE * interval
+            if exact:
+                in_use, anon = parse_reading(reading, os.pread(statistics, 1 << 16, 0).decode())
+                used = in_use
+                if used >= (last_resort if waiting else limits.threshold):
+                    waiting_since = None
                     table = processes(proc)
                     stopped = {key for key in stopped if key[0] in table and table[key[0]].start == key[1]}
                     ending = {pid for pid, _ in stopped} | {pid for pid, process in table.items() if process.leaving}
@@ -402,6 +421,7 @@ def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=
                         # The controller, or another process outside every role, holds that much
                         # by itself: stopping role processes would not bring the use back under
                         # the threshold. Only nearer the limit is a role process stopped anyway.
+                        waiting_since = time.monotonic()
                         if not said:
                             report.write("(launcher) This container's memory in use reached %d of %d MiB, %d MiB of "
                                          "it anonymous memory outside every role's processes; no role process is "
@@ -430,9 +450,12 @@ def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=
                                 stopped.add((pid, table[pid].start))
                                 report.write(line)
                                 report.flush()
-            pause(near if reading >= near_from else interval)
+            # The pace follows the memory still held, a stopped process's included until it is gone.
+            line = last_resort if waiting_since is not None else limits.threshold
+            pause(min(interval, max(near, (line - in_use) / FILL_RATE)))
     finally:
         os.close(current)
+        os.close(statistics)
 
 
 def collect_children(seconds):

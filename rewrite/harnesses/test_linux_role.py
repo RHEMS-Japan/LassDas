@@ -420,11 +420,12 @@ class MemoryAccountingTests(unittest.TestCase):
         The stand-ins are never really stopped, so a stopped one stays in the table as it is."""
         remaining = iter(range(looks))
         report, killed, pauses = io.StringIO(), [], []
-        with patch.object(launcher, "processes", return_value=table), patch.object(launcher, "tell"), \
+        with patch.object(launcher, "processes", return_value=table) as reads, patch.object(launcher, "tell"), \
                 patch.object(os, "getuid", return_value=1000), \
                 patch.object(os, "kill", side_effect=lambda pid, number: killed.append(pid)):
             launcher.guard(10, launcher.Limits(cgroup, limit, limit - headroom), report,
                            lambda: next(remaining, None) is not None, pause=pauses.append)
+        self.table_reads = reads.call_count
         return killed, report.getvalue().splitlines(), pauses
 
     def test_memory_held_outside_every_role_stops_a_role_process_only_near_the_limit(self):
@@ -477,16 +478,71 @@ class MemoryAccountingTests(unittest.TestCase):
             killed, lines, _ = self.run_guard(cgroup, table, limit=4 << 30, headroom=(4 << 30) - (1536 << 20))
             self.assertEqual((killed, lines), ([], []))
 
-    def test_the_guard_looks_ten_times_a_second_far_from_the_limit_and_a_hundred_times_near_it(self):
-        # Near: within what one process can fill in a tenth of a second (3,277 MiB at 32 GiB/s).
+    def test_the_guard_looks_again_before_the_use_could_reach_the_threshold(self):
+        # The next look comes before the use, growing at 32 GiB/s, could reach the threshold (5,376 MiB of
+        # 6 GiB here), no later than a tenth and no sooner than a hundredth of a second; the use is the one
+        # with caches left out, so a container full of file cache is looked at no more often.
         with tempfile.TemporaryDirectory() as temporary:
             cgroup = Path(temporary) / "cgroup"
-            for limit, used, pause in ((6 << 30, 2800 << 20, 0.1), (6 << 30, 2900 << 20, 0.01),
-                                       (6 << 30, 5000 << 20, 0.01), (2 << 30, 100 << 20, 0.01)):
-                write_cgroup(cgroup, limit, used)
-                with self.subTest(limit=limit >> 20, used=used >> 20):
+            for limit, current, cache, pause in ((6 << 30, 100 << 20, 0, 0.1), (6 << 30, 4000 << 20, 0, 1376 / 32768),
+                                                 (6 << 30, 5300 << 20, 0, 0.01), (6 << 30, 5600 << 20, 5500 << 20, 0.1),
+                                                 (6 << 30, 5600 << 20, 1600 << 20, 1376 / 32768),
+                                                 (2 << 30, 100 << 20, 0, 1180 / 32768)):
+                write_cgroup(cgroup, limit, current, inactive_file=cache)
+                with self.subTest(limit=limit >> 20, current=current >> 20, cache=cache >> 20):
                     _, _, pauses = self.run_guard(cgroup, {}, looks=2, limit=limit, headroom=768 << 20)
-                    self.assertEqual(pauses, [pause, pause])
+                    self.assertEqual(len(pauses), 2)
+                    for seconds in pauses:
+                        self.assertAlmostEqual(seconds, pause, places=6)
+                    self.assertEqual(self.table_reads, 0)
+
+    def test_memory_outside_every_role_over_the_threshold_is_looked_at_without_reading_the_table_each_time(self):
+        P = launcher.Process
+        with tempfile.TemporaryDirectory() as temporary:
+            cgroup = Path(temporary) / "cgroup"
+            controller, role = 1650 << 20, 18 << 20
+            write_cgroup(cgroup, 2 << 30, controller + role + (10 << 20), anon=controller + role)
+            table = {1: P(0, "ticket-engine", controller, 1000, False), 10: P(1, "bwrap", 1 << 20, 1000, False),
+                     11: P(10, "python3", role, 1000, True)}
+            # Ten looks at once (no time passes between them here): the table is read for the first only,
+            # and the pace is set by the last resort, 1,792 MiB, a few milliseconds of growth away.
+            killed, lines, pauses = self.run_guard(cgroup, table, looks=10)
+            self.assertEqual((killed, len(lines), self.table_reads), ([], 1, 1))
+            self.assertEqual(pauses, [0.01] * 10)
+            # At the last resort it is read again at once, and the role's process is stopped.
+            write_cgroup(cgroup, 2 << 30, controller + (160 << 20) + (10 << 20), anon=controller + (160 << 20))
+            table[11] = table[11]._replace(anon=160 << 20)
+            killed, _, _ = self.run_guard(cgroup, table, looks=10)
+            self.assertEqual(killed, [11])
+
+    def test_while_waiting_the_table_is_read_again_each_second_and_a_role_that_became_the_cause_is_stopped(self):
+        P = launcher.Process
+        with tempfile.TemporaryDirectory() as temporary:
+            cgroup = Path(temporary) / "cgroup"
+            before = {1: P(0, "ticket-engine", 1650 << 20, 1000, False), 10: P(1, "bwrap", 1 << 20, 1000, False),
+                      11: P(10, "python3", 18 << 20, 1000, True)}
+            # The controller then gives back most of its memory and the role grows: 1,610 MiB in use, over
+            # the threshold (1,536 MiB) but under the last resort (1,792 MiB), and now the role's.
+            after = {**before, 1: before[1]._replace(anon=300 << 20), 11: before[11]._replace(anon=1300 << 20)}
+            clock, killed, report = [100.0], [], io.StringIO()
+            looks = iter(range(400))
+
+            def pause(seconds):
+                clock[0] += seconds
+                if clock[0] > 100.5:
+                    write_cgroup(cgroup, 2 << 30, 1610 << 20, anon=1600 << 20)
+
+            write_cgroup(cgroup, 2 << 30, 1678 << 20, anon=1668 << 20)
+            with patch.object(launcher, "processes", side_effect=lambda proc=None: before if clock[0] <= 100.5 else after), \
+                    patch.object(launcher.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.object(launcher, "tell"), patch.object(os, "getuid", return_value=1000), \
+                    patch.object(os, "kill", side_effect=lambda pid, number: killed.append((pid, clock[0]))):
+                launcher.guard(10, launcher.Limits(cgroup, 2 << 30, 3 << 29), report,
+                               lambda: next(looks, None) is not None and not killed, pause=pause)
+            self.assertEqual([pid for pid, _ in killed], [11])
+            # Stopped at the first reading of the table a second after the one that found the controller's memory.
+            self.assertGreaterEqual(killed[0][1], 101.0)
+            self.assertLess(killed[0][1], 101.1)
 
     def test_the_reason_reaches_a_pipe_or_terminal_but_never_a_file_and_never_waits(self):
         with tempfile.TemporaryDirectory() as temporary:

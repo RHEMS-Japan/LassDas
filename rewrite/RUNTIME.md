@@ -113,17 +113,16 @@ When the launcher finds a memory limit for its own cgroup (the `0::` line of
 `/proc/self/cgroup` under `/sys/fs/cgroup`, with or without a cgroup namespace
 of its own), it stays as bubblewrap's parent and guards the role:
 
-- It reads the container's memory in use ten times a second while the use is
-  further from the limit than one process can fill in a tenth of a second
-  (3.2 GiB, at the 32 GiB/s measured below), and a hundred times a second
-  nearer; in a container of 3.2 GiB or less, always a hundred. The launcher
-  used about 0.1% of one CPU at the slower pace and 1.2% at the faster one in
-  a measurement. It leaves out what the kernel takes back before it stops any
-  process: file cache
+- It reads the container's memory in use, leaving out what the kernel takes
+  back before it stops any process: file cache
   (`active_file`, `inactive_file`) and reclaimable kernel caches
   (`slab_reclaimable`, the directory and inode entries a checkout or build
   leaves behind). Anonymous and shared memory, kernel stacks, page tables and
-  unreclaimable kernel memory stay in.
+  unreclaimable kernel memory stay in. It looks again before the use could
+  reach the threshold growing at 32 GiB/s (the fastest one process filled
+  memory in a measurement, below), but at least every tenth and at most every
+  hundredth of a second: far from the threshold ten times a second, close to
+  it a hundred. File cache does not make it look more often.
 - Once less than the headroom is left, it stops (SIGKILL) the largest role
   process in the container if that process is its role's. Concurrent roles'
   launchers agree on the same process. The role's other processes continue:
@@ -147,12 +146,25 @@ of its own), it stays as bubblewrap's parent and guards the role:
   for example) is over the threshold by itself, stopping role processes would
   not bring the use back under the threshold: it says so once and stops none
   until the use reaches the limit less half the headroom (5,760 MiB of 6 GiB),
-  where it stops the largest role process anyway.
+  where it stops the largest role process anyway. In that state it reads the
+  process table once a second, not at every look.
 - A stop signal sent to the launcher is passed on to bubblewrap, and the
   launcher waits for bubblewrap and the sandbox's first process before it ends
   by the same signal, so a cancelled role leaves no process for the controller
   to collect. Only a SIGKILL to the launcher alone, which it cannot handle,
   leaves bubblewrap and that process behind.
+
+The guard's own CPU, per running role, as measured (one CPU, 51 processes in
+the container, the role idle for 10 seconds):
+
+| Container state | 6 GiB | 2 GiB |
+|---|---|---|
+| Nothing else in it | 0.21% | 0.53% |
+| File cache read (2.5 GiB in 6 GiB; little in 2 GiB) | 0.42% | — |
+| File cache written up to over the threshold (5.6 of 6 GiB, 1.7 of 2 GiB) | 0.32% | 0.53% |
+| Memory in use 3 GiB | 0.42% | — |
+| Memory in use 5 GiB, 350 MiB under the threshold | 1.89% | — |
+| Memory outside every role over the threshold by itself | 1.68% | 1.47% |
 
 The headroom is `--memory-headroom MIB`; unset, it is an eighth of the limit
 and at least 512 MiB (768 MiB of 6 GiB). A role can use at most the limit less
@@ -179,10 +191,10 @@ limit before the guard sees it:
   memory speed. With transparent huge pages set to `always` (the kernel's
   `/sys/kernel/mm/transparent_hugepage/enabled`), a single process filled
   memory at 22 to 33 GiB/s in a measurement, the 768 MiB headroom of a 6 GiB
-  container in about 30 ms. Looking every 10 ms, the guard stopped a single
-  6,000 MiB block in a 6 GiB container 9 times out of 9 (at 5,389 to 5,599
-  MiB) and 1,800 MiB in 2 GiB 3 times out of 3; faster filling (several
-  threads, faster memory) can still pass it. With `madvise` or `never`
+  container in about 30 ms. The guard stopped a single 6,000 MiB block in a
+  6 GiB container 9 times out of 9 (at 5,389 to 5,599 MiB) and 1,800 MiB in
+  2 GiB 3 times out of 3; faster filling (several threads, faster memory) can
+  still pass it. With `madvise` or `never`
   (common defaults) pages are filled more slowly;
 - several processes that together grow by more than the headroom between two
   looks;
