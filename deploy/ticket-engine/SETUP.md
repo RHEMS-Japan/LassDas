@@ -617,16 +617,18 @@ owner resolve the intended access; do not disable the rules as a test shortcut.
 
 When a reply resumes an ordered request still at its entrance, its next role
 uses the latest configured integration branch if the prepared checkout has no
-edits, local commits or untracked files and no later stage has run. A successful
-update records the previous and new HEAD in the role's history. An unavailable
-source leaves the original checkout usable and records the reason. The
-replacement is prepared away from the original, so a failed checkout leaves the
-original files as they were. Swapping it in needs the job directory's
-filesystem to support an atomic directory exchange (Linux `renameat2` with
-`RENAME_EXCHANGE`, macOS `renamex_np` with `RENAME_SWAP`); where it does not,
-the old checkout stays in use and the reason is recorded. Once work has
-started, the wrapper never updates that request's checkout; later upstream
-changes are handled at delivery as described below. See the README's
+edits, local commits or untracked files and no later stage has run. Ignored
+files count as work too: build output or test caches left in the checkout keep
+it as it is. A successful update records the previous and new HEAD in the
+role's history. An unavailable source leaves the original checkout usable and
+records the reason. The replacement is prepared away from the original, so a
+failed checkout leaves the original files as they were. Swapping it in needs
+the job directory's filesystem to support an atomic directory exchange (Linux
+`renameat2` with `RENAME_EXCHANGE`, macOS `renamex_np` with `RENAME_SWAP`);
+where it does not, the old checkout stays in use and the reason is recorded.
+Once work has started, the wrapper never updates that request's checkout;
+later upstream changes are handled at delivery as described below. See the
+README's
 [workspace preparation](../../rewrite/README.md#optional-git-workspace-preparation)
 for the conditions and limits.
 
@@ -2443,10 +2445,10 @@ Run the new engine over a copy of the queue, with no credentials, and read
 what it tried to do.
 
 1. Copy the queue's records out of the Pod, without checkouts (and the
-   staging copies a cut checkout preparation leaves as `.source-*`), agent
-   homes, live output, the log and the lock. Copy every `history.json`
-   whatever its size: a request whose history is missing from the copy looks
-   unstarted, and the engine starts it.
+   staging copies a cut checkout preparation or refresh leaves as `.source-*`
+   and `.refresh-*`), agent homes, live output, the log and the lock. Copy
+   every `history.json` whatever its size: a request whose history is missing
+   from the copy looks unstarted, and the engine starts it.
 
    ```sh
    sh deploy/ticket-engine/operations/copy-queue.sh \
