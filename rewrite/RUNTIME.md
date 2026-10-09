@@ -279,6 +279,16 @@ are not applied by the bundle. See Docker's
 BuildKit's [nested rootless runtime notes](https://github.com/moby/buildkit/blob/master/docs/rootless.md).
 Supported host security policy and live network isolation remain deployment work.
 
+The image checks run the small Rust crate through the role launcher and also
+run `awk` and `which` there, so a launcher that stops showing
+`/etc/alternatives` fails them even though `cc` now points straight into `/usr`.
+That check and the memory guard check run with `no-new-privileges`, as the
+engine container does. They still use plain bubblewrap rather than the compiled
+role syscall policy, so they do not show that every tool runs under that policy.
+The separate toolchain check normalizes each symlink hop before checking where
+it points, so a relative hop through `/etc` or a relative target outside `/usr`
+fails it too; a hop through a linked directory is not seen.
+
 Creating a Kubernetes `NetworkPolicy` object does not prove that the network
 plugin enforces it: whether it does depends on the cluster's network plugin and
 its configuration, and a policy that is accepted but not enforced lets every
