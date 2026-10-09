@@ -382,8 +382,10 @@ last, whether that had returned, and the background processes it started. The
 Hermes bridge rewrites it at the start and end of every tool call, about a
 kilobyte at most: the tool and the one argument that says what it was asked
 to do, and up to five background commands, each with every credential it was
-handed taken out before it is cut at 200 characters. A credential it was never
-handed, typed into a command, stays as typed, as on its stderr. It adds the
+handed taken out before it is cut at 200 characters. The SDK lists a background
+command already cut at 200 characters, so one cut there loses any ending that
+could be the start of such a credential, and "…" marks the cut. A credential it
+was never handed, typed into a command, stays as typed, as on its stderr. It adds the
 rule when its tool-call guardrail ends the role, once the background is
 stopped. A write that fails removes the record, so an earlier command is not
 read as the last one, and later writes try again. The runtime removes it

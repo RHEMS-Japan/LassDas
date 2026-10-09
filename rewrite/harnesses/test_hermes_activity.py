@@ -106,6 +106,31 @@ class ActivityRecordTests(unittest.TestCase):
         self.assertTrue(stop.stopped)
         self.assertEqual(longest_prefix(stop.stopped), 0, stop.stopped)
 
+    def test_a_background_command_the_sdk_cut_keeps_no_start_of_a_credential(self):
+        secret = "Kq7Wv" + "Q" * 35
+        env = {"TASK_CREDENTIAL_NAMES": "DEPLOY_TOKEN", "DEPLOY_TOKEN": secret}
+
+        class SDKRegistry(Registry):
+            """Cuts each command at 200 characters, as the pinned SDK's list does."""
+            def list_sessions(self):
+                return [{**session, "command": session["command"][:200]} for session in self.sessions]
+
+        for name, command, registry, kept in (
+                # Positive control: the whole command reaches the bridge.
+                ("given whole", "sleep 1; echo " + "x" * 165 + " " + secret, Registry, "[credential]"),
+                ("cut by the SDK inside the credential", "sleep 1; echo " + "x" * 165 + " " + secret, SDKRegistry, "x …"),
+                # The cut leaves only the credential's first two characters.
+                ("cut by the SDK two characters into it", "sleep 1; echo " + "x" * 183 + " " + secret, SDKRegistry, "x …"),
+                ("cut by the SDK elsewhere", "sleep 1; echo " + "y" * 300, SDKRegistry, "y…")):
+            with self.subTest(name):
+                activity = bridge.Activity(str(self.path), registry([{"command": command, "status": "running"}]))
+                with patch.dict(os.environ, env, clear=True):
+                    activity.started("call", "terminal", {"command": "true"})
+                background = self.read()["background"][0]
+                self.assertNotIn("Kq", background)
+                self.assertTrue(background.endswith(kept), background)
+                self.assertLessEqual(len(background), bridge.ACTIVITY_CHARACTERS)
+
     def test_a_failed_write_leaves_no_older_command_behind(self):
         activity = bridge.Activity(str(self.path), Registry())
         activity.started("c1", "terminal", {"command": "cargo build --release"})

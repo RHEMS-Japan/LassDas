@@ -182,6 +182,26 @@ def activity_text(text):
     return clip(scrub(text, credentials()), ACTIVITY_CHARACTERS - 1)
 
 
+# The SDK's list of background processes gives each command cut at this many
+# characters, before the bridge sees it.
+SDK_COMMAND_CHARACTERS = 200
+
+
+def sdk_cut_command(command):
+    """A background command as the SDK's list gives it. One the SDK cut may end
+    in the first part of a credential, which no whole-value replacement finds:
+    the longest such ending goes, and "…" marks the cut. A command of any
+    other length was not cut there."""
+    if len(command) != SDK_COMMAND_CHARACTERS:
+        return command
+    values = credentials()
+    command = scrub(command, values)
+    ending = 0
+    for value in values:
+        ending = max([ending] + [k for k in range(1, len(value)) if command.endswith(value[:k])])
+    return command[:len(command) - ending] + "…"
+
+
 class Activity:
     """Keeps TASK_ACTIVITY, the small file the runtime reads after a launch
     that did not finish: the command the native agent started last, whether it
@@ -221,7 +241,7 @@ class Activity:
             sessions = self.registry.list_sessions()
         except Exception:
             return []
-        running = [activity_text(str(session.get("command", ""))) for session in sessions
+        running = [activity_text(sdk_cut_command(str(session.get("command", "")))) for session in sessions
                    if isinstance(session, dict) and session.get("status") == "running" and session.get("command")]
         return running[:ACTIVITY_BACKGROUND]
 
