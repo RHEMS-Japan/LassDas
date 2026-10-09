@@ -40,7 +40,10 @@ type intakeConfig struct {
 	// MaxActiveMinutes limits each delegated interval of newly accepted work.
 	// Zero leaves it unlimited. Stage outcomes never reset the saved clock.
 	MaxActiveMinutes int `json:"max_active_minutes,omitempty"`
-	MaxHardExits     int `json:"max_hard_exits,omitempty"`
+	// MaxHardExits is the number of forced exits that pauses a request: all
+	// of them with a time limit, those in a row at one stage without one.
+	// Zero selects 3.
+	MaxHardExits int `json:"max_hard_exits,omitempty"`
 	// CategoryIDs narrows discovery to issues that carry one of these tracker
 	// categories, so a project shared with people's own tickets hands the
 	// runtime only what a requester marked for it. A category added to an

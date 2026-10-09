@@ -224,7 +224,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			if turns.try(issue.ID) {
 				workCtx, releaseWork := context.WithCancel(ctx)
 				clock := activeWorkTime
-				work, startErr := beginActiveWork(directory, releaseWork, clock)
+				work, startErr := beginActiveWork(directory, releaseWork, clock, cfg.Intake.MaxHardExits)
 				if startErr != nil {
 					releaseWork()
 					turns.release()

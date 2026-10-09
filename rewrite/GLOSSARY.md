@@ -554,10 +554,11 @@ not undo anything that already reached the outside.
 The engine holding a request by itself: when the model credit falls below
 `intake.min_model_credit`; when a request with an active-work limit,
 `intake.max_active_minutes`, reaches that limit or its number of forced exits,
-`intake.max_hard_exits`; or after three failed reads of the tracker in a row.
-Work continues by itself when the credit returns or the tracker can be read
-again. After either of the two limits, an authorized `再開` comment continues
-it.
+`intake.max_hard_exits`; when a request without that limit reaches the same
+number of forced exits in a row at one stage; or after three failed reads of the
+tracker in a row. Work continues by itself when the credit returns or the
+tracker can be read again. After the time limit or a forced-exit count, an
+authorized `再開` comment continues it.
 
 - Used in: README.md:1434, README.md:1546, README.md:1633
 - Not the same as: stop.
