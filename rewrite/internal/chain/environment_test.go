@@ -20,23 +20,22 @@ func TestCgroupFactsDistinguishObservedLimitsMaxAndUnknown(t *testing.T) {
 			t.Errorf("observation scope is missing %q", phrase)
 		}
 	}
+	// at is where the files are written, relative to the mount: the outside
+	// case writes readable limits where its escaping path would lead.
 	for _, tc := range []struct {
-		name, membership, memory, cpu, wantMemory, wantCPU string
+		name, membership, at, memory, cpu, wantMemory, wantCPU string
 	}{
-		{"limited", "0::/slice/task\n", "67108864\n", "150000 100000\n", "64 MiB", "1.5 CPUs"},
-		{"unaligned", "0::/\n", "1000000\n", "200000 100000\n", "1000000 bytes", "2 CPUs"},
-		{"max", "0::/\n", "max\n", "max 100000\n", "none set", "none set"},
-		{"absent", "", "", "", "unknown", "unknown"},
-		{"legacy", "7:memory:/task\n", "67108864", "150000 100000", "unknown", "unknown"},
-		{"malformed", "0::/\n", "not a limit", "150000 0", "unknown", "unknown"},
-		{"outside", "0::/../../other\n", "67108864", "150000 100000", "unknown", "unknown"},
+		{"limited", "0::/slice/task\n", "slice/task", "67108864\n", "150000 100000\n", "64 MiB", "1.5 CPUs"},
+		{"unaligned", "0::/\n", "", "1000000\n", "200000 100000\n", "1000000 bytes", "2 CPUs"},
+		{"max", "0::/\n", "", "max\n", "max 100000\n", "none set", "none set"},
+		{"absent", "", "", "", "", "unknown", "unknown"},
+		{"legacy", "7:memory:/task\n", "", "67108864", "150000 100000", "unknown", "unknown"},
+		{"malformed", "0::/\n", "", "not a limit", "150000 0", "unknown", "unknown"},
+		{"outside", "0::/../../other\n", "../../other", "67108864", "150000 100000", "unknown", "unknown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			directory := root
-			if tc.name == "limited" {
-				directory = filepath.Join(root, "slice", "task")
-			}
+			root := filepath.Join(t.TempDir(), "mount", "cgroup")
+			directory := filepath.Join(root, tc.at)
 			if err := os.MkdirAll(directory, 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -63,16 +62,31 @@ func TestUnknownFeasibilityCanAskBeforeAnyImplementation(t *testing.T) {
 	judge := testJudge(func(_ context.Context, state State, instructions string, choices map[string]string) (string, error) {
 		// This stand-in checks wiring, not an actual model's semantic judgment.
 		for _, text := range []string{instructions, processPrompt(Role{Name: "elicit"}, Process{}, Assignment{}, state)} {
-			if strings.Contains(text, "Offer concrete alternatives only for that authority decision.") ||
-				!strings.Contains(text, "After handoff, offer concrete alternatives only for questions permitted by") {
+			if strings.Contains(text, "Offer concrete alternatives only") || !strings.Contains(text, alternativesAfterHandoff) {
 				t.Error("the initial feasibility choices conflict with an unrestricted authority-only instruction")
 			}
+			// This run has no stage that confirms the change: it is told nothing about one.
+			for _, words := range []string{"confirms the change", "change-confirmation", alternativesOrChangeAfterHandoff} {
+				if strings.Contains(text, words) {
+					t.Errorf("a run without a stage that confirms the change was told %q", words)
+				}
+			}
 			for _, phrase := range []string{"can run to its end within the execution environment facts", "or you cannot tell", "question role before implementation",
-				"numbered choices with a recommended answer", "try the heaviest step once", "have the operator enlarge or prepare the environment, then continue this same request",
-				"leave the work to a person", "Recommend the trial when only the demand is unknown", "the operator's preparation when a fact already shows the environment falls short",
-				"do not recommend leaving the work to a person", "When the workflow offers no question role, take the recommended answer as settled", "does not change limits"} {
+				"two numbered choices with a recommended answer", "run the heaviest part of the verification once as a trial and continue only if it fits",
+				"or have the operator enlarge or prepare the environment, then continue this same request",
+				"Recommend the trial when only the demand is unknown", "the operator's preparation when a fact already shows the environment falls short",
+				"Offer handing the work to a person only when the requester explicitly wants that",
+				"When the workflow offers no question role, nobody is asked: open the requirements report with the missing or insufficient fact and what the operator would have to prepare",
+				"have the heaviest part of the verification run once first", "remove or lower verification", "does not change limits"} {
 				if !strings.Contains(text, phrase) {
 					t.Errorf("required resource guidance %q did not reach a role", phrase)
+				}
+			}
+			// A person is not a standing choice, and nothing goes on as if a
+			// recommendation to prepare the environment had been accepted.
+			for _, phrase := range []string{"or leave the work to a person", "take the recommended answer as settled"} {
+				if strings.Contains(text, phrase) {
+					t.Errorf("the resource guidance still says %q", phrase)
 				}
 			}
 		}
@@ -107,6 +121,21 @@ func TestEveryRoleReceivesControllerFactsWithoutChangingTheRequest(t *testing.T)
 		result := executor.Execute(context.Background(), Assignment{Role: name}, state)
 		if len(result) != 1 || result[0].Error != "" || strings.Count(result[0].Output, facts) != 1 || !strings.Contains(result[0].Output, state.Request) {
 			t.Fatalf("%s did not receive facts and original request: %#v", name, result)
+		}
+	}
+}
+
+func TestOnlyAConfirmingRunWidensTheAlternativesAfterHandoff(t *testing.T) {
+	confirming := State{Request: "r", Workflow: confirmFlow(t)}
+	for what, text := range map[string]string{"decision": decisionInstructions(confirming), "role": processPrompt(Role{}, Process{}, Assignment{}, confirming)} {
+		if !strings.Contains(text, alternativesOrChangeAfterHandoff) || strings.Contains(text, alternativesAfterHandoff) {
+			t.Errorf("the %s text does not offer alternatives for the change shown before delivery after handoff", what)
+		}
+	}
+	plain := State{Request: "r", Workflow: stagesWorkflow()}
+	for what, text := range map[string]string{"decision": decisionInstructions(plain), "role": processPrompt(Role{}, Process{}, Assignment{}, plain)} {
+		if strings.Count(text, alternativesAfterHandoff) != 1 || strings.Contains(text, alternativesOrChangeAfterHandoff) {
+			t.Errorf("the %s text of a run without that stage changed its alternatives after handoff", what)
 		}
 	}
 }

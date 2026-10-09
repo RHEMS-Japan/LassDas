@@ -2448,18 +2448,25 @@ At initial elicitation, requirements and the decision model must also assess
 whether the agreed verification can run to its end within these resources and
 time. Having the tool installed is not enough. If it does not fit, or nobody
 can tell, nothing is implemented yet: the decision chooses the configured
-question role, whose question gives numbered choices with a recommended answer:
-try the heaviest step once and continue only if it fits; have the operator
-enlarge or prepare the environment, then continue this same request; or leave
-the work to a person. The trial is recommended when only the demand is unknown,
-and the operator's preparation when an observed fact already falls short;
-leaving the work to a person is never the recommendation. Without a question
-role, the recommended answer is taken, recorded with its reason, and the work
-goes on. Do not ask the requester to maintain a resource list the controller
-can observe. This entrance choice is not restricted to newly required authority.
-After handoff, investigate ordinary failures within current authority and keep
-the existing authority and change-confirmation question rules. No reply changes
+question role, whose question gives two numbered choices with a recommended
+answer: run the heaviest part of the verification once as a trial and continue
+only if it fits, or have the operator enlarge or prepare the environment, then
+continue this same request. The trial is recommended when only the demand is
+unknown, and the operator's preparation when an observed fact already falls
+short. Handing the work to a person is offered only when the requester
+explicitly wants that, as in the shipped examples' instructions. Do not ask the
+requester to maintain a resource list the controller can observe. This choice
+at initial elicitation is not restricted to newly required authority. After
+handoff, investigate ordinary failures within current authority and keep the
+existing authority and change-confirmation question rules. No reply changes
 resource limits or grants permissions on its own.
+
+An installation without a question role has no way yet to stop at initial
+elicitation because the environment falls short. Its requirements report opens
+with the missing or insufficient fact and what the operator would have to
+prepare, and the heaviest part of the verification runs once first; the work
+still starts, and the request stops only at the existing pauses: the saved
+time cap, `intake.max_hard_exits` or `intake.max_stage_attempts`.
 
 ### Existing native-agent connection
 
