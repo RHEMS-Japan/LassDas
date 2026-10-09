@@ -2339,6 +2339,50 @@ cancels them mid-work, moves the upstream and makes it unavailable, then resumes
 both with the same original request, base and unfinished files. Its tracker and
 router are fixtures: this proves the connection, not model quality or delivery.
 
+### Runtime resource observations
+
+At the start of a request's execution, the controller reads the memory and CPU
+limits of its own cgroup (v2) and the available logical CPU count. Each role
+receives those observations, the request's saved active-work time cap, and the
+fact that local roles run inside the same limits as the controller, with no
+separate allowance per role. Where the Linux launcher's memory guard runs
+([RUNTIME.md](RUNTIME.md#memory)), it stops the largest role process before the
+limit is reached; without it, going over the limit can stop the controller and
+every role at once. The routing model receives the same observations directly
+in its instructions, without relying on a previous role to repeat them.
+The values come from the running environment, not a resource list maintained
+in project instructions. Changing current configuration does not replace a
+request's saved time cap in this description.
+The watcher supplies that saved value from the accepted job's own record,
+separate from its `run/` history directory. A direct CLI invocation, or the
+report after an authorized stop, has no active-work cap; it does not search
+parent directories for another request's record. Individual process limits can
+still apply.
+
+An unreadable or malformed limit is **unknown**, not unlimited. A cgroup
+value of `max` means no limit set at the observed cgroup; it says nothing about
+available physical memory or enclosing cgroups, which are not measured here. CPU quota
+is shown separately from logical CPU count. Remote execution targets are not
+measured. These are observations, not proof that the proposed build and its
+verification will fit, and not a new memory isolation or output approval rule.
+
+At initial elicitation, requirements and the decision model must also assess
+whether the agreed verification can run to its end within these resources and
+time. Having the tool installed is not enough. If it does not fit, or nobody
+can tell, nothing is implemented yet: the decision chooses the configured
+question role, whose question gives numbered choices with a recommended answer:
+try the heaviest step once and continue only if it fits; have the operator
+enlarge or prepare the environment, then continue this same request; or leave
+the work to a person. The trial is recommended when only the demand is unknown,
+and the operator's preparation when an observed fact already falls short;
+leaving the work to a person is never the recommendation. Without a question
+role, the recommended answer is taken, recorded with its reason, and the work
+goes on. Do not ask the requester to maintain a resource list the controller
+can observe. This entrance choice is not restricted to newly required authority.
+After handoff, investigate ordinary failures within current authority and keep
+the existing authority and change-confirmation question rules. No reply changes
+resource limits or grants permissions on its own.
+
 ### Existing native-agent connection
 
 `harnesses/hermes.py` is the stdin bridge to an installed Hermes SDK. It uses

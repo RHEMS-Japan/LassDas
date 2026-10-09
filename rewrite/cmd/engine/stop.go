@@ -235,6 +235,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				outcome := result
 				began = time.Now().UTC()
 				fmt.Fprintf(log, "starting accepted request %d\n", issue.ID)
+				workCtx = context.WithValue(workCtx, acceptedTimeFactsKey{}, requestTimeFacts(directory))
 				go func() {
 					defer releaseWork()
 					err := run(workCtx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(directory, "run")}, io.Discard, log)
