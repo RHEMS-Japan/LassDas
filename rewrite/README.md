@@ -1794,6 +1794,20 @@ the third forced exit in a row at one stage. Pause notices show measured time
 in ordinary units (for example, `0 秒` or `2 分 0 秒`), as other requester
 notices do.
 
+`intake.max_stage_attempts` sets how many launches of one stage in a row may
+end without ending cleanly before the request pauses (default 5). Omission and
+zero both select 5; negative and fractional values are invalid. A launch ends
+cleanly when every process of the stage exits 0. A role's error, a forced exit,
+a process stopped at its `timeout_minutes` and a launch for which no model could
+be selected are counted together, in any order. A launch the runtime stopped
+itself, for a deploy, a credit hold, the time limit or an authorized stop, is
+not counted and does not start the count over. This bound applies with and
+without a time limit and is a count of its own: forced exits are still counted
+for `intake.max_hard_exits`, and at the defaults a run of forced exits alone
+pauses at that count first. It is read from the configuration at each launch,
+not saved with the request. A one-shot run whose configuration has an intake
+stops launching at the same count and exits saying so.
+
 Set both in a production installation. Without a positive
 `intake.max_active_minutes`, forced exits are counted only while they come one
 after another at one stage: when the controller is killed during a stage, for
@@ -1859,6 +1873,34 @@ sets the count to zero. Below that count it continues with no notice of its
 own; the restart notice under "What the requester is told at night" is
 unchanged. The status page shows this pause as it shows a time-limited one,
 without a measured time or this count.
+
+Launches of one stage that keep ending without ending cleanly, for example a
+role's error between two forced exits, which starts the forced-exit count over,
+are bounded by `intake.max_stage_attempts` (see "Select the limit"), with or
+without a time limit. That count is read from the request's history each time,
+not kept beside it: the launches in a row of the stage that ran last that did
+not end cleanly. The processes of one launch are one launch. The count starts
+again when another stage runs, when a launch of the stage ends cleanly and at
+the requester's words, an answer or a `再開`; a routing note does not restart
+it. A review command stage that sends the work back is followed by its
+`on_failure` stage, so send-backs are not counted. The runtime separates
+launches by the record it writes for each launch of an ordered stage; outside
+an ordered run only its notes after a restart separate launches of one role.
+When the count reaches the limit during a run, the run stops before the stage
+is chosen again: no model is selected and nothing is launched for a further
+attempt. When a forced exit reaches it, the request is held after the restart
+before anything is launched, and no restart notice goes out. Either way the
+request pauses with one notice that names the stage, the count, how the
+launches ended and the limit, for example:
+
+> この依頼の自動処理を一時停止しています。「実装」の工程で、正常に終わらなかった起動が 5 回続き（強制終了 2 回、エラー 3 回）、上限の 5 回に達したためです。依頼は未完了です。中断前の操作が既に反映されている場合があり、取り消してはいません。
+
+The notice goes on with how to resume, wait or stop, as the other pause
+notices do, and the request waits for the same authorized `再開` or `停止`.
+`再開` starts this count over and, as after any pause, also the time-limited
+interval and the forced-exit count. A forced exit that reaches this limit and
+the forced-exit limit together pauses for the forced-exit limit. The status
+page shows this pause with its own reason.
 
 The status page shows the time cap, confirmed time and forced-exit count/limit
 as ordinary information, not as an attention alert. Completed requests do not

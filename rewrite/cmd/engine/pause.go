@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"ticket-runner/internal/chain"
@@ -22,6 +23,7 @@ const workLimitFile = "work-limit.json"
 const (
 	activeLimitPause    = "active-limit"
 	hardExitPause       = "hard-exit-limit"
+	stageAttemptsPause  = "stage-attempt-limit"
 	workPauseNotice     = "work-paused"
 	workResumeNotice    = "work-resume-accepted"
 	workRecoveredNotice = "work-auto-resumed"
@@ -74,7 +76,7 @@ func readWorkLimit(directory string) (workLimitRecord, error) {
 		return workLimitRecord{}, errPauseRecord
 	}
 	for i, pause := range record.Pauses {
-		if (pause.Reason != activeLimitPause && pause.Reason != hardExitPause) || pause.At.IsZero() || pause.NoticeID < 0 || pause.Elapsed < 0 {
+		if (pause.Reason != activeLimitPause && pause.Reason != hardExitPause && pause.Reason != stageAttemptsPause) || pause.At.IsZero() || pause.NoticeID < 0 || pause.Elapsed < 0 {
 			return workLimitRecord{}, errPauseRecord
 		}
 		if i+1 < len(record.Pauses) && (pause.Resume == nil || !pause.Resume.Applied) {
@@ -106,7 +108,7 @@ func (r workLimitRecord) held() bool {
 // A pause is not a native stop. Its caller owns cancellation and waits for the
 // child before recording its measured end or recovering an unconfirmed interval.
 func recordWorkPause(directory, reason string, at time.Time) error {
-	if (reason != activeLimitPause && reason != hardExitPause) || at.IsZero() {
+	if (reason != activeLimitPause && reason != hardExitPause && reason != stageAttemptsPause) || at.IsZero() {
 		return errors.New("a work pause needs its controller reason and time")
 	}
 	record, err := readWorkLimit(directory)
@@ -118,8 +120,11 @@ func recordWorkPause(directory, reason string, at time.Time) error {
 }
 
 func pauseReason(reason string) string {
-	if reason == activeLimitPause {
+	switch reason {
+	case activeLimitPause:
 		return "今回任された区間の実稼働時間が、設定された上限に達したためです。"
+	case stageAttemptsPause:
+		return "同じ工程で正常に終わらなかった起動が、設定の回数上限に達したためです。"
 	}
 	return "強制終了が設定の回数上限に達したためです。"
 }
@@ -131,6 +136,11 @@ func pausedWorkText(pause pauseEpisode, clock *workClock, exits *stageExits) str
 	} else if pause.Reason == hardExitPause && exits != nil {
 		reason = stageExitsReason(exits)
 	}
+	return pausedText(reason, pause, clock)
+}
+
+// pausedText is the pause notice around its reason.
+func pausedText(reason string, pause pauseEpisode, clock *workClock) string {
 	return "この依頼の自動処理を一時停止しています。" + reason + workPauseMeasured(clock, pause.Elapsed) +
 		"依頼は未完了です。中断前の操作が既に反映されている場合があり、取り消してはいません。\n" +
 		"続ける場合は、最初の空でない行を「再開」として新しいコメントを投稿してください。必要な補足は次の行に書けます。保存した条件で、外部の状態を確かめてから続けます。" +
@@ -256,6 +266,9 @@ func (n notices) sayPauseEvent(ctx context.Context, kind, event, words string) (
 // this poll's stop-only decision into permission to run work on the next one.
 func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, directory, request string, interval time.Duration, observe func(string)) (bool, error) {
 	recoveryErr := recoverWorkClock(directory)
+	if recoveryErr == nil {
+		recoveryErr = pauseStageAttempts(cfg, directory, time.Now().UTC())
+	}
 	record, recordErr := readWorkLimit(directory)
 	if recoveryErr != nil {
 		recordErr = recoveryErr
@@ -302,7 +315,15 @@ func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	if record.held() {
 		applyStatus(ctx, cfg, issue, directory, awaitingStatus, observe)
 		assignTurn(ctx, cfg, issue, directory, "requester", observe)
-		id, err := n.sayPauseEvent(ctx, workPauseNotice, event, pausedWorkText(*pause, record.Clock, record.StageExits))
+		words := pausedWorkText(*pause, record.Clock, record.StageExits)
+		if pause.Reason == stageAttemptsPause {
+			// Nothing has run since the pause, so the history still says what
+			// reached the limit.
+			if state, err := savedHistory(directory); err == nil {
+				words = pausedText(stageAttemptsReason(state, cfg.Intake.stageAttempts()), *pause, record.Clock)
+			}
+		}
+		id, err := n.sayPauseEvent(ctx, workPauseNotice, event, words)
 		if err != nil {
 			return true, err
 		}
@@ -435,4 +456,70 @@ func applyPauseResume(ctx context.Context, cfg config, issue sourceIssue, direct
 		exits.Active, exits.Stage, exits.Count, exits.Mark = nil, "", 0, 0
 	}
 	return saveWorkLimit(directory, *record)
+}
+
+// defaultStageAttempts is the limit selected when intake.max_stage_attempts
+// is omitted or zero: above the default forced-exit count, so forced exits
+// alone pause in that count's own words, and four more launches after the
+// first failure, each choosing its model again.
+const defaultStageAttempts = 5
+
+// stageAttempts is the configured intake.max_stage_attempts, or its default.
+func (c *intakeConfig) stageAttempts() int {
+	if c == nil || c.MaxStageAttempts <= 0 {
+		return defaultStageAttempts
+	}
+	return c.MaxStageAttempts
+}
+
+// pauseStageAttempts pauses a request whose stage has not ended cleanly as
+// many launches in a row as intake.max_stage_attempts allows: the run that
+// reached it stopped before choosing the stage again, or a restart cut off
+// the launch that reached it. It runs while the request has no child, so no
+// child's end can overwrite the pause. The count is read from the history
+// every time, not kept; the requester's 再開 joins the history and starts it
+// over. A request already held keeps its own pause.
+func pauseStageAttempts(cfg config, directory string, now time.Time) error {
+	record, err := readWorkLimit(directory)
+	if err != nil || record.held() {
+		return err
+	}
+	state, err := savedHistory(directory)
+	if err != nil {
+		return err
+	}
+	if _, count := state.FailedInARow(); count < cfg.Intake.stageAttempts() {
+		return nil
+	}
+	if record.Clock != nil {
+		// It did not resume by itself, so no recovery is said.
+		record.Clock.RecoveryNoticeAt = nil
+	}
+	record.addPause(stageAttemptsPause, now)
+	return saveWorkLimit(directory, record)
+}
+
+// stageAttemptsReason names the stage, the count and how the launches ended,
+// with the words of the notice of a stage that runs again. A launch the
+// runtime stopped itself is not counted, so it is not named either.
+func stageAttemptsReason(state chain.State, limit int) string {
+	ending, count := state.FailedInARow()
+	if count == 0 {
+		return pauseReason(stageAttemptsPause)
+	}
+	var parts []string
+	for _, kind := range []struct {
+		count int
+		words string
+	}{{ending.Kinds.Forced, "強制終了"}, {ending.Kinds.TimedOut, "時間の上限"}, {ending.Kinds.NoModel, "モデルを選べず"}, {ending.Kinds.Errors, "エラー"}} {
+		if kind.count > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d 回", kind.words, kind.count))
+		}
+	}
+	kinds := "（" + strings.Join(parts, "、") + "）"
+	where := "「" + japaneseStage(ending.Role) + "」の工程で、"
+	if count == 1 {
+		return fmt.Sprintf("%s正常に終わらなかった起動があり%s、上限の %d 回に達したためです。", where, kinds, limit)
+	}
+	return fmt.Sprintf("%s正常に終わらなかった起動が %d 回続き%s、上限の %d 回に達したためです。", where, count, kinds, limit)
 }

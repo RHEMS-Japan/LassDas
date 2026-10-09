@@ -86,6 +86,12 @@ type State struct {
 // knows nothing about where that reply arrives or what it has to say.
 var ErrWaiting = errors.New("the request is waiting for an answer to the question it asked")
 
+// ErrAttemptLimit reports that the run stopped before choosing the next
+// action: the stage that ran last has as many launches in a row that did not
+// end cleanly as Chain.AttemptLimit allows. It is not a failure or a
+// completion of the request; the caller decides who carries it on.
+var ErrAttemptLimit = errors.New("launches of one stage in a row did not end cleanly up to the configured limit")
+
 // Assignment is a dispatch instruction, not a certificate of output quality.
 type Assignment struct {
 	Role        string `json:"role"`
@@ -135,6 +141,9 @@ type Chain struct {
 	// The note left for an action a restart cut short carries it, so the next
 	// launch knows what the previous one was doing when the runtime stopped.
 	Activity func(role string) string
+	// AttemptLimit stops the run before the next choice once FailedInARow
+	// reaches it, so the stage is not launched again. Zero sets no limit.
+	AttemptLimit int
 }
 
 // Run keeps handing work on until the router selects done or the caller
@@ -181,7 +190,7 @@ func (c Chain) Run(ctx context.Context) error {
 		state.History = append(state.History, Result{
 			Role: state.Pending.Role, Instruction: state.Pending.Instruction, Speaker: "runtime",
 			Interrupted: true, Forced: forced, Activity: activity, Output: interruptedOutput(forced, activity),
-			Error:     "The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.",
+			Error:     pendingStopped,
 			StartedAt: state.PendingSince, FinishedAt: time.Now().UTC(),
 		})
 		state.Pending, state.PendingSince = nil, time.Time{}
@@ -274,6 +283,12 @@ func (c Chain) Run(ctx context.Context) error {
 				}
 			}
 		}
+		// The stage is not chosen again, which would launch it again, once it
+		// has not ended cleanly as many times in a row as the limit allows.
+		if err := c.attemptsReached(state); err != nil {
+			c.observe(err.Error())
+			return err
+		}
 		started := time.Now().UTC()
 		if notes := state.launchLimitNotes(); len(notes) > 0 {
 			state.History = append(state.History, notes...)
@@ -358,10 +373,11 @@ func (c Chain) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if paced {
+		if paced && c.attemptsReached(state) == nil {
 			// A role that could not even start would be launched again at
 			// once and fill the record with the same failure; space the
-			// attempts as router outages are spaced.
+			// attempts as router outages are spaced. At the limit there is
+			// no next attempt to space.
 			c.observe("the launch of " + next.Role + " failed within seconds; waiting before the next attempt")
 			if err := c.wait(ctx); err != nil {
 				return err
@@ -373,6 +389,54 @@ func (c Chain) Run(ctx context.Context) error {
 		checkQuestion = c.WaitAfter != "" && next.Role == c.WaitAfter && (!state.Recovering || confirming)
 	}
 }
+
+// FailedInARow is how many launches in a row of the role that ran last did not
+// end cleanly, as LastEnding reads them, and that ending. A launch the runtime
+// stopped itself, for a planned restart, a stop or a pause, is passed over:
+// it is not counted and does not start the count over. The count starts over
+// at the requester's latest words; the note for an action begun before them
+// belongs before them, even when a restart writes it afterwards. A pending
+// action is read as the note the next start will write for it, so a forced
+// exit is counted before anything is launched again.
+func (s State) FailedInARow() (Ending, int) {
+	if s.Pending != nil {
+		forced := !s.PendingSince.IsZero() && !savedSince(s.History, s.Pending.Role, s.PendingSince)
+		s.History = append(s.History[:len(s.History):len(s.History)], Result{Role: s.Pending.Role, Speaker: "runtime",
+			Interrupted: true, Forced: forced, Error: pendingStopped, StartedAt: s.PendingSince})
+	}
+	for i := len(s.History) - 1; i >= 0; i-- {
+		if s.History[i].Speaker != "requester" {
+			continue
+		}
+		replied := s.History[i].FinishedAt
+		s.History = s.History[i+1:]
+		for len(s.History) > 0 && s.History[0].Speaker == "runtime" && s.History[0].Interrupted && s.History[0].StartedAt.Before(replied) {
+			s.History = s.History[1:]
+		}
+		break
+	}
+	ending, ok := s.LastEnding()
+	if !ok {
+		return Ending{}, 0
+	}
+	return ending, ending.Attempt - ending.Kinds.Stopped
+}
+
+// attemptsReached reports, as an error, that the stage that ran last has as
+// many launches in a row that did not end cleanly as AttemptLimit allows.
+func (c Chain) attemptsReached(state State) error {
+	if c.AttemptLimit <= 0 {
+		return nil
+	}
+	ending, count := state.FailedInARow()
+	if count < c.AttemptLimit {
+		return nil
+	}
+	return fmt.Errorf("%w: %s did not end cleanly %d times in a row", ErrAttemptLimit, ending.Role, count)
+}
+
+// pendingStopped is the error of the note left for an action a restart cut short.
+const pendingStopped = "The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it."
 
 // savedSince reports that the history keeps a record of the role from a launch
 // that began at since: the launch returned and its results were saved before
