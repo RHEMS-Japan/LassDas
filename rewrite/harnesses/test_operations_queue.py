@@ -108,6 +108,19 @@ class OperationsQueueTests(unittest.TestCase):
         self.assertEqual(json.loads(self.calls.read_text())[-2:], ["--remote-copy", str(self.queue)])
         self.assertNotIn("fixture request", result.stdout + result.stderr)
 
+    def test_copy_leaves_out_a_cut_refresh_as_it_does_a_cut_preparation(self):
+        # A launch killed while preparing or refreshing a checkout leaves a
+        # whole checkout, links included, in private staging beside the
+        # workspace. Neither is a queue record.
+        self.job()
+        for staging in (".source-cut", ".refresh-cut"):
+            self.record("jobs/7/%s/repository/.git/config" % staging, {"private": "checkout"})
+            (self.queue / "jobs/7" / staging / "repository/linked").symlink_to(".git/config")
+        result = self.run_helper("copy")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sorted(path.name for path in (self.output / "jobs/7").iterdir()), ["issue.json", "run"])
+        self.assertTrue((self.output / "jobs/7/run/history.json").is_file())
+
     def test_copy_keeps_history_larger_than_the_old_size_cutoff(self):
         path = self.job()
         with path.open("wb") as output:

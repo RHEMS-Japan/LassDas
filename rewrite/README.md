@@ -475,6 +475,19 @@ testable conditions is returned to requirements by the configured decision
 model, not by a prose parser. This is an instruction to that model, not a
 guarantee that every model follows it.
 
+When a tool or environment needed to build or verify the requested result is
+missing at initial elicitation, the requirements and question roles include the
+choice that the operator provides it and the same request then continues, and
+recommend it: they say what must be prepared, and the request waits for the
+reply. A missing tool is an environment the operator can fix, not a reason to
+recommend that a person implement the work, to substitute another request or to
+lower the agreed verification; handing the work to a person is offered only when
+the requester explicitly wants that. A reply does not prove that the tool is now
+there, so the roles check it before relying on it. After handoff the existing
+restriction to questions about newly required authority still applies. These are
+instructions to the models; the engine installs nothing and the question and
+reply work as before.
+
 For ordered stages, `workflow.entrance_rework_limit` bounds how often the
 decision can immediately choose the first stage again: omitted or zero means
 two repeats; a positive value chooses another limit. The initial pass, a return
@@ -1794,6 +1807,20 @@ the third forced exit in a row at one stage. Pause notices show measured time
 in ordinary units (for example, `0 秒` or `2 分 0 秒`), as other requester
 notices do.
 
+`intake.max_stage_attempts` sets how many launches of one stage in a row may
+end without ending cleanly before the request pauses (default 5). Omission and
+zero both select 5; negative and fractional values are invalid. A launch ends
+cleanly when every process of the stage exits 0. A role's error, a forced exit,
+a process stopped at its `timeout_minutes` and a launch for which no model could
+be selected are counted together, in any order. A launch the runtime stopped
+itself, for a deploy, a credit hold, the time limit or an authorized stop, is
+not counted and does not start the count over. This bound applies with and
+without a time limit and is a count of its own: forced exits are still counted
+for `intake.max_hard_exits`, and at the defaults a run of forced exits alone
+pauses at that count first. It is read from the configuration at each launch,
+not saved with the request. A one-shot run whose configuration has an intake
+stops launching at the same count and exits saying so.
+
 Set both in a production installation. Without a positive
 `intake.max_active_minutes`, forced exits are counted only while they come one
 after another at one stage: when the controller is killed during a stage, for
@@ -1859,6 +1886,34 @@ sets the count to zero. Below that count it continues with no notice of its
 own; the restart notice under "What the requester is told at night" is
 unchanged. The status page shows this pause as it shows a time-limited one,
 without a measured time or this count.
+
+Launches of one stage that keep ending without ending cleanly, for example a
+role's error between two forced exits, which starts the forced-exit count over,
+are bounded by `intake.max_stage_attempts` (see "Select the limit"), with or
+without a time limit. That count is read from the request's history each time,
+not kept beside it: the launches in a row of the stage that ran last that did
+not end cleanly. The processes of one launch are one launch. The count starts
+again when another stage runs, when a launch of the stage ends cleanly and at
+the requester's words, an answer or a `再開`; a routing note does not restart
+it. A review command stage that sends the work back is followed by its
+`on_failure` stage, so send-backs are not counted. The runtime separates
+launches by the record it writes for each launch of an ordered stage; outside
+an ordered run only its notes after a restart separate launches of one role.
+When the count reaches the limit during a run, the run stops before the stage
+is chosen again: no model is selected and nothing is launched for a further
+attempt. When a forced exit reaches it, the request is held after the restart
+before anything is launched, and no restart notice goes out. Either way the
+request pauses with one notice that names the stage, the count, how the
+launches ended and the limit, for example:
+
+> この依頼の自動処理を一時停止しています。「実装」の工程で、正常に終わらなかった起動が 5 回続き（強制終了 2 回、エラー 3 回）、上限の 5 回に達したためです。依頼は未完了です。中断前の操作が既に反映されている場合があり、取り消してはいません。
+
+The notice goes on with how to resume, wait or stop, as the other pause
+notices do, and the request waits for the same authorized `再開` or `停止`.
+`再開` starts this count over and, as after any pause, also the time-limited
+interval and the forced-exit count. A forced exit that reaches this limit and
+the forced-exit limit together pauses for the forced-exit limit. The status
+page shows this pause with its own reason.
 
 The status page shows the time cap, confirmed time and forced-exit count/limit
 as ordinary information, not as an attention alert. Completed requests do not
@@ -2292,15 +2347,33 @@ A per-job OS file lock serializes preparation, not the later role work. Both
 parallel launchers enter the published directory before starting their roles.
 This optional launcher requires POSIX file locking and same-filesystem staging.
 
-Any nonempty workspace is reused unchanged, even when the configured upstream
-has moved or is unavailable. There is no fetch, reset, cleaning, repository
-certification or inspection of agent-edited Git configuration outside the role
-sandbox. Changing the configured source/ref does not replace an active job.
-This preserves local commits, dirty edits and untracked progress; it does not
-claim that existing work is a valid or undamaged checkout. A failed clone or
+After an accepted reply at the entrance of an ordered run, the wrapper checks
+the configured source once before the next role starts. It advances only a
+checkout still at its recorded preparation HEAD, with no dirty, untracked or
+ignored files, and no stage after the entrance ever launched. The role's
+diagnostics record the old and new HEAD in one line, which the engine keeps in
+history. An unchanged upstream adds no line. If fetching fails, the original
+checkout is used and the reason is recorded; there is no reset or cleaning.
+The new tree is checked out and checked for unfinished writes in a private
+copy before replacing the original directory. A failed checkout leaves the
+original intact. Linux/macOS atomically exchange the two directories, so the
+workspace path is never absent or half updated. If the exchange is unsupported
+or fails, the old checkout stays in use with a reason. After an interruption,
+the next launch reconciles the preparation record with the old or new HEAD
+before any role runs. An unexpected HEAD is reported without launching a role.
+
+Once a later stage has run, the workspace is reused unchanged even after a
+reply. Local commits and edits are never replaced. Changed Git configuration
+is not executed outside the sandbox: the wrapper only opens the Git metadata
+it prepared with its unchanged local configuration. A changed source/ref,
+an unrecorded checkout, or missing/unreadable run history also leaves the
+workspace alone. Connected-role runs have no designated entrance stage and
+do not perform this refresh. This does not claim that existing work is a
+valid or undamaged checkout. A failed initial clone or
 checkout never starts the role and its reason reaches the existing chain. A
-retry can prepare the still-empty workspace. A killed preparation can leave
-unpublished private staging for operator cleanup; it is never treated as work.
+retry can prepare the still-empty workspace. A killed preparation or refresh
+can leave unpublished private staging, up to a full copy of a checkout, for
+operator cleanup; it is never treated as work.
 Submodule/LFS setup and remote authentication are not automatically provisioned.
 
 Once a checkout is published, a record of it (`.workspace.prepared`) is kept
@@ -2338,6 +2411,11 @@ and preservation of existing work. An actual watch-loop test starts two jobs,
 cancels them mid-work, moves the upstream and makes it unavailable, then resumes
 both with the same original request, base and unfinished files. Its tracker and
 router are fixtures: this proves the connection, not model quality or delivery.
+
+The reply-refresh regression also runs the actual chain, file-backed history,
+workspace launcher and Git: after a saved entrance reply, the next role reads
+the new upstream tree and the old/new HEAD diagnostic remains in history once.
+The requester reply and routing choice are fixtures, not a live tracker test.
 
 ### Runtime resource observations
 
@@ -2406,12 +2484,15 @@ Provide these process settings explicitly:
   leaves no report; the bridge then exits 1, so the runtime retries the role
   instead of passing an empty result to the next one.
 - Optional `NATIVE_MAX_TURNS`: the number of model calls after which the native
-  agent stops. None is set unless the operator names one.
-- Optional `NATIVE_MAX_REPEATED_FAILURES` (default `5`, `0` turns it off): the
-  role ends when one tool call fails the same way that many times in a row,
-  the same tool with the same arguments returning the same result. Any other
-  call in between, or a success, starts the count again, so a check that fails
-  again after each edit is not stopped. The SDK only warns about such a loop:
+  agent stops. None is set unless the operator names one, and `0` or a
+  negative number also sets none.
+- Optional `NATIVE_MAX_REPEATED_FAILURES` (default `5`, `0` or a negative
+  number turns it off): the role ends when one tool call fails the same way
+  that many times in a row, the same tool with the same arguments returning the
+  same result. Any other call in between, or a success, starts the count again,
+  so a check that fails again after each edit is not stopped, and neither are
+  two failing calls that take turns: each starts the other's count again. The
+  SDK only warns about such a loop:
   a role once repeated a call that could not succeed, a wait for a background
   process without naming it, for as long as it ran, while the build it had
   started used up the memory. At the limit the SDK makes no further model
@@ -2425,7 +2506,14 @@ Provide these process settings explicitly:
   (`tool_loop_guardrails` in its configuration) counts every failure of a
   call however much happened in between and is left as the operator
   configured it; a turn that it, or any other guardrail rule, ends also exits
-  1 with its reason.
+  1 with its reason. This setting and `NATIVE_MAX_TURNS` are read with
+  Python's `int()`: a value it cannot read, an empty one included, ends the
+  bridge at launch with `ValueError` on stderr and exit 1, before any model
+  call, at every launch until it is corrected. The image workflows hold the
+  stop to the image's own pinned Hermes before an image is accepted
+  (`.github/scripts/check-native-repeated-failures.sh`, which says what passes):
+  a Hermes that stops handing the bridge its verdict on a failed call, has no
+  tool-call guardrail to extend, or calls every result a failure, fails there.
 - Optional `NATIVE_LOG_PREFIX_CHARS` (default `2000`): how much of each tool
   call's arguments and result the harness prints as it happens; the lines reach
   stderr, so the runtime's live copy shows them, and only the tail of them

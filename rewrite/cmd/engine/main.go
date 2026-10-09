@@ -457,6 +457,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		if cfg.Intake.QuestionNoPostLimit != nil {
 			engine.QuestionNoPostLimit = *cfg.Intake.QuestionNoPostLimit
 		}
+		// The watch pauses the request at the same count before launching
+		// it again; the run stops at it so the stage is not launched again.
+		engine.AttemptLimit = cfg.Intake.stageAttempts()
 	}
 	// A question put to the requester is not a failure and not a completion.
 	// A single run has nobody watching the issue for the answer, so say which

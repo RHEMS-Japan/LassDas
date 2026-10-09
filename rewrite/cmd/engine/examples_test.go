@@ -657,6 +657,14 @@ func TestEveryExampleAsksAnswerableQuestionsTogetherAndRestatesTheGoal(t *testin
 			case "ask_requester":
 				phrases = []string{"every question that can be answered now", "numbered", "recommended answer", "parent decision", "推奨で"}
 			}
+			if role.Name == "elicit" || role.Name == "ask_requester" {
+				// A missing tool is the operator's to provide; the request
+				// waits for it and goes on, rather than returning to a person.
+				phrases = append(phrases, "At initial elicitation only, when a tool or environment needed to build or verify the requested result is missing",
+					"include the choice that the operator provides it and the same request then continues", "recommend that choice",
+					"say what must be prepared and wait for the reply",
+					"only when the requester explicitly wants that", "lower the agreed verification")
+			}
 			for _, phrase := range phrases {
 				if !strings.Contains(routingRoleDescription(role), phrase) {
 					t.Errorf("%s: %s lacks %q", path, role.Name, phrase)

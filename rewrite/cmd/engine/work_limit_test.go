@@ -1210,3 +1210,414 @@ func TestStageExitsLeaveTheTimeLimitedCountAsItWas(t *testing.T) {
 		t.Fatalf("pause notice: %q", pauses)
 	}
 }
+
+// attemptRecords are the history a launch of an ordered stage leaves, by how
+// it ended, each begun a minute after the previous one so that none of them
+// reads as a launch that failed within seconds.
+type attemptRecords struct {
+	at time.Time
+}
+
+func (a *attemptRecords) next() time.Time {
+	if a.at.IsZero() {
+		a.at = time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	}
+	a.at = a.at.Add(time.Minute)
+	return a.at
+}
+
+// ended is one launch of the stage whose processes returned these errors; an
+// empty error is a process that exited 0.
+func (a *attemptRecords) ended(stage string, errs ...string) []chain.Result {
+	at := a.next()
+	var results []chain.Result
+	for i, err := range errs {
+		results = append(results, chain.Result{Role: stage, Speaker: fmt.Sprintf("worker-%d", i), Error: err, StartedAt: at, FinishedAt: at.Add(30 * time.Second)})
+	}
+	return append(results, chain.Result{Role: stage, Speaker: "runtime", Output: "Runtime record.", StartedAt: at.Add(30 * time.Second), FinishedAt: at.Add(30 * time.Second)})
+}
+
+func (a *attemptRecords) failed(stage string) []chain.Result { return a.ended(stage, "exit status 1") }
+func (a *attemptRecords) clean(stage string) []chain.Result  { return a.ended(stage, "") }
+func (a *attemptRecords) noModel(stage string) []chain.Result {
+	return a.ended(stage, "Selecting a current model: the catalog could not be read")
+}
+func (a *attemptRecords) timedOut(stage string) []chain.Result {
+	return a.ended(stage, context.DeadlineExceeded.Error())
+}
+
+// forced is the note a restart leaves for a launch that saved nothing.
+func (a *attemptRecords) forced(stage string) []chain.Result {
+	at := a.next()
+	return []chain.Result{{Role: stage, Speaker: "runtime", Interrupted: true, Forced: true,
+		Error: "The process stopped while this action was pending.", StartedAt: at, FinishedAt: at.Add(time.Minute)}}
+}
+
+// stopped is a launch the runtime stopped itself, for a planned restart or a
+// pause: its processes' records, then the note the next start writes.
+func (a *attemptRecords) stopped(stage string) []chain.Result {
+	at := a.next()
+	return []chain.Result{
+		{Role: stage, Speaker: "worker-0", Interrupted: true, Error: "context canceled", StartedAt: at, FinishedAt: at.Add(10 * time.Second)},
+		{Role: stage, Speaker: "runtime", Interrupted: true, Error: "The process stopped while this action was pending.", StartedAt: at, FinishedAt: at.Add(time.Minute)},
+	}
+}
+
+func (a *attemptRecords) words(role string) []chain.Result {
+	at := a.next()
+	return []chain.Result{{Role: role, Speaker: "requester", Output: "再開", FinishedAt: at}}
+}
+
+func (a *attemptRecords) routing() []chain.Result {
+	at := a.next()
+	return []chain.Result{{Role: "router", Speaker: "runtime", Error: "routing unavailable", StartedAt: at, FinishedAt: at}}
+}
+
+// A stage that keeps ending without ending cleanly used to be launched again
+// with no bound but time; forced exits alone were bounded, and an error
+// between two of them started that count over. The launches in a row are
+// counted as the runtime recorded how each ended: an error, a forced exit,
+// the time limit or no model. A launch the runtime stopped itself is passed
+// over. Another stage, a clean launch and the requester's words start over.
+func TestStageAttemptsCountedAsTheRuntimeRecordedThem(t *testing.T) {
+	type history func(a *attemptRecords) ([]chain.Result, *chain.Assignment, time.Time)
+	join := func(parts ...[]chain.Result) []chain.Result {
+		var all []chain.Result
+		for _, part := range parts {
+			all = append(all, part...)
+		}
+		return all
+	}
+	plain := func(build func(a *attemptRecords) []chain.Result) history {
+		return func(a *attemptRecords) ([]chain.Result, *chain.Assignment, time.Time) {
+			return build(a), nil, time.Time{}
+		}
+	}
+	for _, test := range []struct {
+		name    string
+		history history
+		want    int
+	}{
+		{"error, forced exit, no model, error, forced exit", plain(func(a *attemptRecords) []chain.Result {
+			return join(a.clean("elicit"), a.failed("implement"), a.forced("implement"), a.noModel("implement"), a.failed("implement"), a.forced("implement"))
+		}), 5},
+		{"forced exit, error, forced exit, time limit, error", plain(func(a *attemptRecords) []chain.Result {
+			return join(a.clean("elicit"), a.forced("implement"), a.failed("implement"), a.forced("implement"), a.timedOut("implement"), a.failed("implement"))
+		}), 5},
+		{"another stage ran between", plain(func(a *attemptRecords) []chain.Result {
+			return join(a.failed("implement"), a.failed("implement"), a.clean("verify"), a.failed("implement"))
+		}), 1},
+		{"the stage ended cleanly between", plain(func(a *attemptRecords) []chain.Result {
+			return join(a.failed("implement"), a.failed("implement"), a.clean("implement"), a.failed("implement"))
+		}), 1},
+		{"the requester answered between", plain(func(a *attemptRecords) []chain.Result {
+			return join(a.failed("implement"), a.failed("implement"), a.words("ask_requester"), a.failed("implement"))
+		}), 1},
+		{"the requester resumed between", plain(func(a *attemptRecords) []chain.Result {
+			return join(a.failed("implement"), a.failed("implement"), a.words(""), a.failed("implement"))
+		}), 1},
+		{"a forced exit begun before the resume is not after it", plain(func(a *attemptRecords) []chain.Result {
+			before := a.next()
+			cut := chain.Result{Role: "implement", Speaker: "runtime", Interrupted: true, Forced: true, Error: "The process stopped while this action was pending.", StartedAt: before, FinishedAt: before.Add(time.Hour)}
+			return join(a.failed("implement"), a.failed("implement"), a.words(""), []chain.Result{cut}, a.failed("implement"))
+		}), 1},
+		{"a pending action that saved nothing is a forced exit", func(a *attemptRecords) ([]chain.Result, *chain.Assignment, time.Time) {
+			return join(a.failed("implement"), a.failed("implement")), &chain.Assignment{Role: "implement"}, a.next()
+		}, 3},
+		{"a pending action that saved its records was stopped", func(a *attemptRecords) ([]chain.Result, *chain.Assignment, time.Time) {
+			history := join(a.failed("implement"), a.failed("implement"))
+			since := a.next()
+			history = append(history, chain.Result{Role: "implement", Speaker: "worker-0", Interrupted: true, Error: "context canceled", StartedAt: since, FinishedAt: since.Add(time.Second)})
+			return history, &chain.Assignment{Role: "implement"}, since
+		}, 2},
+		{"a pending action begun before the resume", func(a *attemptRecords) ([]chain.Result, *chain.Assignment, time.Time) {
+			since := a.next()
+			return join(a.failed("implement"), a.failed("implement"), a.words("")), &chain.Assignment{Role: "implement"}, since
+		}, 0},
+		{"a stop by the runtime is passed over", plain(func(a *attemptRecords) []chain.Result {
+			return join(a.failed("implement"), a.stopped("implement"), a.failed("implement"))
+		}), 2},
+		{"routing notes between", plain(func(a *attemptRecords) []chain.Result {
+			return join(a.failed("implement"), a.routing(), a.failed("implement"))
+		}), 2},
+		{"a review sends the work back each time", plain(func(a *attemptRecords) []chain.Result {
+			var all []chain.Result
+			for range 4 {
+				all = join(all, a.clean("elicit"), a.clean("implement"), a.clean("verify"), a.failed("review"))
+			}
+			return all
+		}), -1},
+		{"one of two processes failed, three launches", plain(func(a *attemptRecords) []chain.Result {
+			return join(a.ended("implement", "", "exit status 1"), a.ended("implement", "", "exit status 1"), a.ended("implement", "", "exit status 1"))
+		}), 3},
+		{"clean", plain(func(a *attemptRecords) []chain.Result { return a.clean("implement") }), 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			history, pending, since := test.history(&attemptRecords{})
+			state := chain.State{History: history, Pending: pending, PendingSince: since}
+			before := len(state.History)
+			ending, count := state.FailedInARow()
+			want, role := test.want, "implement"
+			if want < 0 {
+				// The review's own launches: one each time, never in a row.
+				want, role = 1, "review"
+			}
+			if count != want || len(state.History) != before {
+				t.Fatalf("count=%d ending=%+v history %d->%d, want %d", count, ending, before, len(state.History), want)
+			}
+			if count > 0 && ending.Role != role {
+				t.Fatalf("counted at %q", ending.Role)
+			}
+		})
+	}
+}
+
+// failingStagesConfig is an ordered run whose implement stage exits 1 at
+// every launch and writes one line per launch into the request's workspace.
+func failingStagesConfig(t *testing.T) config {
+	t.Helper()
+	cfg := watchConfiguration(t)
+	cfg.Router.Mode = "stages"
+	cfg.ModelSelection = &selectionConfig{Fixed: "maker/configured"}
+	cfg.Roles = []chain.Role{
+		{Name: "implement", Purpose: "implement", Processes: []chain.Process{{Name: "worker", ModelEnv: "MODEL", Command: []string{"/bin/sh", "-c", "echo launched >> launches.txt; exit 1"}}}},
+		{Name: "verify", Purpose: "check", Processes: []chain.Process{{Name: "build", Command: []string{"/bin/sh", "-c", "exit 0"}}}},
+	}
+	cfg.Workflow = &chain.Workflow{Stages: []chain.Stage{
+		{Name: "implement", Kind: chain.ModelStage},
+		{Name: "verify", Kind: chain.CommandStage, OnFailure: "implement"},
+	}}
+	return cfg
+}
+
+func launchesIn(directory string) int {
+	raw, _ := os.ReadFile(filepath.Join(directory, "workspace", "launches.txt"))
+	return strings.Count(string(raw), "launched\n")
+}
+
+// A run of failed launches at one stage stops before the stage is chosen
+// again, and the request pauses with one notice in the requester's words that
+// names the stage, the count and how the launches ended. The forced-exit
+// count of a request without a time limit is not touched, and one with a
+// time limit pauses the same way.
+func TestStageAttemptsPauseARunOfFailedLaunchesWithOneNotice(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		earlier func(a *attemptRecords) []chain.Result
+		minutes int
+		kinds   string
+	}{
+		{"error, forced exit, no model, then two errors", func(a *attemptRecords) []chain.Result {
+			return append(append(a.failed("implement"), a.forced("implement")...), a.noModel("implement")...)
+		}, 0, "（強制終了 1 回、モデルを選べず 1 回、エラー 3 回）"},
+		{"forced exit, error, forced exit, then two errors, with a time limit", func(a *attemptRecords) []chain.Result {
+			return append(append(a.forced("implement"), a.failed("implement")...), a.forced("implement")...)
+		}, 120, "（強制終了 2 回、エラー 3 回）"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := failingStagesConfig(t)
+			remote := &noticeTracker{}
+			remote.install(t, alwaysChoose("done"))
+			a := &attemptRecords{}
+			history := append(a.clean("elicit"), test.earlier(a)...)
+			root, directory := noticeJob(t, chain.State{Workflow: cfg.Workflow, Step: "implement", History: history})
+			if test.minutes > 0 {
+				if err := acceptWorkLimit(directory, test.minutes, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+			waitFor(t, func() bool {
+				return len(remote.withPrefix("この依頼の自動処理を一時停止しています。")) > 0
+			})
+			// More ticks pass: nothing launches the stage again or repeats the notice.
+			time.Sleep(300 * time.Millisecond)
+			finish()
+			if launches := launchesIn(directory); launches != 2 {
+				t.Fatalf("the stage was launched %d times, want the 2 that made 5 in a row", launches)
+			}
+			pauses := remote.withPrefix("この依頼の自動処理を一時停止しています。")
+			reason := "「実装」の工程で、正常に終わらなかった起動が 5 回続き" + test.kinds + "、上限の 5 回に達したためです。"
+			if len(pauses) != 1 || !strings.Contains(pauses[0], reason) || !strings.Contains(pauses[0], "「再開」") || !strings.Contains(pauses[0], "「停止」") {
+				t.Fatalf("pause notices: %q, want one with %q", pauses, reason)
+			}
+			if test.minutes > 0 != strings.Contains(pauses[0], "保存された上限は 120 分") {
+				t.Fatalf("time limit in the notice: %q", pauses[0])
+			}
+			all := remote.all()
+			for i, posted := range all {
+				if posted == pauses[0] {
+					for _, later := range all[i+1:] {
+						if strings.HasPrefix(later, "本体が再起動しました") || strings.Contains(later, "やり直します") {
+							t.Fatalf("a rerun was said after the pause: %q", later)
+						}
+					}
+				}
+			}
+			record := loadWorkLimit(t, directory)
+			if len(record.Pauses) != 1 || record.Pauses[0].Reason != stageAttemptsPause || !record.held() {
+				t.Fatalf("pause record: %+v", record.Pauses)
+			}
+			if test.minutes > 0 && (record.Clock == nil || record.Clock.HardExits != 0) || test.minutes == 0 && (record.StageExits == nil || record.StageExits.Count != 0) {
+				t.Fatalf("the forced-exit count changed: clock=%+v exits=%+v", record.Clock, record.StageExits)
+			}
+			state := loadJobState(t, directory)
+			if _, count := state.FailedInARow(); count != 5 || state.Done || state.Pending != nil {
+				t.Fatalf("history after the pause: count=%d done=%t pending=%+v", count, state.Done, state.Pending)
+			}
+			t.Logf("%s: 2 launches, then paused with %q", test.name, pauses[0])
+		})
+	}
+}
+
+// A forced exit that makes the run reach the limit is found after the
+// restart, before the stage is launched again, and no restart notice goes out
+// for a launch that will not happen. The requester's 再開 starts the count over
+// and the stage runs again.
+func TestStageAttemptsPauseARestartBeforeTheStageRunsAgainAndResumeCountsAgain(t *testing.T) {
+	cfg := failingStagesConfig(t)
+	remote := &noticeTracker{}
+	remote.install(t, alwaysChoose("done"))
+	clock := newWorkTime()
+	a := &attemptRecords{}
+	history := append(a.clean("elicit"), append(append(append(a.failed("implement"), a.forced("implement")...), a.failed("implement")...), a.timedOut("implement")...)...)
+	root, directory := noticeJob(t, chain.State{Workflow: cfg.Workflow, Step: "implement", History: history})
+	// The fifth launch was cut off: its crash marker and pending action stay.
+	if _, err := beginActiveWork(directory, func() {}, clock.source(), 0); err != nil {
+		t.Fatal(err)
+	}
+	writeJobHistory(t, directory, chain.State{Workflow: cfg.Workflow, Step: "implement", History: history,
+		Pending: &chain.Assignment{Role: "implement"}, PendingSince: a.next()})
+	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool {
+		return len(remote.withPrefix("この依頼の自動処理を一時停止しています。")) > 0
+	})
+	time.Sleep(300 * time.Millisecond)
+	finish()
+	if launches := launchesIn(directory); launches != 0 {
+		t.Fatalf("the stage was launched %d times after the fifth", launches)
+	}
+	if restarts := remote.withPrefix("本体が再起動しました"); len(restarts) != 0 {
+		t.Fatalf("a restart notice went out for a launch that did not happen: %q", restarts)
+	}
+	pauses := remote.withPrefix("この依頼の自動処理を一時停止しています。")
+	if len(pauses) != 1 || !strings.Contains(pauses[0], "「実装」の工程で、正常に終わらなかった起動が 5 回続き（強制終了 2 回、時間の上限 1 回、エラー 2 回）、上限の 5 回に達したためです。") {
+		t.Fatalf("pause notices: %q", pauses)
+	}
+	record := loadWorkLimit(t, directory)
+	if exits := record.StageExits; exits == nil || exits.Count != 1 || exits.Active != nil || len(record.Pauses) != 1 || record.Pauses[0].Reason != stageAttemptsPause {
+		t.Fatalf("the forced-exit count is not its own, or the pause is another: exits=%+v pauses=%+v", exits, record.Pauses)
+	}
+	remote.mu.Lock()
+	// The next id in the fake's own order, so the queue's reads page through.
+	remote.rows = append(remote.rows, issueComment(int64(900+len(remote.rows)), 55, "再開"))
+	remote.mu.Unlock()
+	finish = startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool { return launchesIn(directory) > 0 })
+	finish()
+	state := loadJobState(t, directory)
+	resumed := -1
+	for i, result := range state.History {
+		if result.Speaker == "requester" {
+			resumed = i
+		}
+	}
+	if resumed < 0 {
+		t.Fatal("the resume did not join the history")
+	}
+	if _, count := (chain.State{History: state.History[:resumed+2]}).FailedInARow(); count != 0 {
+		t.Fatalf("the resume left a count of %d: %+v", count, state.History[resumed:])
+	}
+	if loadWorkLimit(t, directory).held() {
+		t.Fatal("still held after the resume")
+	}
+}
+
+// Forced exits alone pause a request at intake.max_hard_exits as before, in
+// that count's own words, even when this limit is the same number.
+func TestStageAttemptsLeaveForcedExitsAloneToTheirOwnCount(t *testing.T) {
+	cfg := watchConfiguration(t)
+	cfg.Intake.MaxStageAttempts = 3
+	clock := newWorkTime()
+	useWorkTime(t, clock)
+	remote := &noticeTracker{}
+	remote.install(t, alwaysChoose("implement"))
+	_, directory := noticeJob(t, chain.State{})
+	issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
+	issue.Creator.ID = 55
+	for count := 1; count <= 3; count++ {
+		cutOffAt(t, directory, "implement", 0, clock)
+		held, err := holdPausedRequest(context.Background(), cfg, issue, directory, noticeRequest, time.Second, func(string) {})
+		if err != nil || held != (count == 3) {
+			t.Fatalf("forced exit %d: held=%t err=%v", count, held, err)
+		}
+	}
+	record := loadWorkLimit(t, directory)
+	if len(record.Pauses) != 1 || record.Pauses[0].Reason != hardExitPause {
+		t.Fatalf("pauses: %+v", record.Pauses)
+	}
+	if pauses := remote.withPrefix("この依頼の自動処理"); len(pauses) != 1 || !strings.Contains(pauses[0], "「実装」の工程で強制終了が 3 回続き、上限の 3 回に達したためです。") {
+		t.Fatalf("pause notice: %q", pauses)
+	}
+}
+
+func TestStageAttemptsSetting(t *testing.T) {
+	cfg := watchConfiguration(t)
+	if got := cfg.Intake.stageAttempts(); got != 5 {
+		t.Fatalf("omitted limit selects %d", got)
+	}
+	cfg.Intake.MaxStageAttempts = 2
+	if got := cfg.Intake.stageAttempts(); got != 2 {
+		t.Fatalf("configured limit selects %d", got)
+	}
+	cfg.Intake.MaxStageAttempts = -1
+	if _, _, _, _, err := watchSettings(&cfg, t.TempDir()); err == nil || !strings.Contains(err.Error(), "intake.max_stage_attempts") {
+		t.Fatalf("a negative limit was accepted: %v", err)
+	}
+}
+
+// A one-shot run with an intake in its configuration stops at the same count
+// before it launches anything, and says why.
+func TestStageAttemptsStopAOneShotRunBeforeItLaunches(t *testing.T) {
+	cfg := failingStagesConfig(t)
+	directory := t.TempDir()
+	workspace := filepath.Join(directory, "workspace")
+	if err := os.MkdirAll(filepath.Join(directory, "run"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Roles[0].Processes[0].Directory = workspace
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath, requestPath := filepath.Join(directory, "engine.json"), filepath.Join(directory, "request.txt")
+	if err := os.WriteFile(configPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(requestPath, []byte(noticeRequest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := &attemptRecords{}
+	var history []chain.Result
+	for range 5 {
+		history = append(history, a.failed("implement")...)
+	}
+	writeJobHistory(t, directory, chain.State{Workflow: cfg.Workflow, Step: "implement", Recovering: true, History: history})
+	// Bounded, so a run that would launch the stage again fails here rather
+	// than retrying until the test binary's own timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = run(ctx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(directory, "run")}, io.Discard, io.Discard)
+	if !errors.Is(err, chain.ErrAttemptLimit) || !strings.Contains(err.Error(), "implement did not end cleanly 5 times in a row") {
+		t.Fatalf("run ended with %v", err)
+	}
+	if launches := launchesIn(directory); launches != 0 {
+		t.Fatalf("the stage was launched %d times", launches)
+	}
+	if state := loadJobState(t, directory); len(state.History) != len(history) || state.Pending != nil {
+		t.Fatalf("the stopped run changed the history: %d records, pending %+v", len(state.History), state.Pending)
+	}
+}

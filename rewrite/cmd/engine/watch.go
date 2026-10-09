@@ -44,6 +44,9 @@ type intakeConfig struct {
 	// of them with a time limit, those in a row at one stage without one.
 	// Zero selects 3.
 	MaxHardExits int `json:"max_hard_exits,omitempty"`
+	// MaxStageAttempts is how many launches in a row of one stage may end
+	// without ending cleanly before the request pauses. Zero selects 5.
+	MaxStageAttempts int `json:"max_stage_attempts,omitempty"`
 	// CategoryIDs narrows discovery to issues that carry one of these tracker
 	// categories, so a project shared with people's own tickets hands the
 	// runtime only what a requester marked for it. A category added to an
@@ -127,6 +130,9 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 	}
 	if cfg.Intake.MaxHardExits < 0 {
 		return fail(errors.New("intake.max_hard_exits must be zero or positive; zero selects the default of 3"))
+	}
+	if cfg.Intake.MaxStageAttempts < 0 {
+		return fail(fmt.Errorf("intake.max_stage_attempts must be zero or positive; zero selects the default of %d", defaultStageAttempts))
 	}
 	if err := prepareStages(cfg); err != nil {
 		return fail(err)

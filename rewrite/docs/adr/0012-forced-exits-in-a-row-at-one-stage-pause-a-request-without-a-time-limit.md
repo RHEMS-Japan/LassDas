@@ -50,10 +50,61 @@ pause, notice and resume as
 [0009](0009-forced-exits-resume-up-to-a-set-count.md), without marking it
 complete.
 
+## Addendum: launches that did not end cleanly
+
+### Decision
+
+With or without a time limit, the launches in a row of the stage that ran last
+that did not end cleanly are counted from the request's history: a role's
+error, a forced exit, a process stopped at its time limit and a launch for
+which no model could be selected, together and in any order. A launch the
+runtime stopped itself is not counted and does not start the count over.
+Another stage, a clean launch of the stage and the requester's words, an
+answer or a `再開`, start it over. At `intake.max_stage_attempts` (default 5;
+omission and zero also select 5) the run stops before the stage is chosen
+again, and the request pauses with one notice that names the stage, the count
+and how the launches ended, until the same authorized `再開`. The forced-exit
+counts above and of [0009](0009-forced-exits-resume-up-to-a-set-count.md) are
+unchanged and kept apart; when a forced exit reaches both, the forced-exit
+pause is the one recorded.
+
+### Alternatives compared
+
+Counting errors into the forced-exit count above. Its rule that a process of
+the stage ending by itself starts the count over is what lets a stage that
+alternates errors and forced exits run all night; dropping the rule would
+change what `intake.max_hard_exits` counts for every installation.
+
+Keeping the count in `work-limit.json`. Errors happen inside a run, and the
+record a run saves when it ends is the one it read at its start, so a count
+written beside it would be overwritten; the history already holds how every
+launch ended, including the note a restart writes for a cut launch.
+
+Using `intake.max_hard_exits` for this count. At its default of 3, two quick
+failures of a model service and one error would pause a request, and one
+setting could not be tuned for forced exits and for errors separately.
+
+Counting launches the runtime stopped itself. A deploy or a credit hold during
+a long stage would then count against the stage.
+
+Stopping only from the watch, at its next tick. By then the next launch would
+have chosen a model and started.
+
+### Reason
+
+A failure does not end a request
+([0002](0002-failure-never-ends-a-request.md)), and the ordered run launches a
+model stage again after every process error, so without a time limit nothing
+bounded a stage that never ended cleanly. Counting from the history bounds that
+case with one source for the count, leaves a stage that a later stage sends
+back uncounted, since another stage runs in between, and hands the request to
+a person with the same pause, notice and resume, without marking it complete.
+
 ## Status
 
 Accepted. Extends [0009](0009-forced-exits-resume-up-to-a-set-count.md) to
-requests without a time limit.
+requests without a time limit. The addendum bounds launches that did not end
+cleanly, with or without a time limit.
 
 ## Source
 
@@ -64,3 +115,9 @@ Line numbers refer to commit 98f7740.
   1778-1794.
 - [`rewrite/README.md`](../../README.md), "What the requester is told at
   night", lines 1850-1856.
+
+The addendum's line numbers refer to commit fbc4cc8.
+
+- [`rewrite/README.md`](../../README.md), "Active-work limits and recovery":
+  "Select the limit", lines 1797-1809; "Restart and operator action", lines
+  1877-1903.

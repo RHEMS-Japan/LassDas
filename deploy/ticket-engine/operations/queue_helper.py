@@ -43,7 +43,8 @@ def child_directory(parent, name):
 
 def excluded(name, is_directory):
     if is_directory:
-        return name in {"workspace", "homes", "live"} or name.startswith(".source-")
+        # Private staging a cut checkout preparation or refresh leaves behind.
+        return name in {"workspace", "homes", "live"} or name.startswith((".source-", ".refresh-"))
     return name in {"engine.log", "runner.lock"}
 
 
