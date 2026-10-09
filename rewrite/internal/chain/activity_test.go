@@ -412,3 +412,44 @@ func TestTheStageAfterACutCommandStageIsToldHowItEnded(t *testing.T) {
 		t.Fatalf("the on_failure stage after the cut check was told %q", told)
 	}
 }
+
+// The launches in a row that did not end cleanly are counted by how each
+// ended, so a run of mixed endings is not said as if all ended like the last.
+func TestLaunchesInARowAreCountedByHowEachEnded(t *testing.T) {
+	at := time.Now().UTC()
+	failed := func(result Result) []Result {
+		result.Role, result.Speaker, result.StartedAt = "work", "worker", at
+		return []Result{result, {Role: "work", Speaker: "runtime", Output: "Runtime record.", StartedAt: at}}
+	}
+	forced := []Result{{Role: "work", Speaker: "runtime", Interrupted: true, Forced: true, Error: "stopped", StartedAt: at}}
+	errored := failed(Result{Error: "exit status 1"})
+	noModel := failed(Result{Error: selectionFailure + "catalog HTTP 503"})
+	join := func(parts ...[]Result) (all []Result) {
+		for _, part := range parts {
+			all = append(all, part...)
+		}
+		return all
+	}
+	for _, shape := range []struct {
+		name    string
+		history []Result
+		kinds   EndingKinds
+		says    string
+	}{
+		{"a forced exit, then an error", join(forced, errored), EndingKinds{Forced: 1, Errors: 1},
+			"(attempt 2 in a row that did not end cleanly: 1 forced exit, 1 process error) ended with a process error"},
+		{"no model, then an error", join(noModel, errored), EndingKinds{NoModel: 1, Errors: 1},
+			"(attempt 2 in a row that did not end cleanly: 1 launch without a model, 1 process error) ended with a process error"},
+		{"errors around a forced exit", join(errored, errored, forced, errored), EndingKinds{Forced: 1, Errors: 3},
+			"(attempt 4 in a row that did not end cleanly: 1 forced exit, 3 process errors) ended with a process error"},
+		{"errors only", join(errored, errored), EndingKinds{Errors: 2},
+			"(attempt 2 in a row that did not end cleanly) ended with a process error"},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			ending, ok := State{History: shape.history}.LastEnding()
+			if !ok || ending.Kinds != shape.kinds || !strings.Contains(ending.instruction(), shape.says) {
+				t.Fatalf("read as %+v: %s", ending, ending.instruction())
+			}
+		})
+	}
+}

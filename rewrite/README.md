@@ -399,7 +399,8 @@ and marks the note `forced` when nothing of the launch had been saved, which
 means the runtime itself was killed (lack of memory is one cause). In an
 ordered run, the launch that follows a cut launch, or the stage's own launch
 that did not exit 0, is told how the previous launch ended, how many launches
-of that stage in a row did not end cleanly, the recorded command and background
+of that stage in a row did not end cleanly and, when they did not all end the
+same way, how many ended each way, the recorded command and background
 processes, and to suspect the cause (memory, time or wrong arguments) rather
 than repeat what it did unchanged. The `on_failure` stage after a command stage
 whose commands did not exit 0 is told that as before. A harness that writes
