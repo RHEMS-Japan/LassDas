@@ -948,7 +948,7 @@ func TestTheRuntimesWordsAfterTheReportDoNotHoldTheShippedCheck(t *testing.T) {
 		sentence string
 		after    string
 	}{
-		{"the report stage is launched again", "EXAMPLE_CONFIRM_FAILS_ONCE", "", "報告をやり直します。選定モデル: "},
+		{"the report stage is launched again", "EXAMPLE_CONFIRM_FAILS_ONCE", "", "報告の照合が通りませんでした。報告をやり直します。（モデル: "},
 		{"the check's stage says its sentence first", "EXAMPLE_CONFIRM_READS_LATE", "報告を照合します。", "報告を照合します。"},
 	} {
 		t.Run(shape.name, func(t *testing.T) {

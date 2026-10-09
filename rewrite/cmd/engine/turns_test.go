@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/tracker"
 )
 
 func TestTheStartIsAnnouncedOnlyToARequestThatWaitedForASlot(t *testing.T) {
@@ -197,7 +198,7 @@ func TestAStageSaysWhichModelBeganItAndSaysItOnce(t *testing.T) {
 	}
 	beginStage(t, directory, "work-worker")
 	announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
-	const said = "作業を始めます。 (モデル: maker/first)"
+	const said = "作業を始めます。（モデル: maker/first）"
 	if got := fixture.all(); len(got) != 1 || got[0] != said {
 		t.Fatalf("the stage was announced as %v", got)
 	}
@@ -297,7 +298,7 @@ func TestAStageStillChoosingWaitsForItsModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
-	if got := fixture.all(); len(got) != 1 || got[0] != "作業を始めます。 (モデル: maker/chosen)" {
+	if got := fixture.all(); len(got) != 1 || got[0] != "作業を始めます。（モデル: maker/chosen）" {
 		t.Fatalf("the stage was announced as %v", got)
 	}
 }
@@ -474,7 +475,7 @@ func TestTheFirstLaunchOfAStageWithoutASentenceIsDeclaredOnce(t *testing.T) {
 	for range 3 {
 		declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe)
 	}
-	if got := fixture.all(); len(got) != 1 || got[0] != "要件確定を始めます。選定モデル: maker/one" {
+	if got := fixture.all(); len(got) != 1 || got[0] != "要件確定を始めます。（モデル: maker/one）" {
 		t.Fatalf("the first launch was declared as %v", got)
 	}
 	if log := readNotices(t, directory).Notices; len(log) != 1 || log[0].Kind != declarePrefix+"elicit" || log[0].Models != "maker/one" || log[0].PostedAt == nil {
@@ -507,9 +508,9 @@ func TestALaunchAgainIsDeclaredOnlyWhenItsModelsChange(t *testing.T) {
 	launched(t, directory, "elicit", 6, "maker/one")
 	tick()
 	want := []string{
-		"要件確定を始めます。選定モデル: maker/one",
-		"要件確定をやり直します。選定モデル: maker/two",
-		"要件確定をやり直します。選定モデル: maker/one",
+		"要件確定を始めます。（モデル: maker/one）",
+		"要件確定をやり直します。（モデル: maker/two）",
+		"要件確定をやり直します。（モデル: maker/one）",
 	}
 	if got := fixture.all(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("the launches were declared as %q", got)
@@ -541,7 +542,7 @@ func TestAnAnnouncedStageIsNotDeclaredTwiceForOneLaunch(t *testing.T) {
 	for range 2 {
 		declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe)
 	}
-	want := []string{"作業を始めます。 (モデル: maker/first)", "作業をやり直します。選定モデル: maker/second"}
+	want := []string{"作業を始めます。（モデル: maker/first）", "作業をやり直します。（モデル: maker/second）"}
 	if got := fixture.all(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("the announced stage was told %q", got)
 	}
@@ -585,9 +586,10 @@ func TestALaunchOfSeveralModelsIsDeclaredOnceWithAllOfThem(t *testing.T) {
 	launched(t, directory, "review", 7, "maker/d", "maker/d")
 	tick()
 	want := []string{
-		"レビューを始めます。選定モデル: maker/a、maker/b",
-		"レビューをやり直します。選定モデル: maker/c",
-		"レビューをやり直します。選定モデル: maker/d",
+		"レビューを始めます。（モデル: maker/a、maker/b）",
+		"レビューをやり直します。（モデル: maker/c）",
+		// The launch before it could not choose a model for every process.
+		"前の回はレビューのモデルを選べませんでした（モデルの API が使えなかった可能性があります）。レビューをやり直します（2 回目）。（モデル: maker/d）",
 	}
 	if got := fixture.all(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("the review launches were declared as %q", got)
@@ -626,7 +628,7 @@ func TestALaunchFromBeforeDeclarationsExistedIsSettledWithoutAWord(t *testing.T)
 	declareModels(context.Background(), cfg, announcedIssue(), directory, earlier.Add(-time.Minute), observe)
 	launched(t, directory, "elicit", 4, "maker/two")
 	declareModels(context.Background(), cfg, announcedIssue(), directory, earlier.Add(-time.Minute), observe)
-	if got := fixture.all(); len(got) != 1 || got[0] != "要件確定をやり直します。選定モデル: maker/two" {
+	if got := fixture.all(); len(got) != 1 || got[0] != "要件確定をやり直します。（モデル: maker/two）" {
 		t.Fatalf("the launches after it were declared as %v", got)
 	}
 }
@@ -652,7 +654,7 @@ func TestTheSameWordsSaidAgainAreNotTakenForTheEarlierComment(t *testing.T) {
 	fixture.mu.Unlock()
 	launched(t, directory, "elicit", 6, "maker/b")
 	tick()
-	const again = "要件確定をやり直します。選定モデル: maker/b"
+	const again = "要件確定をやり直します。（モデル: maker/b）"
 	log := readNotices(t, directory).Notices
 	if last := log[len(log)-1]; fixture.count(again) != 1 || last.PostedAt != nil || last.Models != "maker/b" {
 		t.Fatalf("a refused submission was taken for the earlier comment in its words: %+v %q", last, fixture.all())
@@ -682,7 +684,7 @@ func TestAStageThatRanBeforeTheSettingIsDeclaredAsLaunchedAgain(t *testing.T) {
 	launched(t, directory, "elicit", 1, "maker/one")
 	launched(t, directory, "review", 1, "maker/a", "maker/b")
 	declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
-	want := []string{"要件確定をやり直します。選定モデル: maker/one", "レビューを始めます。選定モデル: maker/a、maker/b"}
+	want := []string{"要件確定をやり直します。（モデル: maker/one）", "レビューを始めます。（モデル: maker/a、maker/b）"}
 	if got := fixture.all(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("the launches were declared as %q", got)
 	}
@@ -716,7 +718,7 @@ func TestALaunchFromAnEarlierRunIsNotDeclaredAfterwards(t *testing.T) {
 	}
 	keep(first, chosenLaunch{Launch: 4, At: resumed.Add(time.Second), Models: []string{"maker/one"}})
 	declareModels(context.Background(), cfg, announcedIssue(), directory, resumed, observe)
-	if got := fixture.all(); len(got) != 1 || got[0] != "要件確定をやり直します。選定モデル: maker/one" {
+	if got := fixture.all(); len(got) != 1 || got[0] != "要件確定をやり直します。（モデル: maker/one）" {
 		t.Fatalf("the launch of the run under way was declared as %v", got)
 	}
 }
@@ -740,7 +742,7 @@ func TestWithoutDeclaringNothingChanges(t *testing.T) {
 		announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
 		declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe)
 	}
-	if got := fixture.all(); len(got) != 1 || got[0] != "作業を始めます。 (モデル: maker/first)" {
+	if got := fixture.all(); len(got) != 1 || got[0] != "作業を始めます。（モデル: maker/first）" {
 		t.Fatalf("without the setting the requester was told %q", got)
 	}
 	raw, err := os.ReadFile(chosenPath(run))
@@ -778,13 +780,16 @@ func lookEvery(t *testing.T, period time.Duration) {
 }
 
 // declaredWork is how the work stage of declaringRun is declared.
-const declaredWork = "作業を始めます。選定モデル: maker/configured"
+const declaredWork = "作業を始めます。（モデル: maker/configured）"
 
 // Through the queue: the engine writes each choice down as it makes it, the
-// watcher declares it, and a restart that takes the stage up again on the
-// same model says nothing more. A request delivered long ago is not told
-// about a launch it never heard of. Without the setting nothing is said and
-// the engine keeps only the first model, as it always did.
+// watcher declares it, and a restart that takes the stage up again says
+// nothing more: the restart notice already says which stage runs again. The
+// restart stopped the engine in the ordinary way, as a deploy does, so the
+// notice does not call it a forced exit and no forced exit is counted. A
+// request delivered long ago is not told about a launch it never heard of.
+// Without the setting nothing is said and the engine keeps only the first
+// model, as it always did.
 func TestTheQueueDeclaresEachLaunchOnceAcrossARestart(t *testing.T) {
 	for _, declaring := range []bool{true, false} {
 		t.Run(fmt.Sprintf("declare_models=%v", declaring), func(t *testing.T) {
@@ -826,12 +831,19 @@ func TestTheQueueDeclaresEachLaunchOnceAcrossARestart(t *testing.T) {
 			finish()
 			var declared []string
 			for _, comment := range fixture.all() {
-				if strings.Contains(comment, "選定モデル") {
+				if strings.Contains(comment, "（モデル: ") {
 					declared = append(declared, comment)
 				}
 			}
 			if declaring && (len(declared) != 1 || declared[0] != declaredWork) {
 				t.Fatalf("the launches were declared as %q", declared)
+			}
+			restarted := fixture.withPrefix("本体が再起動しました")
+			if len(restarted) != 1 || restarted[0] != "本体が再起動しました（1 回目）。作業の途中で止まったため、作業をやり直します。" {
+				t.Fatalf("the ordinary restart was said as %q", restarted)
+			}
+			if record, err := readWorkLimit(directory); err != nil || record.StageExits == nil || record.StageExits.Count != 0 || record.StageExits.Active != nil || len(record.Pauses) != 0 {
+				t.Fatalf("the ordinary restart was counted as a forced exit: %+v %v", record.StageExits, err)
 			}
 			if !declaring && len(declared) != 0 {
 				t.Fatalf("without the setting the requester was told %q", declared)
@@ -915,7 +927,7 @@ func TestTheLaunchARunEndsOrWaitsOnIsSaidWhenItReturns(t *testing.T) {
 		}()
 		startStopQueue(t, cfg, root, time.Minute, &queueLog)
 		waitFor(t, func() bool { _, err := os.Stat(filepath.Join(directory, "question.json")); return err == nil })
-		if got := fixture.all(); len(got) != 2 || got[0] != postedQuestion || got[1] != "依頼者への質問を始めます。選定モデル: maker/configured" {
+		if got := fixture.all(); len(got) != 2 || got[0] != postedQuestion || got[1] != "依頼者への質問を始めます。（モデル: maker/configured）" {
 			t.Fatalf("the question's launch was told as %q", got)
 		}
 		if !loadJobState(t, directory).Waiting {
@@ -976,6 +988,377 @@ func TestLookingReadsNothingFromTheTracker(t *testing.T) {
 			}
 			if len(told) != 1 || (told[0].PostedAt == nil) != (shape.refused > 0) {
 				t.Fatalf("the record of %s is %+v", kind, told)
+			}
+		})
+	}
+}
+
+// forcedNote is the note the runtime writes for a launch of the role that a
+// forced exit cut short, as the history keeps it.
+func forcedNote(role string, at time.Time) chain.Result {
+	return chain.Result{Role: role, Speaker: "runtime", Interrupted: true, Forced: true, Error: "The process stopped while this action was pending.", StartedAt: at, FinishedAt: at}
+}
+
+// A stage cut short again and again is said once as begun and once as taken
+// up again: each later launch in the same run of failures rewrites that one
+// comment with how the launch before it ended, the attempt it is and how many
+// more forced exits pause the request. The rewrite sends the words alone. A
+// launch after another stage ran is a new comment, said as before only when
+// its models differ.
+func TestARerunOfTheSameStageRewritesItsEarlierNotice(t *testing.T) {
+	cfg := declaringConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, began := declaringJob(t, cfg)
+	tick := func() {
+		for range 2 {
+			declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
+		}
+	}
+	exits := func(count int) {
+		t.Helper()
+		if err := saveWorkLimit(directory, workLimitRecord{Version: 1, StageExits: &stageExits{Max: 3, Stage: "elicit", Count: count, Mark: count}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := time.Now().UTC()
+	launched(t, directory, "elicit", 0, "maker/one")
+	tick()
+	writeJobHistory(t, directory, chain.State{History: []chain.Result{forcedNote("elicit", at)}})
+	exits(1)
+	launched(t, directory, "elicit", 1, "maker/two")
+	tick()
+	second := "前の回は要件確定の途中で処理が強制終了しました（メモリ不足の可能性があります）。要件確定をやり直します（2 回目）。強制終了があと 2 回続いたら一時停止して相談します。（モデル: maker/two）"
+	if got := fixture.all(); len(got) != 2 || got[1] != second {
+		t.Fatalf("the first rerun was said as %q", got)
+	}
+	writeJobHistory(t, directory, chain.State{History: []chain.Result{forcedNote("elicit", at), forcedNote("elicit", at)}})
+	exits(2)
+	launched(t, directory, "elicit", 2, "maker/two")
+	tick()
+	third := "前の回は要件確定の途中で処理が強制終了しました（メモリ不足の可能性があります）。正常に終わらなかった回が 2 回続いています（強制終了 2 回）。要件確定をやり直します（3 回目）。強制終了があと 1 回続いたら一時停止して相談します。（モデル: maker/two）"
+	if got, edited := fixture.all(), fixture.rewritten(); len(got) != 2 || len(edited) != 1 || edited[0] != third {
+		t.Fatalf("the second rerun in a row was posted %q and rewritten %q", got, edited)
+	}
+	fixture.mu.Lock()
+	form := fixture.edits[0]
+	var stored map[string]any
+	json.Unmarshal(fixture.rows[1], &stored)
+	fixture.mu.Unlock()
+	if len(form) != 1 || form.Get("content") != third || stored["content"] != third {
+		t.Fatalf("the rewrite sent %v and left %v", form, stored["content"])
+	}
+	log := readNotices(t, directory).Notices
+	if last := log[len(log)-1]; last.Edits != log[1].CommentID || last.CommentID != log[1].CommentID || last.PostedAt == nil || last.Event != "rerun:2" {
+		t.Fatalf("the rewrite is not recorded as one of the earlier comment: %+v", log)
+	}
+	// The stage then ran to its end, the check failed and the stage runs again:
+	// news of its own, a new comment, said when its models differ.
+	writeJobHistory(t, directory, chain.State{History: []chain.Result{
+		forcedNote("elicit", at), forcedNote("elicit", at),
+		{Role: "elicit", Speaker: "requirements", Output: "settled", StartedAt: at, FinishedAt: at},
+		{Role: "elicit", Speaker: "runtime", Output: "Process requirements exited 0.", StartedAt: at, FinishedAt: at},
+		{Role: "verify", Speaker: "build", Error: "exit status 1", StartedAt: at, FinishedAt: at},
+		{Role: "verify", Speaker: "runtime", Output: "Process build did not exit 0: exit status 1", StartedAt: at, FinishedAt: at},
+	}})
+	launched(t, directory, "elicit", 6, "maker/two")
+	tick()
+	if got := fixture.all(); len(got) != 2 || len(fixture.rewritten()) != 1 {
+		t.Fatalf("a rerun after another stage on the same models was said: %q %q", got, fixture.rewritten())
+	}
+	launched(t, directory, "elicit", 8, "maker/three")
+	tick()
+	if got := fixture.all(); len(got) != 3 || got[2] != "検証が通りませんでした。要件確定をやり直します。（モデル: maker/three）" || len(fixture.rewritten()) != 1 {
+		t.Fatalf("a rerun after another stage was said as %q, rewriting %q", got, fixture.rewritten())
+	}
+}
+
+// A comment is rewritten only where the tracker can edit, the comment is the
+// engine's own and it still reads as recorded. Otherwise, and when the edit
+// is refused, the rerun is a new comment and the record says it is no longer
+// a rewrite. An edit whose answer was lost but whose words landed is not
+// posted again.
+func TestARerunThatCannotRewriteItsNoticeIsPostedAnew(t *testing.T) {
+	at := time.Now().UTC()
+	for _, shape := range []struct {
+		name    string
+		change  func(*noticeTracker)
+		plain   bool
+		posted  int
+		edited  int
+		rewrite bool
+	}{
+		{"a tracker that cannot edit", nil, true, 3, 0, false},
+		{"a comment of another account", func(n *noticeTracker) { n.me = 7 }, false, 3, 0, false},
+		{"a comment that no longer reads as recorded", func(n *noticeTracker) {
+			var row map[string]any
+			json.Unmarshal(n.rows[1], &row)
+			row["content"] = "changed"
+			n.rows[1], _ = json.Marshal(row)
+		}, false, 3, 0, false},
+		{"a refused edit", func(n *noticeTracker) { n.editFail = 1 }, false, 3, 0, false},
+		{"an edit whose answer was lost", func(n *noticeTracker) { n.editSilent = true }, false, 2, 1, true},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			cfg := declaringConfig(t)
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			directory, began := declaringJob(t, cfg)
+			launched(t, directory, "elicit", 0, "maker/one")
+			declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
+			writeJobHistory(t, directory, chain.State{History: []chain.Result{forcedNote("elicit", at)}})
+			launched(t, directory, "elicit", 1, "maker/two")
+			declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
+			if shape.change != nil {
+				fixture.set(shape.change)
+			}
+			writeJobHistory(t, directory, chain.State{History: []chain.Result{forcedNote("elicit", at), forcedNote("elicit", at)}})
+			launched(t, directory, "elicit", 2, "maker/two")
+			notice := requestNotices(cfg, announcedIssue(), directory)
+			if shape.plain {
+				notice.source = plainTracker{notice.source}
+			}
+			text, _ := rerunNoticeText(cfg, directory, "elicit", []chain.Result{forcedNote("elicit", at), forcedNote("elicit", at)}, "maker/two")
+			log := readNotices(t, directory).Notices
+			err := notice.sayAs(context.Background(), declarePrefix+"elicit", "rerun:2", time.Now().UTC(), func(noticeLog, time.Time) (noticeRecord, bool) {
+				return noticeRecord{Kind: declarePrefix + "elicit", Text: text, Models: "maker/two", Event: "rerun:2", Edits: log[1].CommentID}, true
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := readNotices(t, directory).Notices
+			last := got[len(got)-1]
+			if posted := len(fixture.all()); posted != shape.posted || len(fixture.rewritten()) != shape.edited || last.PostedAt == nil {
+				t.Fatalf("posted %q, rewrote %q, record %+v", fixture.all(), fixture.rewritten(), last)
+			}
+			if rewrote := last.Edits != 0 && last.CommentID == log[1].CommentID; rewrote != shape.rewrite {
+				t.Fatalf("the record says rewritten=%t: %+v", rewrote, last)
+			}
+			if !shape.rewrite && fixture.all()[2] != text {
+				t.Fatalf("the new comment says %q", fixture.all()[2])
+			}
+		})
+	}
+}
+
+// plainTracker is a tracker without a way to edit a comment.
+type plainTracker struct{ tracker.Tracker }
+
+// The first sentence of a rerun says how the launch before it ended, from what
+// the runtime recorded; the second, for a rerun of the same stage, which
+// attempt it is, and after a forced exit how many more pause the request as
+// its saved limit counts them.
+func TestTheRerunWordsSayHowTheLaunchBeforeEnded(t *testing.T) {
+	cfg := declaringConfig(t)
+	at := time.Now().UTC()
+	failed := func(result chain.Result) []chain.Result {
+		result.Role, result.StartedAt, result.FinishedAt = "elicit", at, at
+		return []chain.Result{result, {Role: "elicit", Speaker: "runtime", Output: "Runtime record.", StartedAt: at, FinishedAt: at}}
+	}
+	for _, shape := range []struct {
+		name    string
+		history []chain.Result
+		limit   *workLimitRecord
+		want    string
+	}{
+		{"an error", failed(chain.Result{Speaker: "requirements", Error: "exit status 1"}), nil,
+			"前の回は要件確定の役がエラーで終わりました。要件確定をやり直します（2 回目）。（モデル: maker/x）"},
+		{"errors in a row", append(failed(chain.Result{Speaker: "requirements", Error: "exit status 1"}), failed(chain.Result{Speaker: "requirements", Error: "exit status 1"})...), nil,
+			"前の回は要件確定の役がエラーで終わりました。正常に終わらなかった回が 2 回続いています（エラー 2 回）。要件確定をやり直します（3 回目）。（モデル: maker/x）"},
+		// Each launch is counted by how it ended; the first sentence is the
+		// last one's only.
+		{"a forced exit, then an error", append([]chain.Result{forcedNote("elicit", at)}, failed(chain.Result{Speaker: "requirements", Error: "exit status 1"})...), nil,
+			"前の回は要件確定の役がエラーで終わりました。正常に終わらなかった回が 2 回続いています（強制終了 1 回、エラー 1 回）。要件確定をやり直します（3 回目）。（モデル: maker/x）"},
+		{"no model, then an error", append(failed(chain.Result{Speaker: "requirements", Error: "Selecting a current model: catalog HTTP 503"}), failed(chain.Result{Speaker: "requirements", Error: "exit status 1"})...), nil,
+			"前の回は要件確定の役がエラーで終わりました。正常に終わらなかった回が 2 回続いています（モデルを選べず 1 回、エラー 1 回）。要件確定をやり直します（3 回目）。（モデル: maker/x）"},
+		{"an error, then a forced exit", append(failed(chain.Result{Speaker: "requirements", Error: "exit status 1"}), forcedNote("elicit", at)), nil,
+			"前の回は要件確定の途中で処理が強制終了しました（メモリ不足の可能性があります）。正常に終わらなかった回が 2 回続いています（強制終了 1 回、エラー 1 回）。要件確定をやり直します（3 回目）。（モデル: maker/x）"},
+		{"the same call failing", failed(chain.Result{Speaker: "requirements", Error: "exit status 1", RepeatedFailures: 5}), nil,
+			"前の回は要件確定の役が同じ操作に 5 回続けて失敗し、自分で止まりました。要件確定をやり直します（2 回目）。（モデル: maker/x）"},
+		{"its time limit", failed(chain.Result{Speaker: "requirements", Error: "context deadline exceeded"}), nil,
+			"前の回は要件確定が時間の上限に達して止まりました。要件確定をやり直します（2 回目）。（モデル: maker/x）"},
+		{"stopped by the runtime", append(failed(chain.Result{Speaker: "requirements", Error: "context canceled", Interrupted: true}),
+			chain.Result{Role: "elicit", Speaker: "runtime", Interrupted: true, StartedAt: at, FinishedAt: at}), nil,
+			"前の回は要件確定の途中で本体が止まりました。要件確定をやり直します（2 回目）。（モデル: maker/x）"},
+		{"killed under a time limit", []chain.Result{forcedNote("elicit", at)}, &workLimitRecord{Version: 1, Clock: &workClock{MaxMinutes: 60, MaxHardExits: 3, HardExits: 1}},
+			"前の回は要件確定の途中で処理が強制終了しました（メモリ不足の可能性があります）。要件確定をやり直します（2 回目）。強制終了があと 2 回起きたら一時停止して相談します。（モデル: maker/x）"},
+		{"killed without a readable limit", []chain.Result{forcedNote("elicit", at)}, nil,
+			"前の回は要件確定の途中で処理が強制終了しました（メモリ不足の可能性があります）。要件確定をやり直します（2 回目）。（モデル: maker/x）"},
+		{"a check that failed", []chain.Result{
+			{Role: "verify", Speaker: "build", Error: "exit status 1", StartedAt: at},
+			{Role: "verify", Speaker: "runtime", Output: "Runtime record.", StartedAt: at}}, nil,
+			"検証が通りませんでした。要件確定をやり直します。（モデル: maker/x）"},
+		{"a stage that ended cleanly", []chain.Result{
+			{Role: "review", Speaker: "reviewer-a", StartedAt: at},
+			{Role: "review", Speaker: "runtime", Output: "Runtime record.", StartedAt: at}}, nil,
+			"要件確定をやり直します。（モデル: maker/x）"},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			_, directory := noticeJob(t, chain.State{})
+			if shape.limit != nil {
+				if err := saveWorkLimit(directory, *shape.limit); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got, _ := rerunNoticeText(cfg, directory, "elicit", shape.history, "maker/x"); got != shape.want {
+				t.Fatalf("the rerun was said as %q, want %q", got, shape.want)
+			}
+		})
+	}
+}
+
+// A rerun after the stage's own failure rewrites the comment of the one before
+// it only while nothing else came between them: another stage that ran, or
+// the requester's words, make it a new comment.
+func TestARerunAfterOtherWorkOrTheRequestersWordsIsANewComment(t *testing.T) {
+	at := time.Now().UTC()
+	for _, shape := range []struct {
+		name    string
+		between []chain.Result
+	}{
+		{"another stage ran", []chain.Result{
+			{Role: "elicit", Speaker: "requirements", Output: "settled", StartedAt: at, FinishedAt: at},
+			{Role: "elicit", Speaker: "runtime", Output: "Process requirements exited 0.", StartedAt: at, FinishedAt: at},
+			{Role: "verify", Speaker: "build", StartedAt: at, FinishedAt: at},
+			{Role: "verify", Speaker: "runtime", Output: "Process build exited 0.", StartedAt: at, FinishedAt: at}}},
+		{"the requester commented", []chain.Result{{Role: "ask_requester", Speaker: "requester", Output: "please go on", StartedAt: at, FinishedAt: at}}},
+		// The 再開 comment after a pause is kept without a role's name.
+		{"the requester resumed a pause", []chain.Result{{Speaker: "requester", Output: "再開", FinishedAt: at}}},
+		// Positive control: nothing between, the comment is rewritten.
+		{"nothing between", nil},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			cfg := declaringConfig(t)
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			directory, began := declaringJob(t, cfg)
+			tick := func() { declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {}) }
+			launched(t, directory, "elicit", 0, "maker/one")
+			tick()
+			history := []chain.Result{forcedNote("elicit", at)}
+			writeJobHistory(t, directory, chain.State{History: history})
+			launched(t, directory, "elicit", 1, "maker/two")
+			tick()
+			history = append(append(history, shape.between...), forcedNote("elicit", at))
+			writeJobHistory(t, directory, chain.State{History: history})
+			launched(t, directory, "elicit", len(history), "maker/three")
+			tick()
+			posted, rewritten := len(fixture.all()), len(fixture.rewritten())
+			if shape.between == nil && (posted != 2 || rewritten != 1) || shape.between != nil && (posted != 3 || rewritten != 0) {
+				t.Fatalf("posted %q, rewrote %q", fixture.all(), fixture.rewritten())
+			}
+		})
+	}
+}
+
+// A rewrite that reached the tracker though neither its answer nor the read
+// after it did is not posted again when the record is settled later: the
+// comment already reads as the notice, so it is confirmed as it is.
+func TestARewriteThatLandedUnconfirmedIsNotPostedAgain(t *testing.T) {
+	cfg := declaringConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, began := declaringJob(t, cfg)
+	at := time.Now().UTC()
+	launched(t, directory, "elicit", 0, "maker/one")
+	declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
+	writeJobHistory(t, directory, chain.State{History: []chain.Result{forcedNote("elicit", at)}})
+	launched(t, directory, "elicit", 1, "maker/two")
+	declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
+	notice := requestNotices(cfg, announcedIssue(), directory)
+	log, err := notice.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := log.Notices[1].CommentID
+	const words = "要件確定をやり直します（3 回目）。（モデル: maker/two）"
+	// The rewrite landed; what the engine kept is the record still pending.
+	fixture.set(func(n *noticeTracker) {
+		for i, raw := range n.rows {
+			var row map[string]any
+			json.Unmarshal(raw, &row)
+			if int64(row["id"].(float64)) == target {
+				row["content"] = words
+				n.rows[i], _ = json.Marshal(row)
+			}
+		}
+	})
+	log.Notices = append(log.Notices, noticeRecord{Kind: declarePrefix + "elicit", Text: words, Models: "maker/two", Event: "rerun:2", Edits: target, WrittenAt: time.Now().UTC()})
+	if err := notice.save(log); err != nil {
+		t.Fatal(err)
+	}
+	if err := notice.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := notice.load()
+	last := got.Notices[len(got.Notices)-1]
+	if len(fixture.all()) != 2 || len(fixture.rewritten()) != 0 || last.CommentID != target || last.PostedAt == nil {
+		t.Fatalf("a rewrite that had landed was sent again: posted %q, rewrote %q, record %+v", fixture.all(), fixture.rewritten(), last)
+	}
+}
+
+// The restart notice says which stage runs again, so the rerun that follows a
+// restart is not said a second time when that notice went out. A restart
+// inside the restart notice's interval says nothing, and then the rerun is
+// said, rewriting the stage's earlier rerun while it keeps failing.
+func TestARerunAfterARestartIsSaidOnlyWhenTheRestartWasNot(t *testing.T) {
+	at := time.Now().UTC()
+	cutStart, restarted := at.Add(-2*time.Minute), at.Add(-time.Minute)
+	note := forcedNote("elicit", restarted)
+	note.StartedAt = cutStart
+	for _, shape := range []struct {
+		name     string
+		notices  []noticeRecord
+		declared int
+	}{
+		{"the restart notice went out", []noticeRecord{{Kind: resumeNotice, Text: "本体が再起動しました（1 回目）。", WrittenAt: restarted.Add(-time.Second), PostedAt: &restarted}}, 1},
+		{"its interval held it back", []noticeRecord{{Kind: resumeNotice, Text: "本体が再起動しました（1 回目）。", WrittenAt: cutStart.Add(-10 * time.Minute), PostedAt: &cutStart}}, 2},
+		{"it predates the kind", []noticeRecord{{Kind: resumeNotice, WrittenAt: restarted.Add(-time.Second), Predates: true}}, 2},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			cfg := declaringConfig(t)
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			directory, began := declaringJob(t, cfg)
+			launched(t, directory, "elicit", 0, "maker/one")
+			declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
+			log := readNotices(t, directory)
+			log.Notices = append(log.Notices, shape.notices...)
+			data, _ := json.Marshal(log)
+			if err := writeRuntimeFile(filepath.Join(directory, "notices.json"), data); err != nil {
+				t.Fatal(err)
+			}
+			writeJobHistory(t, directory, chain.State{History: []chain.Result{note}})
+			launched(t, directory, "elicit", 1, "maker/two")
+			declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
+			if got := fixture.all(); len(got) != shape.declared {
+				t.Fatalf("declared %q", got)
+			}
+		})
+	}
+}
+
+// One run of failures of a role ends at anything but the role's own records
+// and the runtime's routing notes: another role, or the requester's words,
+// whichever role's name they are kept under, the role's own included.
+func TestARunOfFailuresEndsAtOtherWorkOrTheRequestersWords(t *testing.T) {
+	at := time.Now().UTC()
+	own := chain.Result{Role: "ask_requester", Speaker: "questioner", Error: "exit status 1", StartedAt: at}
+	for _, shape := range []struct {
+		name    string
+		between chain.Result
+		same    bool
+	}{
+		{"the role's own failure", own, true},
+		{"a routing note", chain.Result{Role: "router", Speaker: "runtime", Output: "routing unavailable"}, true},
+		{"another role", chain.Result{Role: "work", Speaker: "worker"}, false},
+		{"the requester under the role's own name", chain.Result{Role: "ask_requester", Speaker: "requester", Output: "answer"}, false},
+		{"the requester without a role's name", chain.Result{Speaker: "requester", Output: "再開"}, false},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			history := []chain.Result{own, shape.between, own}
+			if got := sameFailures(history, "ask_requester", rerunPrefix+"0", 3); got != shape.same {
+				t.Fatalf("one run of failures: %t", got)
 			}
 		})
 	}

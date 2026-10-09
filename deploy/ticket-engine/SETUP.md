@@ -2301,14 +2301,14 @@ instead of saying work began; recovery is announced when execution starts.
 | # | On the issue | When |
 | --- | --- | --- |
 | 1 | status `processing`; `受け付けました。すぐに自動処理を始めます。` with, when `status_page` is set, `進み具合はこちらで見られます: https://<status-host>/jobs/<issue id>`; the category; assignee: the engine's account | within one poll interval (30 seconds) of filing. With requests ahead of it: `受け付けました。前に 2 件あり、順番が来しだい自動処理を始めます。`, and later `自動処理を開始しました。` when its turn comes |
-| 2 | `要件確定を始めます。選定モデル: maker/model-a` | within seconds of the first stage's model being chosen |
-| 3 | if something is left for the requester: `依頼者への質問を始めます。選定モデル: maker/model-b`, then **the question**: one comment listing each open point with two to four choices; status `awaiting_requester`; assignee: the requester | the request now waits, without limit, for the reply |
+| 2 | `要件確定を始めます。（モデル: maker/model-a）` | within seconds of the first stage's model being chosen |
+| 3 | if something is left for the requester: `依頼者への質問を始めます。（モデル: maker/model-b）`, then **the question**: one comment listing each open point with two to four choices; status `awaiting_requester`; assignee: the requester | the request now waits, without limit, for the reply |
 | 4 | the requester's reply (below); then `返答を受け取りました。自動処理を再開しました。`, status `processing`, assignee: the engine's account | within one poll interval of the reply |
-| 5 | `要件確定をやり直します。選定モデル: maker/model-c` | the run returns to its first stage with the answer in hand. If the stage runs on the same model as before, nothing is said |
-| 6 | `自動実装を開始しました。 (モデル: maker/model-d)` | the `work` stage's own sentence, carrying the model it chose; without a sentence, `作業を始めます。選定モデル: ...` |
-| 7 | `作業をやり直します。選定モデル: maker/model-e` | only if a check or the review sent the work back and it now runs on a different model |
+| 5 | `要件確定をやり直します。（モデル: maker/model-c）` | the run returns to its first stage with the answer in hand. If the stage runs on the same model as before, nothing is said |
+| 6 | `自動実装を開始しました。（モデル: maker/model-d）` | the `work` stage's own sentence, carrying the model it chose; without a sentence, `作業を始めます。（モデル: ...）` |
+| 7 | `作業をやり直します。（モデル: maker/model-e）` | only if a check or the review sent the work back and it now runs on a different model. The run goes back through 要件確定 first, said, when its model changed, as `検証が通りませんでした。要件確定をやり直します。（モデル: ...）` (or `レビューが通りませんでした。...`). A stage launched again because its own launch did not end cleanly is said every time (except right after a restart whose notice already named it), with how that launch ended and the attempt, for example `前の回は作業の途中で処理が強制終了しました（メモリ不足の可能性があります）。作業をやり直します（2 回目）。強制終了があと 2 回続いたら一時停止して相談します。（モデル: maker/model-e）`; while it keeps failing, each one rewrites the comment of the one before |
 | 8 | `納品先へのマージを始めました。マージ後の検証と報告を続けます。` | the `deliver` stage begins; the merge follows |
-| 9 | `報告を始めます。選定モデル: maker/model-f`, then **the report** | after the merged check passed |
+| 9 | `報告を始めます。（モデル: maker/model-f）`, then **the report** | after the merged check passed |
 | 10 | status `delivered`; assignee: the requester; the actual hours | once the report is confirmed on the issue |
 | 11 | `使ったモデル (工程ごと、起動順):` and one line per stage, for example `- 要件確定: maker/model-a (27 秒) — 再実行: maker/model-c (31 秒)` | right after |
 
@@ -2318,7 +2318,8 @@ instruction each role was given and its output as it arrives.
 
 The engine also posts three notices of its own when needed: after a restart
 that interrupted the request
-(`自動処理は再起動後に同じ依頼を続けています。...`, at most once in 30 minutes),
+(`本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 2 回続いたら一時停止して相談します。`,
+at most once in 30 minutes),
 when no stage has completed for `stall_notice_minutes`, and when the model
 budget falls below `min_model_credit` and recovers. rewrite/README.md ("What
 the requester is told at night") has their exact words.

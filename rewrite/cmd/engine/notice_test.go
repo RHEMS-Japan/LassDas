@@ -9,8 +9,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +39,14 @@ type noticeTracker struct {
 	posts  int
 	// reads counts every read of the tracker, comments or otherwise.
 	reads int
+	// edited keeps each comment edit's words, and edits the form each one
+	// sent. editFail refuses that many edits; editSilent applies an edit and
+	// then drops the answer. me is the engine's own account, 99 unless set.
+	edited     []string
+	edits      []url.Values
+	editFail   int
+	editSilent bool
+	me         int64
 }
 
 func (n *noticeTracker) install(t *testing.T, extra roundTripFunc) {
@@ -49,6 +59,43 @@ func (n *noticeTracker) install(t *testing.T, extra roundTripFunc) {
 			n.mu.Lock()
 			n.reads++
 			n.mu.Unlock()
+		}
+		if strings.HasSuffix(r.URL.Path, "/users/myself") {
+			n.mu.Lock()
+			defer n.mu.Unlock()
+			me := n.me
+			if me == 0 {
+				me = 99
+			}
+			return selectionReply(r, 200, map[string]any{"id": me}), nil
+		}
+		if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/comments/") {
+			if err := r.ParseForm(); err != nil {
+				return nil, err
+			}
+			n.mu.Lock()
+			defer n.mu.Unlock()
+			n.edits = append(n.edits, r.PostForm)
+			if n.editFail > 0 {
+				n.editFail--
+				return catalogReply(r, 403, "not the comment's author"), nil
+			}
+			id, _ := strconv.ParseInt(r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:], 10, 64)
+			for i, raw := range n.rows {
+				var row map[string]any
+				json.Unmarshal(raw, &row)
+				if int64(row["id"].(float64)) != id {
+					continue
+				}
+				row["content"] = r.PostForm.Get("content")
+				n.rows[i], _ = json.Marshal(row)
+				n.edited = append(n.edited, r.PostForm.Get("content"))
+				if n.editSilent {
+					return catalogReply(r, 500, "tracker unavailable"), nil
+				}
+				return selectionReply(r, 200, row), nil
+			}
+			return catalogReply(r, 404, "no such comment"), nil
 		}
 		if !strings.HasSuffix(r.URL.Path, "/comments") {
 			return selectionReply(r, 200, []any{}), nil
@@ -107,6 +154,19 @@ func (n *noticeTracker) all() []string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return append([]string(nil), n.posted...)
+}
+
+func (n *noticeTracker) rewritten() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]string(nil), n.edited...)
+}
+
+// set changes the fake under its lock.
+func (n *noticeTracker) set(change func(*noticeTracker)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	change(n)
 }
 
 func (n *noticeTracker) attempts() int {
@@ -285,6 +345,139 @@ func TestRestartNoticeIsPostedOncePerRestartAndNotForACleanStart(t *testing.T) {
 	waitFor(t, func() bool { return loadJobState(t, cleanDirectory).Done })
 	if notices := readNotices(t, cleanDirectory).Notices; len(notices) != 0 {
 		t.Fatalf("a clean start told the requester about a restart: %+v", notices)
+	}
+}
+
+// The restart notice says where the work stood, whether the runtime was
+// killed there or stopped it, and which stage runs again: the same model
+// stage, or a command stage's on_failure stage. After a forced exit it says
+// how many more pause the request, when the saved limit can say. A request
+// outside an ordered run is told only that the work goes on.
+func TestTheRestartNoticeSaysWhereTheWorkStoodAndWhatRunsAgain(t *testing.T) {
+	cfg := pendingRun(t)
+	cfg.Workflow.Stages[1].OnFailure = "elicit"
+	cfg.Workflow.Stages = append([]chain.Stage{{Name: "elicit", Kind: chain.ModelStage}}, cfg.Workflow.Stages...)
+	began := time.Now().UTC().Add(-time.Minute)
+	cut := chain.Result{Role: "work", Speaker: "runtime", Interrupted: true, Forced: true, StartedAt: began.Add(-time.Hour)}
+	counted := &workLimitRecord{Version: 1, StageExits: &stageExits{Max: 3, Stage: "work", Count: 1, Mark: 0}}
+	timed := &workLimitRecord{Version: 1, Clock: &workClock{MaxMinutes: 60, MaxHardExits: 3, HardExits: 2}}
+	for _, shape := range []struct {
+		name  string
+		state chain.State
+		cfg   config
+		limit *workLimitRecord
+		want  string
+	}{
+		{"killed during a model stage", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began}, cfg, nil,
+			"本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。"},
+		{"killed, with the forced exit counted", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began}, cfg, counted,
+			"本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 2 回続いたら一時停止して相談します。"},
+		{"killed under a time limit", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began}, cfg, timed,
+			"本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 1 回起きたら一時停止して相談します。"},
+		{"killed again, after an earlier cut", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began, History: []chain.Result{cut}}, cfg, nil,
+			"本体が再起動しました（2 回目）。作業の途中で強制終了したため、作業をやり直します。"},
+		{"stopped by the runtime, its results saved", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began, History: []chain.Result{
+			{Role: "work", Speaker: "worker", Interrupted: true, Error: "context canceled", StartedAt: began.Add(time.Second)}}}, cfg, counted,
+			"本体が再起動しました（1 回目）。作業の途中で止まったため、作業をやり直します。"},
+		{"killed during a command stage", chain.State{Pending: &chain.Assignment{Role: "verify"}, PendingSince: began}, cfg, nil,
+			"本体が再起動しました（1 回目）。検証の途中で強制終了したため、要件確定からやり直します。"},
+		{"a launch without a start", chain.State{Pending: &chain.Assignment{Role: "work"}}, cfg, counted,
+			"本体が再起動しました（1 回目）。作業の途中で止まったため、作業をやり直します。"},
+		{"after a failed launch", chain.State{Step: "work", Recovering: true}, cfg, counted,
+			"本体が再起動しました（1 回目）。作業が失敗で終わっていたため、作業をやり直します。"},
+		{"outside an ordered run", chain.State{Pending: &chain.Assignment{Role: "implement"}, PendingSince: began}, watchConfiguration(t), nil, resumeNoticeText},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			directory := t.TempDir()
+			if shape.limit != nil {
+				if err := saveWorkLimit(directory, *shape.limit); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := restartNoticeText(shape.cfg, directory, shape.state); got != shape.want {
+				t.Fatalf("the restart notice is %q, want %q", got, shape.want)
+			}
+		})
+	}
+
+	// Through the queue: said once for the restart that cut the stage, and
+	// not again for a second restart inside the window.
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	run := pendingRun(t)
+	root, directory := noticeJob(t, chain.State{Workflow: run.Workflow, Step: "work", Pending: &chain.Assignment{Role: "work"}, PendingSince: began, History: []chain.Result{}})
+	queueRanSince(t, root, run, began.Add(-time.Hour))
+	for range 2 {
+		finish := startStopQueue(t, run, root, 10*time.Millisecond, io.Discard)
+		waitFor(t, func() bool { return loadJobState(t, directory).Done })
+		finish()
+		state := loadJobState(t, directory)
+		state.Done, state.Pending, state.PendingSince = false, &chain.Assignment{Role: "work"}, time.Now().UTC()
+		writeJobHistory(t, directory, state)
+	}
+	said := fixture.withPrefix("本体が再起動しました")
+	if len(said) != 1 || said[0] != "本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。" {
+		t.Fatalf("the restarts were said as %q", fixture.all())
+	}
+}
+
+// A request without a time limit whose stage is killed at each restart, the
+// restarts more than the restart notice's interval apart: each restart notice
+// says how many more forced exits in a row pause the request, counted for
+// that restart, and the third pauses it with its own notice and no restart
+// notice. The rerun after each restart is not declared apart from it.
+func TestEachRestartAfterAForcedExitSaysHowManyMorePause(t *testing.T) {
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	run := pendingRun(t)
+	began := time.Now().UTC().Add(-time.Minute)
+	root, directory := noticeJob(t, chain.State{})
+	queueRanSince(t, root, run, began.Add(-3*time.Hour))
+	note := chain.Result{Role: "work", Speaker: "runtime", Interrupted: true, Forced: true, Error: "The process stopped while this action was pending."}
+	for _, step := range []struct {
+		count int
+		want  string
+	}{
+		{0, "本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 2 回続いたら一時停止して相談します。"},
+		{1, "本体が再起動しました（2 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 1 回続いたら一時停止して相談します。"},
+		{2, ""},
+	} {
+		// The state a forced exit leaves: the launch pending with nothing of
+		// it saved, and the active-work marker still set.
+		var history []chain.Result
+		for range step.count {
+			history = append(history, note)
+		}
+		writeJobHistory(t, directory, chain.State{Workflow: run.Workflow, Step: "work", Pending: &chain.Assignment{Role: "work"}, PendingSince: began, History: history})
+		active := began
+		if err := saveWorkLimit(directory, workLimitRecord{Version: 1, StageExits: &stageExits{Max: 3, Active: &active, Stage: "work", Count: step.count, Mark: step.count}}); err != nil {
+			t.Fatal(err)
+		}
+		// The restarts are 40 minutes apart.
+		log := readNotices(t, directory)
+		for i := range log.Notices {
+			log.Notices[i].WrittenAt = log.Notices[i].WrittenAt.Add(-40 * time.Minute)
+		}
+		data, _ := json.Marshal(log)
+		if err := writeRuntimeFile(filepath.Join(directory, "notices.json"), data); err != nil {
+			t.Fatal(err)
+		}
+		finish := startStopQueue(t, run, root, 10*time.Millisecond, io.Discard)
+		if step.want != "" {
+			waitFor(t, func() bool { return loadJobState(t, directory).Done })
+		} else {
+			waitFor(t, func() bool {
+				return len(fixture.withPrefix("この依頼の自動処理を一時停止しています。")) == 1
+			})
+		}
+		finish()
+		said := fixture.withPrefix("本体が再起動しました")
+		if step.want != "" && (len(said) != step.count+1 || said[step.count] != step.want) {
+			t.Fatalf("restart %d was said as %q", step.count+1, said)
+		}
+		if step.want == "" && (len(said) != 2 || loadJobState(t, directory).Done) {
+			t.Fatalf("the third forced exit did not pause the request alone: %q", fixture.all())
+		}
 	}
 }
 
@@ -1197,7 +1390,7 @@ func TestARequestInFlightIsNotToldWhatBeganBeforeTheEngine(t *testing.T) {
 		{Role: "verify", Speaker: "build", Error: "exit status 1", StartedAt: earlier.Add(time.Hour), FinishedAt: earlier.Add(time.Hour)},
 	}})
 	said := earlier.Add(time.Second)
-	announced, _ := json.Marshal(noticeLog{Notices: []noticeRecord{{Kind: stagePrefix + "work", Text: "作業を始めます。 (モデル: maker/first)", WrittenAt: said, PostedAt: &said}}})
+	announced, _ := json.Marshal(noticeLog{Notices: []noticeRecord{{Kind: stagePrefix + "work", Text: "作業を始めます。（モデル: maker/first）", WrittenAt: said, PostedAt: &said}}})
 	if err := writeRuntimeFile(filepath.Join(directory, "notices.json"), announced); err != nil {
 		t.Fatal(err)
 	}

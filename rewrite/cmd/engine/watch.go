@@ -541,8 +541,9 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				continue
 			}
 			// An interrupted action or an unfinished recovery means the work is
-			// picked up again, not started afresh. Say so before it runs, so
-			// the requester is not left reading a silent gap in the night. A
+			// picked up again, not started afresh. Say so before it runs, with
+			// where it stood and what runs again, so the requester is not left
+			// reading a silent gap in the night. A
 			// request with a stop standing at its issue is launched only for
 			// the stop to be recorded, so it is not told that the same request
 			// carries on; the comments are read once here for that, when the
@@ -550,7 +551,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			if state.Pending != nil || state.Recovering {
 				stopping = stopping || stopWritten(ctx, cfg, issue, interval)
 				if !stopping {
-					if err := notice.post(ctx, resumeNotice, resumeNoticeText, time.Now().UTC()); err != nil {
+					if err := notice.post(ctx, resumeNotice, restartNoticeText(cfg, directory, state), time.Now().UTC()); err != nil {
 						observe("request " + entry.Name() + ": restart notice not confirmed: " + err.Error())
 					}
 				}
@@ -693,11 +694,14 @@ func bindRequestConfig(cfg config, directory, issue string) (config, error) {
 			process.Directory = filepath.Join(workspace, process.Directory)
 			// The running copy of each process's output, shown by the status page.
 			process.Live = filepath.Join(directory, "live")
-			process.Env = make(map[string]string, len(role.Processes[j].Env)+3)
+			process.Env = make(map[string]string, len(role.Processes[j].Env)+4)
 			for key, value := range role.Processes[j].Env {
 				process.Env[key] = value
 			}
-			for key, value := range map[string]string{"TASK_WORKSPACE": workspace, "TASK_HOME": filepath.Join(directory, "homes", fmt.Sprintf("%d-%d", i, j)), "TASK_ISSUE": issue} {
+			// The activity record lives in the process's own home, which the
+			// launcher already lets it write and which outlasts a restart.
+			home := filepath.Join(directory, "homes", fmt.Sprintf("%d-%d", i, j))
+			for key, value := range map[string]string{"TASK_WORKSPACE": workspace, "TASK_HOME": home, "TASK_ISSUE": issue, chain.ActivityEnv: filepath.Join(home, "task-activity.json")} {
 				if process.ModelEnv == key {
 					return config{}, fmt.Errorf("watch environment %s overlaps model selection", key)
 				}

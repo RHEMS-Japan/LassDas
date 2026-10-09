@@ -357,8 +357,9 @@ ownership across separate queue roots or supervision after a hard process crash.
 
 In watch mode a process directory must be empty or relative to its job workspace,
 not a shared absolute checkout. The launcher receives `TASK_WORKSPACE`,
-`TASK_HOME` (different for each role process), and `TASK_ISSUE`. These names cannot
-also be credential/model-selection destinations. The Hermes bridge uses
+`TASK_HOME` (different for each role process), `TASK_ISSUE` and `TASK_ACTIVITY`
+(below). These names cannot also be process `env`, credential or
+model-selection destinations. The Hermes bridge uses
 `TASK_HOME` instead of a global `HERMES_HOME`. Commands and referenced bridge
 paths must be available from the per-job directory. Repository preparation and
 actual delivery permissions still have to be supplied by the configured roles.
@@ -374,6 +375,38 @@ questions, accepted answers and reports through this reference as needed.
 This is the saved answer the runtime accepted, not a later edit fetched from
 the tracker. The reference grants no additional authority and does not mean
 that a model actually read or understood every older record.
+Watch mode also supplies `TASK_ACTIVITY`, a file named `task-activity.json` in
+the process's own `TASK_HOME`, where the launcher already lets it write. A
+harness may keep rewriting it with what it is running: the command it started
+last, whether that had returned, and the background processes it started. The
+Hermes bridge rewrites it at the start and end of every tool call, about a
+kilobyte at most: the tool and the one argument that says what it was asked
+to do, and up to five background commands, each with every credential it was
+handed taken out before it is cut at 200 characters. The SDK lists a background
+command already cut at 200 characters, so one cut there loses any ending that
+could be the start of such a credential, and "…" marks the cut. A credential it
+was never handed, typed into a command, stays as typed, as on its stderr. It adds the
+rule when its tool-call guardrail ends the role, once the background is
+stopped. A write that fails removes the record, so an earlier command is not
+read as the last one, and later writes try again. The runtime removes it
+before each launch and only reads it back, and only an ordinary file with one
+name of at most 16 KiB: a named pipe, a link, a directory or a second name
+for another file there reads as no record, without waiting on it or following
+it. After a launch whose process did not exit 0, the words go into
+that process's record as `activity`, and when the bridge ended the role for one
+call that kept failing the same way (`NATIVE_MAX_REPEATED_FAILURES` below), the
+count goes in as `repeated_failures`. After a restart cut a launch
+short, the note the runtime writes for that launch says them in its `output`,
+and marks the note `forced` when nothing of the launch had been saved, which
+means the runtime itself was killed (lack of memory is one cause). In an
+ordered run, the launch that follows a cut launch, or the stage's own launch
+that did not exit 0, is told how the previous launch ended, how many launches
+of that stage in a row did not end cleanly and, when they did not all end the
+same way, how many ended each way, the recorded command and background
+processes, and to suspect the cause (memory, time or wrong arguments) rather
+than repeat what it did unchanged. The `on_failure` stage after a command stage
+whose commands did not exit 0 is told that as before. A harness that writes
+nothing is not an error: the words then say that the last command is unknown.
 The bridge also seeds the native terminal's existing working-directory setting
 from `TASK_WORKSPACE` unless explicitly supplied. The tested SDK otherwise began
 terminal commands in its private home despite the correct process directory;
@@ -1552,7 +1585,7 @@ second comment), and when it resumes after the requester's answer (a stop writte
 waits is not an answer and is not announced as one); a stage whose `announce` sentence the
 operator wrote in `workflow.stages` is announced once when it first begins.
 That sentence carries the model the launch beginning the stage chose, as
-` (モデル: <catalog id>)` without any gateway prefix; a stage that launches no
+`（モデル: <catalog id>）` without any gateway prefix; a stage that launches no
 model, a runtime that selects none, and a launch that could not choose one at
 all, say it as the operator wrote it. Once the request is delivered, one
 further comment lists every launch that used a model, one line per stage in
@@ -1576,17 +1609,41 @@ return.
 while a stage's work is under way, which model the selection chose for it:
 
 ```
-要件確定を始めます。選定モデル: maker/one
-要件確定をやり直します。選定モデル: maker/two
+要件確定を始めます。（モデル: maker/one）
+検証が通りませんでした。要件確定をやり直します。（モデル: maker/two）
+前の回は作業の途中で処理が強制終了しました（メモリ不足の可能性があります）。正常に終わらなかった回が 2 回続いています（強制終了 1 回、エラー 1 回）。作業をやり直します（3 回目）。強制終了があと 2 回続いたら一時停止して相談します。（モデル: maker/two）
 ```
 
 The first line is said at a stage's first launch that chose a model; a stage
-whose `announce` sentence goes out says that launch in its sentence alone. The
-second is said at a later launch, after a later stage sent the work back or a
-launch did not exit 0, and only when its models differ from those the stage was
-last declared with: the same models again say nothing. A stage that ran before
-the setting was turned on is told the second line at its first launch after it,
-since its history shows the earlier one. A launch whose processes choose
+whose `announce` sentence goes out says that launch in its sentence alone. A
+later launch is a rerun, and its line begins with how the launch before it
+ended when that one did not end cleanly, from what the runtime recorded and
+never from what a role wrote: a check that did not pass, a forced exit of the
+runtime (nothing of the launch was saved; lack of memory is one cause), a stop
+by the runtime, the time limit, a model that could not be selected, a role its
+harness ended after one tool call failed the same way several times in a row,
+or a role's error. That sentence is about the last launch only; when several
+launches of the stage in a row did not end cleanly, the next one says how many
+and how many ended each way. The models come last, as in every declaration.
+
+A rerun after a later stage sent the work back is said only when its models
+differ from those the stage was last declared with: the same models again say
+nothing. A rerun after the stage's own launch did not end cleanly is said every
+time, except right after a restart whose notice (below) went out: that notice
+already says which stage runs again, so a deploy leaves one comment, not two.
+A restart inside that notice's 30 minutes says nothing, and the rerun after it
+is said. A rerun is said with the attempt it is, and after a forced exit with
+how many more pause the request (`intake.max_hard_exits`: in a row at that
+stage for a request without a time limit, all of them for one with it). While the stage keeps
+failing, with nothing else run and no word from the requester in between, each
+such rerun rewrites the comment of the one before it on Backlog (only a comment
+of the engine's own account, still in the words recorded for it; only the
+words are sent), so a crash loop leaves one comment that shows the latest
+attempt. A tracker that cannot edit, a comment that is not the engine's or no
+longer reads as recorded, and a refused edit get a new comment instead; an
+edit whose answer was lost is read back before anything is posted. A stage that
+ran before the setting was turned on is told as a rerun at its first launch
+after it, since its history shows the earlier one. A launch whose processes choose
 several models names them together, separated by `、`, once all have chosen; a
 launch in which some processes' selection failed is declared when it returns,
 with the models that were chosen. A command stage and a launch whose selection
@@ -1831,7 +1888,8 @@ environments remain different observations.
 A request filed at eleven and stopped at two by an outage used to say nothing
 at all: the chain kept retrying, and the only trace was a log nobody was
 reading. Three fixed notices close that silence. The controller writes every
-one of them, always in the same words. No model composes them, none of them
+one of them in its own fixed wording, filled in only with the counts, stage
+names and models it recorded. No model composes them, none of them
 judges a role's answer, and none of them ends a request: the work carries on or
 resumes by itself in every case.
 
@@ -1858,13 +1916,24 @@ is set aside as `notice-kinds.json.unreadable`, said once, and treated the same
 way.
 
 **After a restart.** When the queue picks up a request whose history holds an
-interrupted action or an unfinished recovery, it posts:
+interrupted action or an unfinished recovery, it posts, for example:
 
-> 自動処理は再起動後に同じ依頼を続けています。直前の工程は途中で止まった可能性があるため、確認してから進めます。
+> 本体が再起動しました（2 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 1 回続いたら一時停止して相談します。
 
-A clean start says nothing. The same request does not say it again inside 30
-minutes, even across further restarts, so a crash loop cannot fill the issue
-with one sentence.
+The count is this restart and every earlier one that cut a launch of the
+request short. "強制終了" says that nothing of the cut launch had been saved, so
+the runtime itself was killed; a launch the runtime stopped and saved is
+"止まった", as after a deploy that stopped the engine in the ordinary way, which
+is not counted as a forced exit either; a recovery after a failed launch is
+"失敗で終わっていた". What runs next is the same model stage, or a command
+stage's `on_failure` stage ("要件確定からやり直します"). After a forced exit
+the notice ends with how many more pause the request, as the rerun's
+declaration would (`intake.max_hard_exits`, already counted for this restart;
+"続いたら" without a time limit, "起きたら" with one), because that rerun is
+not declared apart from it. A request outside an ordered run is told
+`本体が再起動しました。作業を続けます。`. A clean start says nothing. The same
+request does not say it again inside 30 minutes, even across further
+restarts, so a crash loop cannot fill the issue with one sentence.
 
 **When the shared model key runs out.** This is the one failure no role can
 recover from: no investigation, redesign or handoff puts money back on a key.

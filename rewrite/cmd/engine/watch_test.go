@@ -270,6 +270,11 @@ func TestWatchBindingsPreserveOriginalConfigurationAndSeparateRoleHomes(t *testi
 	if first.Roles[0].Processes[0].Env["TASK_HOME"] == first.Roles[0].Processes[1].Env["TASK_HOME"] || first.Roles[0].Processes[0].Env["TASK_HOME"] == second.Roles[0].Processes[0].Env["TASK_HOME"] {
 		t.Fatal("role/request home was shared")
 	}
+	for _, process := range first.Roles[0].Processes {
+		if process.Env[chain.ActivityEnv] != filepath.Join(process.Env["TASK_HOME"], "task-activity.json") {
+			t.Fatalf("the activity record is not kept in the process's own home: %q", process.Env[chain.ActivityEnv])
+		}
+	}
 	for _, directory := range []string{"/shared/checkout", "../other-request"} {
 		cfg.Roles[0].Processes[0].Directory = directory
 		if _, err := bindRequestConfig(cfg, "/example/job", "EXAMPLE-1"); err == nil {
@@ -277,21 +282,21 @@ func TestWatchBindingsPreserveOriginalConfigurationAndSeparateRoleHomes(t *testi
 		}
 	}
 	cfg.Roles[0].Processes[0].Directory = ""
-	for _, key := range []string{"TASK_HOME", "TASK_WORKSPACE", "TASK_ISSUE"} {
+	for _, key := range []string{"TASK_HOME", "TASK_WORKSPACE", "TASK_ISSUE", chain.ActivityEnv} {
 		cfg.Roles[0].Processes[0].Env = map[string]string{key: "shared value"}
 		if _, err := bindRequestConfig(cfg, "/example/job", "EXAMPLE-1"); err == nil {
 			t.Fatal("operator environment replaced request context")
 		}
 	}
 	cfg.Roles[0].Processes[0].Env = nil
-	for _, key := range []string{"TASK_HOME", "TASK_WORKSPACE", "TASK_ISSUE"} {
+	for _, key := range []string{"TASK_HOME", "TASK_WORKSPACE", "TASK_ISSUE", chain.ActivityEnv} {
 		cfg.Roles[0].Processes[0].Secrets = map[string]string{key: "SOME_KEY"}
 		if _, err := bindRequestConfig(cfg, "/example/job", "EXAMPLE-1"); err == nil {
 			t.Fatal("credential was overwritten")
 		}
 	}
 	cfg.Roles[0].Processes[0].Secrets = nil
-	for _, key := range []string{"TASK_HOME", "TASK_WORKSPACE", "TASK_ISSUE"} {
+	for _, key := range []string{"TASK_HOME", "TASK_WORKSPACE", "TASK_ISSUE", chain.ActivityEnv} {
 		cfg.Roles[0].Processes[0].ModelEnv = key
 		if _, err := bindRequestConfig(cfg, "/example/job", "EXAMPLE-1"); err == nil {
 			t.Fatal("selected model overwrote request context")

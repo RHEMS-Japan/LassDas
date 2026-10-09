@@ -78,6 +78,8 @@ func (r StageRouter) Next(ctx context.Context, state State) (Assignment, error) 
 type stageRun struct {
 	role      string
 	satisfied bool
+	// from and to bound the launch's records in the history.
+	from, to int
 }
 
 // stageRuns groups the history into the launches the runtime made. A launch is
@@ -100,10 +102,10 @@ func (s State) stageRuns() []stageRun {
 				break
 			}
 		}
-		i = j
 		if role != "" && role != "router" {
-			runs = append(runs, stageRun{role: role, satisfied: satisfied})
+			runs = append(runs, stageRun{role: role, satisfied: satisfied, from: i, to: j})
 		}
+		i = j
 	}
 	return runs
 }
@@ -286,7 +288,150 @@ func (s State) stageInstruction(name string) string {
 			fmt.Fprintf(&text, "The %s stage did not exit 0. What its commands returned is in the record below; this run has no failing end state, so it is tried again after you.\n", failed.Name)
 		}
 	}
+	if ending, ok := s.LastEnding(); ok && (ending.Interrupted || ending.Role == name) {
+		text.WriteString(ending.instruction())
+	}
 	return text.String()
+}
+
+// Ending is how the latest launch ended when it did not end cleanly, as the
+// runtime observed it: never what a role wrote about itself.
+type Ending struct {
+	// Role is the role the launch ran.
+	Role string
+	// Attempt counts the launches of Role in a row, this one included, that
+	// did not end cleanly, since another role ran or the requester replied.
+	Attempt int
+	// Interrupted is a launch a restart of the runtime cut short. Forced is
+	// one of those that saved nothing, so the runtime itself was killed.
+	Interrupted, Forced bool
+	// TimedOut is a process stopped at its configured time limit, and
+	// NoModel a launch for which a process could not select a current model.
+	TimedOut, NoModel bool
+	// RepeatedFailures is how many times in a row one tool call failed the
+	// same way when the role's harness ended the role for that, else zero.
+	RepeatedFailures int
+	// Activity is what the role last recorded it was running, or empty.
+	Activity string
+	// Kinds counts how each of the Attempt launches ended, so a count of
+	// launches in a row is never said as if all of them ended like the last.
+	Kinds EndingKinds
+}
+
+// EndingKinds counts launches by how they ended, each by its first kind in
+// this order: a forced exit, a stop by the runtime, the time limit, no model,
+// and any other process error, among them a role its harness ended.
+type EndingKinds struct {
+	Forced, Stopped, TimedOut, NoModel, Errors int
+}
+
+// endingOf reads how one launch ended from its records.
+func endingOf(role string, records []Result) Ending {
+	ending := Ending{Role: role}
+	for _, record := range records {
+		ending.Interrupted = ending.Interrupted || record.Interrupted
+		ending.Forced = ending.Forced || record.Forced
+		ending.TimedOut = ending.TimedOut || record.Speaker != "runtime" && strings.HasPrefix(record.Error, context.DeadlineExceeded.Error())
+		ending.NoModel = ending.NoModel || record.Speaker != "runtime" && strings.HasPrefix(record.Error, selectionFailure)
+		if record.Activity != "" {
+			ending.Activity = record.Activity
+		}
+		ending.RepeatedFailures = max(ending.RepeatedFailures, record.RepeatedFailures)
+	}
+	return ending
+}
+
+// add counts one launch's ending by its first kind.
+func (k *EndingKinds) add(e Ending) {
+	switch {
+	case e.Forced:
+		k.Forced++
+	case e.Interrupted:
+		k.Stopped++
+	case e.TimedOut:
+		k.TimedOut++
+	case e.NoModel:
+		k.NoModel++
+	default:
+		k.Errors++
+	}
+}
+
+// LastEnding reports how the latest launch ended, when it did not end
+// cleanly. The records a launch saved before a restart and the runtime's note
+// written for it afterwards are one launch, not two.
+func (s State) LastEnding() (Ending, bool) {
+	var launches []stageRun
+	for _, run := range s.stageRuns() {
+		if n := len(launches); n > 0 && launches[n-1].role == run.role && run.to-run.from == 1 {
+			note := s.History[run.from]
+			if note.Speaker == "runtime" && note.Interrupted && !note.Forced && launchStopped(s.History[launches[n-1].from:launches[n-1].to]) {
+				launches[n-1].to, launches[n-1].satisfied = run.to, false
+				continue
+			}
+		}
+		launches = append(launches, run)
+	}
+	if len(launches) == 0 || launches[len(launches)-1].satisfied {
+		return Ending{}, false
+	}
+	last := launches[len(launches)-1]
+	ending := endingOf(last.role, s.History[last.from:last.to])
+	for i := len(launches) - 1; i >= 0 && launches[i].role == last.role && !launches[i].satisfied; i-- {
+		ending.Attempt++
+		ending.Kinds.add(endingOf(last.role, s.History[launches[i].from:launches[i].to]))
+	}
+	return ending, true
+}
+
+// launchStopped reports a launch whose processes the runtime stopped itself.
+func launchStopped(records []Result) bool {
+	for _, record := range records {
+		if record.Interrupted && record.Speaker != "runtime" {
+			return true
+		}
+	}
+	return false
+}
+
+// instruction is the runtime's plain account of the ending for the launch
+// that follows it, so it does not walk into the same end without knowing.
+func (e Ending) instruction() string {
+	how := "ended with a process error, which is in the record below"
+	switch {
+	case e.Forced:
+		how = "was cut off when the runtime itself was killed (lack of memory is one cause)"
+	case e.Interrupted:
+		how = "was cut off when the runtime stopped"
+	case e.TimedOut:
+		how = "was stopped at its time limit"
+	case e.NoModel:
+		how = "could not select a current model for every process"
+	}
+	return fmt.Sprintf("The previous launch of %s (attempt %d in a row that did not end cleanly%s) %s. %s Do not repeat what it did unchanged: suspect the cause (memory, time or wrong arguments) and change the plan.\n",
+		e.Role, e.Attempt, e.Kinds.inWords(e.Attempt), how, activityOrUnknown(e.Activity))
+}
+
+// inWords names how the launches in a row ended, when there were several and
+// not all ended the same way.
+func (k EndingKinds) inWords(attempts int) string {
+	var parts []string
+	for _, kind := range []struct {
+		count       int
+		one, plural string
+	}{{k.Forced, "forced exit", "forced exits"}, {k.Stopped, "stop by the runtime", "stops by the runtime"},
+		{k.TimedOut, "time limit", "time limits"}, {k.NoModel, "launch without a model", "launches without a model"},
+		{k.Errors, "process error", "process errors"}} {
+		if kind.count == attempts {
+			return ""
+		}
+		if kind.count == 1 {
+			parts = append(parts, "1 "+kind.one)
+		} else if kind.count > 1 {
+			parts = append(parts, fmt.Sprintf("%d %s", kind.count, kind.plural))
+		}
+	}
+	return ": " + strings.Join(parts, ", ")
 }
 
 // What the runtime tells a stage that confirms the change, and the question
