@@ -51,6 +51,11 @@ class CurrentRuntimeTests(unittest.TestCase):
         self.assertLess(sandbox, published.index('docker push "$tag"'))
         self.assertIn("bash .github/scripts/check-role-sandbox.sh", (
             ROOT / ".github/workflows/image-check.yml").read_text())
+        guard = published.index("bash .github/scripts/check-role-memory-guard.sh")
+        self.assertLess(sandbox, guard)
+        self.assertLess(guard, published.index('docker push "$tag"'))
+        self.assertIn("bash .github/scripts/check-role-memory-guard.sh", (
+            ROOT / ".github/workflows/image-check.yml").read_text())
 
     def test_distribution_note_uses_this_build_without_the_removed_cli(self):
         workflow = (ROOT / ".github/workflows/image.yml").read_text()

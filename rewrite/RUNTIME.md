@@ -113,8 +113,13 @@ When the launcher finds a memory limit for its own cgroup (the `0::` line of
 `/proc/self/cgroup` under `/sys/fs/cgroup`, with or without a cgroup namespace
 of its own), it stays as bubblewrap's parent and guards the role:
 
-- Ten times a second it reads the container's memory in use, leaving out what
-  the kernel takes back before it stops any process: file cache
+- It reads the container's memory in use ten times a second while the use is
+  further from the limit than one process can fill in a tenth of a second
+  (3.2 GiB, at the 32 GiB/s measured below), and a hundred times a second
+  nearer; in a container of 3.2 GiB or less, always a hundred. The launcher
+  used about 0.1% of one CPU at the slower pace and 1.2% at the faster one in
+  a measurement. It leaves out what the kernel takes back before it stops any
+  process: file cache
   (`active_file`, `inactive_file`) and reclaimable kernel caches
   (`slab_reclaimable`, the directory and inode entries a checkout or build
   leaves behind). Anonymous and shared memory, kernel stacks, page tables and
@@ -123,18 +128,26 @@ of its own), it stays as bubblewrap's parent and guards the role:
   process in the container if that process is its role's. Concurrent roles'
   launchers agree on the same process. The role's other processes continue:
   a build tool sees its compiler stopped, a model's terminal sees a killed
-  command, and the role decides what to do next.
+  command, and the role decides what to do next. It looks again a hundredth
+  of a second later, counting a stopped process that is still ending as
+  already gone, so a second compiler growing beside the first is stopped in
+  turn if the use is still over the threshold.
 - It writes one line naming the process, its size, the role's total and the
   memory in use: on the launcher's standard error, which is the role's record,
   and, when the stopped process's own standard error is a pipe or a terminal
-  other than that, there too, so the tool that started it shows why it ended
-  (a file is never written to, and a full pipe is skipped). The next role's
+  other than that and other than the role's own standard output (its
+  answer), there too, so the tool that started it shows why it ended (a file
+  is never written to, and a full pipe is skipped). A tool started by a
+  Node.js program has a socket there, which cannot be opened this way: that
+  tool sees only the stop, and the record has the line. The next role's
   prompt carries only the last 4,000 characters of a record's diagnostics, so
   a role that writes much after the stop can push the line out of that prompt;
   the record keeps it.
 - When the anonymous memory outside every role's processes (the controller's,
   for example) is over the threshold by itself, stopping role processes would
-  not bring the use back under: it stops none, and says so once.
+  not bring the use back under the threshold: it says so once and stops none
+  until the use reaches the limit less half the headroom (5,760 MiB of 6 GiB),
+  where it stops the largest role process anyway.
 - A stop signal sent to the launcher is passed on to bubblewrap, and the
   launcher waits for bubblewrap and the sandbox's first process before it ends
   by the same signal, so a cancelled role leaves no process for the controller
@@ -159,12 +172,26 @@ would only make the whole container the node's first choice when the node
 runs short of memory.
 
 The guard looks and stops; it reserves nothing and is not a limit per process
-or per role. Two kinds of growth can still reach the limit between two looks:
-several processes that together grow by more than the headroom within a tenth
-of a second (two processes allocating 128 MiB blocks at full speed did, three
-times out of three, in a 2 GiB container with the 512 MiB headroom), and memory no process holds
-(a role's `/tmp` is in memory), which goes only when the role ends; each look
-then stops the next largest role process, at worst the role's own command.
+or per role. Growth faster than the headroom per look can still reach the
+limit before the guard sees it:
+
+- one process that takes a very large block at once and touches it at
+  memory speed. With transparent huge pages set to `always` (the kernel's
+  `/sys/kernel/mm/transparent_hugepage/enabled`), a single process filled
+  memory at 22 to 33 GiB/s in a measurement, the 768 MiB headroom of a 6 GiB
+  container in about 30 ms. Looking every 10 ms, the guard stopped a single
+  6,000 MiB block in a 6 GiB container 9 times out of 9 (at 5,389 to 5,599
+  MiB) and 1,800 MiB in 2 GiB 3 times out of 3; faster filling (several
+  threads, faster memory) can still pass it. With `madvise` or `never`
+  (common defaults) pages are filled more slowly;
+- several processes that together grow by more than the headroom between two
+  looks;
+- memory no process holds (a role's `/tmp` is in memory), which goes only
+  when the role ends; each look then stops the next largest role process, at
+  worst the role's own command.
+
+A larger headroom (`--memory-headroom`) widens the margin for all three, at
+the cost of memory a role can use.
 
 No per-process limit (`RLIMIT_DATA` or `RLIMIT_AS`) is set. Both count address
 space a program reserves without using: under `RLIMIT_DATA` at the limit less

@@ -31,6 +31,11 @@ MIB = 1 << 20
 # reclaimable kernel caches (directory and inode entries). It stays out of the
 # memory the guard counts as in use.
 RECLAIMABLE = ("active_file", "inactive_file", "slab_reclaimable")
+# The fastest one process filled memory in a measurement (22 to 33 GiB/s,
+# transparent huge pages "always"). A tenth of a second between two looks can
+# miss that much growth, so the guard looks a hundred times a second once the
+# use is within it of the limit (always, in a container of 3.2 GiB or less).
+FILL_RATE = 32 << 30  # bytes per second
 # Signals the controller sends to stop a role. The launcher passes them on to
 # bubblewrap and waits for it, so it is not left for the controller to collect.
 PASSED_ON = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
@@ -258,13 +263,18 @@ def kills_the_whole_container(directory):
         return False
 
 
-Process = namedtuple("Process", "parent name anon uid nested")
+# start: the process's start time, which tells a process from a later one
+# given the same id. leaving: it is ending (exiting or a zombie), so its
+# memory is already on its way back and it is not stopped again.
+Process = namedtuple("Process", "parent name anon uid nested start leaving", defaults=(0, False))
+EXITING = 0x4  # PF_EXITING in the flags of /proc/<pid>/stat
 
 
 def processes(proc=None):
     """Every visible process: its parent, name, resident anonymous bytes, real
-    uid, and whether it runs in a PID namespace below this one (every role's
-    processes do; the controller's and the launchers' do not)."""
+    uid, whether it runs in a PID namespace below this one (every role's
+    processes do; the controller's and the launchers' do not), its start time
+    and whether it is ending."""
     proc = PROC if proc is None else proc
 
     def fields(status):
@@ -282,10 +292,11 @@ def processes(proc=None):
             with open(os.path.join(entry.path, "status")) as handle:
                 status = fields(handle.read())
             name = line[line.index("(") + 1:line.rindex(")")]
-            parent = int(line[line.rindex(")") + 1:].split()[1])
+            after = line[line.rindex(")") + 1:].split()
             anon = int(status.get("RssAnon", "0 kB").split()[0]) * 1024
-            table[int(entry.name)] = Process(parent, name, anon, int(status["Uid"].split()[0]),
-                                             len(status.get("NSpid", "").split()) > depth)
+            table[int(entry.name)] = Process(int(after[1]), name, anon, int(status["Uid"].split()[0]),
+                                             len(status.get("NSpid", "").split()) > depth, int(after[19]),
+                                             after[0] in ("Z", "X", "x") or bool(int(after[6]) & EXITING))
         except (OSError, ValueError, KeyError, IndexError):
             continue  # it ended while it was read, or it is not ours to read
     return table
@@ -304,12 +315,13 @@ def descendants(table, root):
     return found
 
 
-def victim(table, root, uid):
-    """The largest role process in the container, if it belongs to the role
-    launched as root; None otherwise. Every launcher applies the same rule,
-    so concurrent roles agree on one process, and only its own launcher stops
-    it and says so in that role's record."""
-    roles = [pid for pid, process in table.items() if process.nested and process.uid == uid]
+def victim(table, root, uid, leaving=()):
+    """The largest role process in the container that is not already ending,
+    if it belongs to the role launched as root; None otherwise. Every launcher
+    applies the same rule, so concurrent roles agree on one process, and only
+    its own launcher stops it and says so in that role's record."""
+    roles = [pid for pid, process in table.items()
+             if process.nested and process.uid == uid and not process.leaving and pid not in leaving]
     if not roles:
         return None
     largest = max(roles, key=lambda pid: (table[pid].anon, pid))
@@ -325,19 +337,22 @@ def tell(pid, text, proc=None):
     is a pipe or a terminal: the tool that started it (a build tool, a model's
     terminal) then shows why it ended. Never a file: the role's own files are
     not written to. Never waits: a full pipe or one without a reader is skipped.
-    Not the launcher's own standard error either, which gets the line anyway."""
+    Never the launcher's own standard output or error: the first is the role's
+    answer, and the second gets the line anyway. A socket (a Node.js program's
+    child has one) cannot be opened this way and is skipped too."""
     proc = PROC if proc is None else proc
     path = os.path.join(proc, str(pid), "fd", "2")
     try:
         target = os.stat(path)
         if not (stat.S_ISFIFO(target.st_mode) or stat.S_ISCHR(target.st_mode)):
             return
-        try:
-            own = os.fstat(2)
-            if (own.st_dev, own.st_ino) == (target.st_dev, target.st_ino):
+        for own in (1, 2):
+            try:
+                mine = os.fstat(own)
+            except OSError:
+                continue
+            if (mine.st_dev, mine.st_ino) == (target.st_dev, target.st_ino):
                 return
-        except OSError:
-            pass
         descriptor = os.open(path, os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
     except OSError:
         return
@@ -349,53 +364,75 @@ def tell(pid, text, proc=None):
         os.close(descriptor)
 
 
-def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=0.1, settle=1.0):
+def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=0.1, near=0.01):
     """Stop the role's largest process while the container's use is at or
     over the threshold, before the kernel's out-of-memory handling can stop
     the whole container (the kubelet asks for that on cgroup v2) and the
     controller with it. A stopped process is told why on its standard error,
-    and the same line goes to report (the role's record)."""
+    and the same line goes to report (the role's record).
+
+    It looks every interval while the use is further from the limit than one
+    process can fill in that time (FILL_RATE), and every near once it is
+    nearer, so one process taking a large block at once is seen within near;
+    over the threshold it looks again after near whether it stopped a process
+    or not, so a second process growing beside the stopped one is seen too.
+    While a stopped process is still ending, its memory counts as already
+    given back."""
     uid = os.getuid()
-    current = limits.directory / "memory.current"
+    last_resort = limits.limit - (limits.limit - limits.threshold) // 2
+    near_from = limits.limit - int(FILL_RATE * interval)
+    stopped = set()  # (pid, start) of the processes this launcher stopped
     said = False
-    while alive():
-        # memory.current bounds the use from above; the full reading is needed only near the threshold.
-        if int(current.read_text()) >= limits.threshold:
-            used, anon = memory_reading(limits.directory)
-            if used >= limits.threshold:
-                table = processes(proc)
-                outside = anon - sum(process.anon for process in table.values() if process.nested and process.uid == uid)
-                if outside >= limits.threshold:
-                    # The controller, or another process outside every role, holds that much
-                    # by itself: stopping role processes would not bring the use back under.
-                    if not said:
-                        report.write("(launcher) This container's memory in use reached %d of %d MiB, %d MiB of it "
-                                     "anonymous memory outside every role's processes; no role process was stopped.\n"
-                                     % (used // MIB, limits.limit // MIB, outside // MIB))
-                        report.flush()
-                        said = True
-                    pause(settle)
-                    continue
-                pid = victim(table, root, uid)
-                if pid is not None:
-                    own = sum(table[other].anon for other in descendants(table, root) if table[other].nested)
-                    line = ("(launcher) Stopped %s (pid %d, %d MiB resident; this role's processes %d MiB in all) "
-                            "because this container's memory in use, file and reclaimable kernel caches left out, "
-                            "reached %d of %d MiB. The launcher stops a role's largest process before the kernel "
-                            "would stop the whole container; the role's other processes continue.\n"
-                            % (printable(table[pid].name), pid, table[pid].anon // MIB, own // MIB,
-                               used // MIB, limits.limit // MIB))
-                    tell(pid, line, proc)
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    else:
-                        report.write(line)
-                        report.flush()
-                        pause(settle)
-                        continue
-        pause(interval)
+    current = os.open(limits.directory / "memory.current", os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        while alive():
+            # memory.current bounds the use from above; the full reading is needed only near the threshold.
+            reading = int(os.pread(current, 64, 0))
+            if reading >= limits.threshold:
+                used, anon = memory_reading(limits.directory)
+                if used >= limits.threshold:
+                    table = processes(proc)
+                    stopped = {key for key in stopped if key[0] in table and table[key[0]].start == key[1]}
+                    ending = {pid for pid, _ in stopped} | {pid for pid, process in table.items() if process.leaving}
+                    used -= sum(table[pid].anon for pid in ending)
+                    roles = sum(process.anon for pid, process in table.items()
+                                if process.nested and process.uid == uid and pid not in ending)
+                    outside = anon - roles - sum(table[pid].anon for pid in ending)
+                    if used >= limits.threshold and outside >= limits.threshold and used < last_resort:
+                        # The controller, or another process outside every role, holds that much
+                        # by itself: stopping role processes would not bring the use back under
+                        # the threshold. Only nearer the limit is a role process stopped anyway.
+                        if not said:
+                            report.write("(launcher) This container's memory in use reached %d of %d MiB, %d MiB of "
+                                         "it anonymous memory outside every role's processes; no role process is "
+                                         "stopped for it until the use reaches %d MiB.\n"
+                                         % (used // MIB, limits.limit // MIB, outside // MIB, last_resort // MIB))
+                            report.flush()
+                            said = True
+                    elif used >= limits.threshold:
+                        pid = victim(table, root, uid, ending)
+                        if pid is not None:
+                            own = sum(table[other].anon for other in descendants(table, root)
+                                      if table[other].nested and other not in ending)
+                            line = ("(launcher) Stopped %s (pid %d, %d MiB resident; this role's processes %d MiB in "
+                                    "all) because this container's memory in use, file and reclaimable kernel caches "
+                                    "left out, reached %d of %d MiB. The launcher stops a role's largest process "
+                                    "before the kernel would stop the whole container; the role's other processes "
+                                    "continue.\n"
+                                    % (printable(table[pid].name), pid, table[pid].anon // MIB, own // MIB,
+                                       used // MIB, limits.limit // MIB))
+                            tell(pid, line, proc)
+                            try:
+                                os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            else:
+                                stopped.add((pid, table[pid].start))
+                                report.write(line)
+                                report.flush()
+            pause(near if reading >= near_from else interval)
+    finally:
+        os.close(current)
 
 
 def collect_children(seconds):

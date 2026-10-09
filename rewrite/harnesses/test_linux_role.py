@@ -415,34 +415,78 @@ class MemoryAccountingTests(unittest.TestCase):
                                lambda: next(looks, None) is not None, pause=lambda _: None)
             self.assertEqual(report.getvalue(), "")
 
-    def test_memory_held_outside_every_role_stops_no_role_process_and_is_said_once(self):
+    def run_guard(self, cgroup, table, looks=3, limit=2 << 30, headroom=512 << 20):
+        """guard() over a fixed process table: what it stopped, what it wrote, and how long it paused each time.
+        The stand-ins are never really stopped, so a stopped one stays in the table as it is."""
+        remaining = iter(range(looks))
+        report, killed, pauses = io.StringIO(), [], []
+        with patch.object(launcher, "processes", return_value=table), patch.object(launcher, "tell"), \
+                patch.object(os, "getuid", return_value=1000), \
+                patch.object(os, "kill", side_effect=lambda pid, number: killed.append(pid)):
+            launcher.guard(10, launcher.Limits(cgroup, limit, limit - headroom), report,
+                           lambda: next(remaining, None) is not None, pause=pauses.append)
+        return killed, report.getvalue().splitlines(), pauses
+
+    def test_memory_held_outside_every_role_stops_a_role_process_only_near_the_limit(self):
         P = launcher.Process
         with tempfile.TemporaryDirectory() as temporary:
             cgroup = Path(temporary) / "cgroup"
-            limits = launcher.Limits(cgroup, 2 << 30, (2 << 30) - (512 << 20))
-            for controller, role, stopped in ((1650 << 20, 18 << 20, False), (300 << 20, 1282 << 20, True)):
+            # 2 GiB, 512 MiB headroom: the threshold is 1536 MiB, the last resort 1792 MiB.
+            for role, stopped in ((18 << 20, False), (160 << 20, True)):
+                controller = 1650 << 20
                 write_cgroup(cgroup, 2 << 30, controller + role + (10 << 20), anon=controller + role)
                 table = {1: P(0, "ticket-engine", controller, 1000, False), 10: P(1, "bwrap", 1 << 20, 1000, False),
                          11: P(10, "python3", role, 1000, True)}
-                looks = iter(range(3))
-                report, killed = io.StringIO(), []
-                with self.subTest(controller=controller >> 20, role=role >> 20), \
-                        patch.object(launcher, "processes", return_value=table), patch.object(launcher, "tell"), \
-                        patch.object(os, "getuid", return_value=1000), \
-                        patch.object(os, "kill", side_effect=lambda pid, number: killed.append(pid)):
-                    launcher.guard(10, limits, report, lambda: next(looks, None) is not None, pause=lambda _: None)
-                    lines = report.getvalue().splitlines()
+                with self.subTest(role=role >> 20):
+                    killed, lines, _ = self.run_guard(cgroup, table)
                     if stopped:
-                        # The stand-in is never really stopped, so every look stops it again.
-                        self.assertEqual(killed, [11, 11, 11])
-                        self.assertEqual(len(lines), 3, lines)
-                        self.assertTrue(lines[0].startswith("(launcher) Stopped python3 (pid 11, 1282 MiB resident"), lines[0])
+                        self.assertEqual(killed, [11])
+                        self.assertEqual(len(lines), 2, lines)
+                        self.assertTrue(lines[0].startswith("(launcher) Stopped python3 (pid 11, 160 MiB resident"), lines[0])
+                        # Once the role's process counts as gone, what is left is the controller's: said once.
+                        self.assertTrue(lines[1].startswith("(launcher) This container's memory in use reached 1660 of"), lines[1])
                     else:
                         self.assertEqual(killed, [])
                         self.assertEqual(len(lines), 1, lines)
                         self.assertEqual(lines[0], "(launcher) This container's memory in use reached 1678 of 2048 MiB, "
-                                                   "1650 MiB of it anonymous memory outside every role's processes; "
-                                                   "no role process was stopped.")
+                                                   "1650 MiB of it anonymous memory outside every role's processes; no "
+                                                   "role process is stopped for it until the use reaches 1792 MiB.")
+
+    def test_a_stopped_process_counts_as_gone_and_the_next_largest_is_stopped_at_the_next_look(self):
+        P = launcher.Process
+        with tempfile.TemporaryDirectory() as temporary:
+            cgroup = Path(temporary) / "cgroup"
+            # Two compilers of one role: stopping the larger leaves 300 + 900 MiB, under the threshold of 1536 MiB;
+            # stopping it as well is needed only when the other has grown to 1300 MiB.
+            for second, expected in ((900 << 20, [12]), (1300 << 20, [12, 13])):
+                table = {1: P(0, "ticket-engine", 300 << 20, 1000, False), 10: P(1, "bwrap", 1 << 20, 1000, False),
+                         11: P(10, "cargo", 0, 1000, True, 5), 12: P(11, "rustc", 1400 << 20, 1000, True, 6),
+                         13: P(11, "rustc", second, 1000, True, 7)}
+                used = (300 << 20) + (1400 << 20) + second
+                write_cgroup(cgroup, 4 << 30, used, anon=300 << 20)
+                with self.subTest(second=second >> 20):
+                    killed, lines, pauses = self.run_guard(cgroup, table, limit=4 << 30, headroom=(4 << 30) - (1536 << 20))
+                    self.assertEqual(killed, expected)
+                    self.assertEqual(len(lines), len(expected), lines)
+                    # No pause longer than the near look after a stop: a growing neighbour is not left alone for a second.
+                    self.assertEqual(pauses, [0.01, 0.01, 0.01])
+            # A process that is already ending (it exited, or another launcher stopped it) is not chosen,
+            # and its memory counts as given back.
+            table[12] = table[12]._replace(leaving=True)
+            write_cgroup(cgroup, 4 << 30, (300 << 20) + (1400 << 20) + (900 << 20), anon=300 << 20)
+            killed, lines, _ = self.run_guard(cgroup, table, limit=4 << 30, headroom=(4 << 30) - (1536 << 20))
+            self.assertEqual((killed, lines), ([], []))
+
+    def test_the_guard_looks_ten_times_a_second_far_from_the_limit_and_a_hundred_times_near_it(self):
+        # Near: within what one process can fill in a tenth of a second (3,277 MiB at 32 GiB/s).
+        with tempfile.TemporaryDirectory() as temporary:
+            cgroup = Path(temporary) / "cgroup"
+            for limit, used, pause in ((6 << 30, 2800 << 20, 0.1), (6 << 30, 2900 << 20, 0.01),
+                                       (6 << 30, 5000 << 20, 0.01), (2 << 30, 100 << 20, 0.01)):
+                write_cgroup(cgroup, limit, used)
+                with self.subTest(limit=limit >> 20, used=used >> 20):
+                    _, _, pauses = self.run_guard(cgroup, {}, looks=2, limit=limit, headroom=768 << 20)
+                    self.assertEqual(pauses, [pause, pause])
 
     def test_the_reason_reaches_a_pipe_or_terminal_but_never_a_file_and_never_waits(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -459,6 +503,15 @@ class MemoryAccountingTests(unittest.TestCase):
             try:
                 launcher.tell(123, "(launcher) Stopped x\n", proc=root / "proc")
                 self.assertEqual(os.read(reader, 100), b"(launcher) Stopped x\n")
+            finally:
+                os.close(reader)
+            # The launcher's own standard output (the role's answer) is never written to.
+            real_fstat = os.fstat
+            reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                with patch.object(os, "fstat", side_effect=lambda fd: os.stat(fifo) if fd == 1 else real_fstat(fd)):
+                    launcher.tell(123, "(launcher) Stopped x\n", proc=root / "proc")
+                self.assertEqual(os.read(reader, 100), b"")
             finally:
                 os.close(reader)
             (fd / "2").unlink()
@@ -558,7 +611,7 @@ class MemoryGuardTests(unittest.TestCase):
                 watcher = threading.Thread(target=launcher.guard,
                                            args=(role.pid, launcher.Limits(cgroup, 2 << 30, (2 << 30) - (512 << 20)),
                                                  report, lambda: role.poll() is None),
-                                           kwargs={"interval": 0.05, "settle": 0.2})
+                                           kwargs={"interval": 0.05, "near": 0.05})
                 watcher.start()
                 try:
                     output, errors = role.communicate(timeout=20)

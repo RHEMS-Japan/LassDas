@@ -8,7 +8,9 @@
 #    names it on the role's standard error (the record) and on the process's
 #    own standard error (what the tool that started it shows), the role's
 #    shell goes on to its next command, the launcher ends 0 and the kernel
-#    stopped nothing (memory.events oom_kill 0).
+#    stopped nothing (memory.events oom_kill 0). Then two processes of one
+#    role grow side by side, as a build tool's two compilers do: both are
+#    stopped in turn, and the kernel still stopped nothing.
 # 2. The launcher's tests (rewrite/harnesses/test_linux_role.py) run in the
 #    image, where bubblewrap is: the tests of the guard and of the launch it
 #    supervises are skipped in the Python job of ci.yml, which has none. A
@@ -35,25 +37,35 @@ output="$(docker run -i "${container[@]}" --memory 1g --memory-swap 1g --entrypo
   PATH=/usr/local/bin:/usr/bin:/bin TASK_WORKSPACE=/tmp/work TASK_HOME=/tmp/home bash -s 2>&1 <<'CHECK'
 set -u
 mkdir -p "$TASK_WORKSPACE" "$TASK_HOME"
-# 64 MiB more every tenth of a second, up to 4 GiB: four times the limit.
+# 64 MiB more every PAUSE seconds, up to 4 GiB: four times the limit.
 cat > "$TASK_WORKSPACE/allocate.py" <<'PY'
-import time
+import sys, time
 held = []
 while len(held) < 64:
     block = bytearray(64 << 20)
     block[::4096] = b"\x01" * (len(block) // 4096)
     held.append(block)
-    time.sleep(0.1)
+    time.sleep(float(sys.argv[1]))
 print("the allocator was never stopped")
 PY
 # The allocator's standard error is a pipe to the "tool" (sed), as a compiler's is to its build tool.
 cat > "$TASK_WORKSPACE/role.sh" <<'ROLE'
-python3 -B allocate.py 2>&1 | sed -u 's/^/tool| /'
+python3 -B allocate.py 0.1 2>&1 | sed -u 's/^/tool| /'
 echo "the allocator ended with ${PIPESTATUS[0]}"
+ROLE
+cat > "$TASK_WORKSPACE/two.sh" <<'ROLE'
+python3 -B allocate.py 0.05 & first=$!
+python3 -B allocate.py 0.05 & second=$!
+wait $first; a=$?; wait $second; b=$?
+echo "the two allocators ended with $a and $b"
 ROLE
 python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py --network none -- /bin/bash role.sh </dev/null
 echo "launcher exit status $?"
 echo "kernel out-of-memory kills in this container: $(sed -n 's/^oom_kill //p' /sys/fs/cgroup/memory.events)"
+python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py --network none -- /bin/bash two.sh </dev/null 2>&1 |
+  sed -u 's/^/two| /'
+echo "two: launcher exit status ${PIPESTATUS[0]}"
+echo "two: kernel out-of-memory kills in this container: $(sed -n 's/^oom_kill //p' /sys/fs/cgroup/memory.events)"
 CHECK
 )" || status=$?
 printf 'exit status %s\n%s\n' "$status" "$output"
@@ -64,7 +76,9 @@ fi
 for pattern in '^\(launcher\) Stopped python3 \(pid [0-9]+, [0-9]+ MiB resident' \
                '^tool\| \(launcher\) Stopped python3 \(pid [0-9]+, [0-9]+ MiB resident' \
                '^the allocator ended with 137$' '^launcher exit status 0$' \
-               '^kernel out-of-memory kills in this container: 0$'; do
+               '^kernel out-of-memory kills in this container: 0$' \
+               '^two\| the two allocators ended with 137 and 137$' '^two: launcher exit status 0$' \
+               '^two: kernel out-of-memory kills in this container: 0$'; do
   if ! grep -qE "$pattern" <<<"$output"; then
     echo "::error::the output above has no line matching $pattern"
     exit 1
@@ -74,7 +88,12 @@ if grep -q 'The memory guard is off' <<<"$output"; then
   echo "::error::the launcher ran without its memory guard in a container with a memory limit"
   exit 1
 fi
-echo "the launcher stopped the role's allocating process, said why, and the kernel stopped nothing"
+stops="$(grep -cE '^two\| \(launcher\) Stopped python3 ' <<<"$output")"
+if [ "$stops" -ne 2 ]; then
+  echo "::error::the two growing processes were stopped $stops times, not once each"
+  exit 1
+fi
+echo "the launcher stopped the role's allocating processes, said why, and the kernel stopped nothing"
 
 status=0
 output="$(docker run "${container[@]}" --memory 2g --memory-swap 2g -v "$harnesses:/harnesses:ro" --workdir /harnesses \
