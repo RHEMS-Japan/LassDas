@@ -1737,6 +1737,13 @@ the third forced exit in a row at one stage. Pause notices show measured time
 in ordinary units (for example, `0 秒` or `2 分 0 秒`), as other requester
 notices do.
 
+Set both in a production installation. Without a positive
+`intake.max_active_minutes`, forced exits are not counted: when the controller
+is killed during a stage, for example because its container ran out of memory,
+each restart runs that stage again, and nothing bounds how many times. Choose a
+cap above the active time that the largest expected request needs; a request
+that reaches it pauses until an authorized `再開`.
+
 Time accumulates while the request runtime is active, across successful stages,
 failures and routing retries. Success does not reset it. Waiting for a slot,
 waiting after a question has returned, waiting after a credit hold has stopped
