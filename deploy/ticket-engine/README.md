@@ -99,10 +99,18 @@ Proposed, or simply not measured. Check each one before trusting it:
   look again after the first real requests.
 - Time. A role's `timeout_minutes` bounds that launch. The optional
   `intake.max_active_minutes` also bounds an accepted request's total active
-  work. Time-limited requests resume automatically after a forced exit until
-  `intake.max_hard_exits` (default 3) pauses them for an authorized resume.
-  The status page shows confirmed time and restart counts separately from
-  requests that need attention. See the runtime README's active-work limits.
+  work. `intake.max_hard_exits` (default 3) pauses a request for an
+  authorized resume after that many forced exits. For a time-limited request
+  it counts every forced exit, at any stage. Without a time limit it counts
+  only forced exits in a row at one stage: the count starts again from one
+  after a process of that stage ends by itself, successfully or not, after the
+  requester's words, and at a forced exit at another stage; another stage
+  running in between does not restart it. The resume sets the count to zero.
+  Neither count bounds ordinary tool or verification failures, and without a
+  time limit nothing bounds the request's total active time. The status page
+  shows confirmed time and restart counts separately from requests that need
+  attention, but not the count in a row at one stage. See the runtime README's
+  active-work limits.
 
 ## Before it accepts work
 
