@@ -1629,9 +1629,12 @@ and how many ended each way. The models come last, as in every declaration.
 A rerun after a later stage sent the work back is said only when its models
 differ from those the stage was last declared with: the same models again say
 nothing. A rerun after the stage's own launch did not end cleanly is said every
-time, with the attempt it is, and after a forced exit with how many more pause
-the request (`intake.max_hard_exits`: in a row at that stage for a request
-without a time limit, all of them for one with it). While the stage keeps
+time, except right after a restart whose notice (below) went out: that notice
+already says which stage runs again, so a deploy leaves one comment, not two.
+A restart inside that notice's 30 minutes says nothing, and the rerun after it
+is said. A rerun is said with the attempt it is, and after a forced exit with
+how many more pause the request (`intake.max_hard_exits`: in a row at that
+stage for a request without a time limit, all of them for one with it). While the stage keeps
 failing, with nothing else run and no word from the requester in between, each
 such rerun rewrites the comment of the one before it on Backlog (only a comment
 of the engine's own account, still in the words recorded for it; only the
@@ -1920,7 +1923,9 @@ interrupted action or an unfinished recovery, it posts, for example:
 The count is this restart and every earlier one that cut a launch of the
 request short. "強制終了" says that nothing of the cut launch had been saved, so
 the runtime itself was killed; a launch the runtime stopped and saved is
-"止まった", and a recovery after a failed launch is "失敗で終わっていた". What
+"止まった", as after a deploy that stopped the engine in the ordinary way, which
+is not counted as a forced exit either; a recovery after a failed launch is
+"失敗で終わっていた". What
 runs next is the same model stage, or a command stage's `on_failure` stage
 ("要件確定からやり直します"). A request outside an ordered run is told
 `本体が再起動しました。作業を続けます。`. A clean start says nothing. The same request does not say it again inside 30

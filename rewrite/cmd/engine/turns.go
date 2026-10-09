@@ -556,8 +556,9 @@ func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory
 			again = slices.ContainsFunc(before, func(result chain.Result) bool { return result.Role == role.Name })
 		}
 		text, event, sameStage := name+declaredBegins+models+"）", "", false
+		var before []chain.Result
 		if again {
-			before := saved()
+			before = saved()
 			if latest.Launch < len(before) {
 				before = before[:latest.Launch]
 			}
@@ -565,6 +566,11 @@ func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory
 			event = rerunPrefix + strconv.Itoa(latest.Launch)
 		}
 		compose := func(log noticeLog, _ time.Time) (noticeRecord, bool) {
+			// The restart notice posted for the restart that cut the launch
+			// before this one already said which stage runs again.
+			if again && restartSaid(log, before) {
+				return noticeRecord{}, false
+			}
 			said := noticeRecord{Kind: declarePrefix + role.Name, Text: text, Models: models, Event: event}
 			last := lastDeclaration(log, role.Name)
 			if sameStage {
@@ -605,6 +611,28 @@ func adjacentLaunches(record chosenRecord, role string) bool {
 		}
 	}
 	return true
+}
+
+// restartSaid reports that the launch before this one was cut by a restart
+// and that a restart notice was written for that restart: after the cut
+// launch began, or after the record before it when the note keeps no start,
+// and no later than the note the restart left. A restart that said nothing,
+// inside the restart notice's interval, does not count.
+func restartSaid(log noticeLog, before []chain.Result) bool {
+	if len(before) == 0 {
+		return false
+	}
+	note := before[len(before)-1]
+	if note.Speaker != "runtime" || !note.Interrupted {
+		return false
+	}
+	since := note.StartedAt
+	if since.IsZero() && len(before) > 1 {
+		since = before[len(before)-2].FinishedAt
+	}
+	return slices.ContainsFunc(log.Notices, func(record noticeRecord) bool {
+		return record.Kind == resumeNotice && !record.Predates && record.WrittenAt.After(since) && !record.WrittenAt.After(note.FinishedAt)
+	})
 }
 
 // lastDeclaration is the role's latest declaration in the record, if any.

@@ -783,11 +783,13 @@ func lookEvery(t *testing.T, period time.Duration) {
 const declaredWork = "作業を始めます。（モデル: maker/configured）"
 
 // Through the queue: the engine writes each choice down as it makes it, the
-// watcher declares it once, and a restart that takes the stage up again says
-// it once more as a rerun after the stage's own launch was stopped, on the
-// same model too. A request delivered long ago is not told about a launch it
-// never heard of. Without the setting nothing is said and the engine keeps
-// only the first model, as it always did.
+// watcher declares it, and a restart that takes the stage up again says
+// nothing more: the restart notice already says which stage runs again. The
+// restart stopped the engine in the ordinary way, as a deploy does, so the
+// notice does not call it a forced exit and no forced exit is counted. A
+// request delivered long ago is not told about a launch it never heard of.
+// Without the setting nothing is said and the engine keeps only the first
+// model, as it always did.
 func TestTheQueueDeclaresEachLaunchOnceAcrossARestart(t *testing.T) {
 	for _, declaring := range []bool{true, false} {
 		t.Run(fmt.Sprintf("declare_models=%v", declaring), func(t *testing.T) {
@@ -833,9 +835,15 @@ func TestTheQueueDeclaresEachLaunchOnceAcrossARestart(t *testing.T) {
 					declared = append(declared, comment)
 				}
 			}
-			taken := "前の回は作業の途中で本体が止まりました。作業をやり直します（2 回目）。（モデル: maker/configured）"
-			if declaring && (len(declared) != 2 || declared[0] != declaredWork || declared[1] != taken) {
+			if declaring && (len(declared) != 1 || declared[0] != declaredWork) {
 				t.Fatalf("the launches were declared as %q", declared)
+			}
+			restarted := fixture.withPrefix("本体が再起動しました")
+			if len(restarted) != 1 || restarted[0] != "本体が再起動しました（1 回目）。作業の途中で止まったため、作業をやり直します。" {
+				t.Fatalf("the ordinary restart was said as %q", restarted)
+			}
+			if record, err := readWorkLimit(directory); err != nil || record.StageExits == nil || record.StageExits.Count != 0 || record.StageExits.Active != nil || len(record.Pauses) != 0 {
+				t.Fatalf("the ordinary restart was counted as a forced exit: %+v %v", record.StageExits, err)
 			}
 			if !declaring && len(declared) != 0 {
 				t.Fatalf("without the setting the requester was told %q", declared)
@@ -1284,5 +1292,46 @@ func TestARewriteThatLandedUnconfirmedIsNotPostedAgain(t *testing.T) {
 	last := got.Notices[len(got.Notices)-1]
 	if len(fixture.all()) != 2 || len(fixture.rewritten()) != 0 || last.CommentID != target || last.PostedAt == nil {
 		t.Fatalf("a rewrite that had landed was sent again: posted %q, rewrote %q, record %+v", fixture.all(), fixture.rewritten(), last)
+	}
+}
+
+// The restart notice says which stage runs again, so the rerun that follows a
+// restart is not said a second time when that notice went out. A restart
+// inside the restart notice's interval says nothing, and then the rerun is
+// said, rewriting the stage's earlier rerun while it keeps failing.
+func TestARerunAfterARestartIsSaidOnlyWhenTheRestartWasNot(t *testing.T) {
+	at := time.Now().UTC()
+	cutStart, restarted := at.Add(-2*time.Minute), at.Add(-time.Minute)
+	note := forcedNote("elicit", restarted)
+	note.StartedAt = cutStart
+	for _, shape := range []struct {
+		name     string
+		notices  []noticeRecord
+		declared int
+	}{
+		{"the restart notice went out", []noticeRecord{{Kind: resumeNotice, Text: "本体が再起動しました（1 回目）。", WrittenAt: restarted.Add(-time.Second), PostedAt: &restarted}}, 1},
+		{"its interval held it back", []noticeRecord{{Kind: resumeNotice, Text: "本体が再起動しました（1 回目）。", WrittenAt: cutStart.Add(-10 * time.Minute), PostedAt: &cutStart}}, 2},
+		{"it predates the kind", []noticeRecord{{Kind: resumeNotice, WrittenAt: restarted.Add(-time.Second), Predates: true}}, 2},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			cfg := declaringConfig(t)
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			directory, began := declaringJob(t, cfg)
+			launched(t, directory, "elicit", 0, "maker/one")
+			declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
+			log := readNotices(t, directory)
+			log.Notices = append(log.Notices, shape.notices...)
+			data, _ := json.Marshal(log)
+			if err := writeRuntimeFile(filepath.Join(directory, "notices.json"), data); err != nil {
+				t.Fatal(err)
+			}
+			writeJobHistory(t, directory, chain.State{History: []chain.Result{note}})
+			launched(t, directory, "elicit", 1, "maker/two")
+			declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
+			if got := fixture.all(); len(got) != shape.declared {
+				t.Fatalf("declared %q", got)
+			}
+		})
 	}
 }

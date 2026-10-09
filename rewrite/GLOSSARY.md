@@ -212,8 +212,9 @@ A later launch of a stage that has already run for this request, because a
 later stage sent the work back or because the stage's own launch did not
 exit 0 or was cut off. With `declare_models`, the engine declares a rerun
 after a send-back only when its model differs from the one last declared for
-that stage, and a rerun after the stage's own launch every time, with how
-that launch ended and which attempt this is, in words such as
+that stage, and a rerun after the stage's own launch every time, except
+right after a restart notice that already named it, with how that launch
+ended and which attempt this is, in words such as
 要件確定をやり直します（2 回目）. While the stage keeps failing, each such
 declaration rewrites the one before it where the tracker can edit comments.
 
