@@ -1738,9 +1738,12 @@ in ordinary units (for example, `0 秒` or `2 分 0 秒`), as other requester
 notices do.
 
 Set both in a production installation. Without a positive
-`intake.max_active_minutes`, forced exits are not counted: when the controller
-is killed during a stage, for example because its container ran out of memory,
-each restart runs that stage again, and nothing bounds how many times. Choose a
+`intake.max_active_minutes`, forced exits are counted only while they come one
+after another at one stage: when the controller is killed during a stage, for
+example because its container ran out of memory, each restart runs that stage
+again, and at the `intake.max_hard_exits`th forced exit in a row there the
+request pauses and tells the requester. Forced exits at different stages are not
+counted together, and nothing bounds the request's total active time. Choose a
 cap above the active time that the largest expected request needs; a request
 that reaches it pauses until an authorized `再開`.
 
