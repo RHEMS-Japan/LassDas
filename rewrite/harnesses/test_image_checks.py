@@ -55,6 +55,8 @@ Path(os.environ['CALLS']).write_text(json.dumps(sys.argv[1:]))
 body=sys.argv[-1].replace('cd /work;', 'cd '+os.environ['FIXTURE_WORK']+';')
 sys.exit(subprocess.call(['bash','-c',body]))
 """)
+            # The launcher stand-in only runs the role command after "--",
+            # with no mounts: it shows what the role is asked to run.
             launcher = root / "python3"
             launcher.write_text("#!" + sys.executable + "\n" + """import os,sys
 i=sys.argv.index('--')+1

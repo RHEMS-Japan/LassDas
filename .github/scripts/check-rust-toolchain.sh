@@ -12,8 +12,9 @@
 # they do not depend on it; check-role-sandbox.sh runs tools that do. Each hop
 # is normalized as text, without following later links, so a relative link
 # through /etc or to a place outside /usr is caught where it points; resolving
-# the whole chain at once would skip a hop through /etc. Anything else fails
-# here.
+# the whole chain at once would skip a hop through /etc. A link to a directory
+# along the way is not followed, so a hop through such a directory is not
+# seen. Anything else fails here.
 #
 # Usage: bash .github/scripts/check-rust-toolchain.sh IMAGE
 # image-check.yml runs it on every pull request; image.yml runs it after the
