@@ -399,9 +399,10 @@ const selectionFailure = "Selecting a current model: "
 // a launch that did not end cleanly; a harness that writes nothing is fine.
 const ActivityEnv = "TASK_ACTIVITY"
 
-// activityBytes bounds how much of the record is read: a harness writes a few
-// hundred bytes, and anything longer is not what it was asked to keep.
-const activityBytes = 4 << 10
+// activityBytes bounds how much of the record is read: a harness writes about
+// a kilobyte at most, a few kilobytes when every command is cut at its length
+// in characters of four bytes each, and anything longer is not a record.
+const activityBytes = 16 << 10
 
 // LastActivity is what the role's processes last recorded they were running,
 // one sentence per process that kept a record, or empty when none did. It
@@ -434,15 +435,28 @@ func (p Processes) LastActivity(role string) string {
 // ended the role for that. A missing, oversized or unreadable record says
 // nothing; the caller says that the last command is unknown. Every credential
 // the runtime knows is replaced.
+//
+// The role can replace the file. Opening a named pipe would wait for a writer
+// that never comes, holding the launch, its stop and its slot, and a link
+// would lead outside the role's home, so the file is opened without following
+// a link and without waiting, and read only when it is an ordinary file with
+// one name and no more than the bound.
 func readActivity(path string, secrets []string) (string, int) {
 	if path == "" {
 		return "", 0
 	}
-	file, err := os.Open(path)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", 0
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > activityBytes {
+		return "", 0
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || stat.Nlink != 1 {
+		return "", 0
+	}
 	data, err := io.ReadAll(io.LimitReader(file, activityBytes+1))
 	if err != nil || len(data) > activityBytes {
 		return "", 0

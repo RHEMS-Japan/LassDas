@@ -126,9 +126,11 @@ class RepeatedFailureStop:
             decision, action="halt", code="repeated_identical_failure", count=self.count,
             message=(f"{tool_name} failed {self.count} times in a row with the same arguments and "
                      "the same result. The role ends here."))
-        # Recorded only once the SDK has a halt to act on.
+        # Recorded only once the SDK has a halt to act on. Credentials come out
+        # before anything is cut: a cut one would leave its start behind.
+        values = credentials()
         self.stopped = scrub(f"Stopped: the same failure repeated {self.count} times in a row: "
-                             f"{tool_name} {clip(arguments)}: {failure_summary(text)}", credentials())
+                             f"{tool_name} {clip(scrub(arguments, values))}: {failure_summary(scrub(text, values))}", values)
         return halt
 
 
@@ -171,7 +173,13 @@ def command_summary(name, args):
             summary += ": " + " ".join(details)
         if args.get("background"):
             summary += " (in the background)"
-    return clip(summary, ACTIVITY_CHARACTERS - 1)
+    return activity_text(summary)
+
+
+def activity_text(text):
+    """A command as the record keeps it: credentials taken out first, then cut,
+    so a credential the cut falls inside leaves nothing of itself."""
+    return clip(scrub(text, credentials()), ACTIVITY_CHARACTERS - 1)
 
 
 class Activity:
@@ -188,7 +196,7 @@ class Activity:
         self.lock = threading.Lock()
         self.last, self.call, self.returned = "", None, True
         self.halt = None
-        self.broken = False
+        self.said = False
 
     def started(self, call_id, name, args, *_):
         with self.lock:
@@ -213,12 +221,12 @@ class Activity:
             sessions = self.registry.list_sessions()
         except Exception:
             return []
-        running = [clip(str(session.get("command", "")), ACTIVITY_CHARACTERS - 1) for session in sessions
+        running = [activity_text(str(session.get("command", ""))) for session in sessions
                    if isinstance(session, dict) and session.get("status") == "running" and session.get("command")]
         return running[:ACTIVITY_BACKGROUND]
 
     def write(self):
-        if self.path is None or self.broken:
+        if self.path is None:
             return
         record = {"last": self.last, "returned": self.returned, "background": self.background()}
         if self.halt:
@@ -229,9 +237,17 @@ class Activity:
             draft.write_text(text, encoding="utf-8")
             os.replace(draft, self.path)
         except Exception as error:
-            # Said once: a role whose record cannot be written still works.
-            self.broken = True
-            print(f"Activity record not written: {error}", file=sys.stderr)
+            # An earlier command left in place would read as the last one, so
+            # the record goes (removing needs no space); the runtime then says
+            # the last command is unknown, and a later write that succeeds
+            # puts it back. Said once: the role still works.
+            for path in (self.path, self.path.with_name(self.path.name + ".tmp")):
+                with contextlib.suppress(Exception):
+                    if not path.is_dir():
+                        path.unlink(missing_ok=True)
+            if not self.said:
+                self.said = True
+                print(f"Activity record not written: {error}", file=sys.stderr)
 
 
 def save_transcript(result):
@@ -365,22 +381,25 @@ def main():
         # A turn the SDK's tool-call guardrail ended did not finish the role's
         # work, whichever rule stopped it. What the role started in the
         # background is stopped first: it may be what was using up the machine.
-        halted = None
+        halted, rule = None, None
         guardrail = result.get("guardrail")
         if repeated_failures is not None and repeated_failures.stopped:
             halted = repeated_failures.stopped
-            activity.halted("repeated_identical_failure", repeated_failures.count)
+            rule = ("repeated_identical_failure", repeated_failures.count)
         elif guardrail or result.get("turn_exit_reason") == "guardrail_halt":
             details = guardrail if isinstance(guardrail, dict) else {}
             halted = scrub(f"Stopped by the native agent's tool-call guardrail ({details.get('code', 'unknown')}): "
                            f"{details.get('message', '')}", credentials())
-            activity.halted(details.get("code"), details.get("count"))
+            rule = (details.get("code"), details.get("count"))
         if halted:
             try:
                 with contextlib.redirect_stdout(sys.stderr):
                     process_registry.kill_all()
             except Exception as error:
                 print(f"\nBackground processes not stopped: {error}", file=sys.stderr)
+            # Recorded once the background is stopped, so the record does
+            # not name processes that are no longer running.
+            activity.halted(*rule)
         # No stripping, clipping, classification, JSON parsing or approval test.
         # Preserve partial work even when the native run failed, and publish the
         # report before cleanup so a cleanup error cannot erase it.

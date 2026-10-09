@@ -357,8 +357,9 @@ ownership across separate queue roots or supervision after a hard process crash.
 
 In watch mode a process directory must be empty or relative to its job workspace,
 not a shared absolute checkout. The launcher receives `TASK_WORKSPACE`,
-`TASK_HOME` (different for each role process), and `TASK_ISSUE`. These names cannot
-also be credential/model-selection destinations. The Hermes bridge uses
+`TASK_HOME` (different for each role process), `TASK_ISSUE` and `TASK_ACTIVITY`
+(below). These names cannot also be process `env`, credential or
+model-selection destinations. The Hermes bridge uses
 `TASK_HOME` instead of a global `HERMES_HOME`. Commands and referenced bridge
 paths must be available from the per-job directory. Repository preparation and
 actual delivery permissions still have to be supplied by the configured roles.
@@ -378,20 +379,30 @@ Watch mode also supplies `TASK_ACTIVITY`, a file named `task-activity.json` in
 the process's own `TASK_HOME`, where the launcher already lets it write. A
 harness may keep rewriting it with what it is running: the command it started
 last, whether that had returned, and the background processes it started. The
-Hermes bridge rewrites it at the start and end of every tool call, a few
-hundred bytes with credentials taken out, and adds the rule when its tool-call
-guardrail ends the role. The runtime removes it before each launch and only
-reads it back. After a launch whose process did not exit 0, the words go into
+Hermes bridge rewrites it at the start and end of every tool call, about a
+kilobyte at most: the tool and the one argument that says what it was asked
+to do, and up to five background commands, each with every credential it was
+handed taken out before it is cut at 200 characters. A credential it was never
+handed, typed into a command, stays as typed, as on its stderr. It adds the
+rule when its tool-call guardrail ends the role, once the background is
+stopped. A write that fails removes the record, so an earlier command is not
+read as the last one, and later writes try again. The runtime removes it
+before each launch and only reads it back, and only an ordinary file with one
+name of at most 16 KiB: a named pipe, a link, a directory or a second name
+for another file there reads as no record, without waiting on it or following
+it. After a launch whose process did not exit 0, the words go into
 that process's record as `activity`, and when the bridge ended the role for one
 call that kept failing the same way (`NATIVE_MAX_REPEATED_FAILURES` below), the
 count goes in as `repeated_failures`. After a restart cut a launch
 short, the note the runtime writes for that launch says them in its `output`,
 and marks the note `forced` when nothing of the launch had been saved, which
 means the runtime itself was killed (lack of memory is one cause). In an
-ordered run, the launch that follows is told how the previous launch ended, how
-many launches of that stage in a row did not end cleanly, the recorded command
-and background processes, and to suspect the cause (memory, time or wrong
-arguments) rather than repeat what it did unchanged. A harness that writes
+ordered run, the launch that follows a cut launch, or the stage's own launch
+that did not exit 0, is told how the previous launch ended, how many launches
+of that stage in a row did not end cleanly, the recorded command and background
+processes, and to suspect the cause (memory, time or wrong arguments) rather
+than repeat what it did unchanged. The `on_failure` stage after a command stage
+whose commands did not exit 0 is told that as before. A harness that writes
 nothing is not an error: the words then say that the last command is unknown.
 The bridge also seeds the native terminal's existing working-directory setting
 from `TASK_WORKSPACE` unless explicitly supplied. The tested SDK otherwise began

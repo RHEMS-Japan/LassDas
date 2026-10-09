@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -190,6 +191,13 @@ func TestTheActivityRecordIsReadBackBoundedAndWithoutCredentials(t *testing.T) {
 	if !strings.HasPrefix(got, "Last command: terminal: curl") || !strings.Contains(got, "… (it had returned). Running in the background: a; b; c; d; e.") || repeated != 0 {
 		t.Fatalf("the record was read as %q, %d", got, repeated)
 	}
+	// The bridge cuts each command at 199 characters, not bytes: a record of
+	// six such commands in characters of four bytes is still read.
+	wide := strings.Repeat("😀", 199)
+	write(`{"last":"` + wide + `","background":["` + strings.Join([]string{wide, wide, wide, wide, wide}, `","`) + `"]}`)
+	if got, _ := readActivity(path, nil); !strings.HasPrefix(got, "Last command: 😀") || !strings.Contains(got, "Running in the background: 😀") {
+		t.Fatalf("a record of wide characters was read as %.80q", got)
+	}
 	write(`{"last":"read_file: README.md"}`)
 	if got, _ := readActivity(path, nil); got != "Last command: read_file: README.md. Nothing was running in the background." {
 		t.Fatalf("a record without the returned flag was read as %q", got)
@@ -281,5 +289,126 @@ func TestTheEndingOfALaunchIsReadFromItsRecords(t *testing.T) {
 	}
 	if _, ok := (State{History: []Result{{Role: "work", Speaker: "worker"}, record}}).LastEnding(); ok {
 		t.Fatal("a launch that ended cleanly was read as one that did not")
+	}
+}
+
+// The role can put anything at the record's name. A named pipe there must not
+// hold the launch, its stop or the note written after a restart, waiting for a
+// writer that never comes; a link must not lead the runtime to read a file
+// outside the role's home; a directory or a second name for another file says
+// nothing either. Each of them reads as no record: the last command unknown.
+func TestARecordTheRoleReplacedIsNeitherWaitedOnNorFollowed(t *testing.T) {
+	// within fails the test instead of hanging it, and opens the pipe for
+	// writing so a reader that did block is let go.
+	within := func(t *testing.T, path string, read func() string) string {
+		t.Helper()
+		done := make(chan string, 1)
+		go func() { done <- read() }()
+		select {
+		case got := <-done:
+			return got
+		case <-time.After(5 * time.Second):
+			if file, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+				file.Close()
+			}
+			t.Fatal("reading the record waited on what the role put there")
+			return ""
+		}
+	}
+	directory := t.TempDir()
+	outside := filepath.Join(directory, "outside.json")
+	if err := os.WriteFile(outside, []byte(`{"last":"a file outside the home"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(directory, "home")
+	if err := os.Mkdir(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, "task-activity.json")
+	for _, shape := range []struct {
+		name string
+		make func() error
+	}{
+		{"a named pipe", func() error { return syscall.Mkfifo(path, 0600) }},
+		// A pipe whose writer stays open and writes nothing.
+		{"a named pipe held open", func() error {
+			if err := syscall.Mkfifo(path, 0600); err != nil {
+				return err
+			}
+			writer, err := os.OpenFile(path, os.O_RDWR, 0)
+			if err == nil {
+				t.Cleanup(func() { writer.Close() })
+			}
+			return err
+		}},
+		{"a link to a file outside", func() error { return os.Symlink(outside, path) }},
+		{"a second name of a file outside", func() error { return os.Link(outside, path) }},
+		{"a directory", func() error { return os.Mkdir(path, 0700) }},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			os.RemoveAll(path)
+			if err := shape.make(); err != nil {
+				t.Fatal(err)
+			}
+			if got := within(t, path, func() string { got, _ := readActivity(path, nil); return got }); got != "" {
+				t.Fatalf("the record was read as %q", got)
+			}
+			processes := Processes{Roles: map[string]Role{"work": {Name: "work", Processes: []Process{{Name: "worker", Env: map[string]string{ActivityEnv: path}}}}}}
+			if got := within(t, path, func() string { return processes.LastActivity("work") }); got != "" {
+				t.Fatalf("the note after a restart read %q", got)
+			}
+		})
+	}
+	// A role that makes its record a named pipe and exits 3: the launch
+	// returns, with its error and no record.
+	os.RemoveAll(path)
+	process := Process{Name: "worker", Command: []string{"/bin/sh", "-c", `mkfifo "$TASK_ACTIVITY" && exit 3`}, Env: map[string]string{ActivityEnv: path}}
+	var result Result
+	within(t, path, func() string {
+		result = process.run(context.Background(), Role{Name: "work"}, Assignment{Role: "work"}, State{})
+		return ""
+	})
+	if !strings.Contains(result.Error, "exit status 3") || result.Activity != "" {
+		t.Fatalf("the launch whose role left a named pipe returned %+v", result)
+	}
+	if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+		t.Fatalf("the role did not leave a named pipe, so nothing was tried: %v %v", info, err)
+	}
+	// Positive control: an ordinary file at the same name is read.
+	os.RemoveAll(path)
+	if err := os.WriteFile(path, []byte(`{"last":"terminal: true"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := readActivity(path, nil); got != "Last command: terminal: true. Nothing was running in the background." {
+		t.Fatalf("an ordinary record was read as %q", got)
+	}
+}
+
+// A command stage cut by a forced exit hands the work to its on_failure model
+// stage, which is told how the check ended though it did not run it itself.
+func TestTheStageAfterACutCommandStageIsToldHowItEnded(t *testing.T) {
+	began := time.Now().UTC().Add(-time.Minute)
+	store := &memoryStore{state: State{Request: "Build it.", Workflow: stagesWorkflow(), Step: "verify",
+		Pending: &Assignment{Role: "verify"}, PendingSince: began,
+		History: []Result{
+			{Role: "elicit", Speaker: "requirements", Output: "settled", StartedAt: began.Add(-time.Hour)},
+			{Role: "elicit", Speaker: "runtime", Output: "Process requirements exited 0.", StartedAt: began.Add(-time.Hour)},
+			{Role: "work", Speaker: "worker", Output: "built", StartedAt: began.Add(-time.Hour)},
+			{Role: "work", Speaker: "runtime", Output: "Process worker exited 0.", StartedAt: began.Add(-time.Hour)},
+		}}}
+	var told []string
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	engine := Chain{Store: store, Workflow: stagesWorkflow(), Router: StageRouter{}, RetryDelay: time.Millisecond,
+		Activity: func(string) string { return "" },
+		Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+			told = append(told, a.Role+": "+a.Instruction)
+			cancel()
+			return nil
+		})}
+	_ = engine.Run(ctx)
+	if len(told) != 1 || !strings.HasPrefix(told[0], "work: ") ||
+		!strings.Contains(told[0], "The previous launch of verify (attempt 1 in a row that did not end cleanly) was cut off when the runtime itself was killed") {
+		t.Fatalf("the on_failure stage after the cut check was told %q", told)
 	}
 }

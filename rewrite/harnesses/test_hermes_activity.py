@@ -70,6 +70,58 @@ class ActivityRecordTests(unittest.TestCase):
         self.assertEqual(len(record["background"]), bridge.ACTIVITY_BACKGROUND)
         self.assertLess(len(text.encode("utf-8")), 2000)
 
+    def test_a_credential_the_cut_falls_inside_leaves_nothing_of_itself(self):
+        # A start no other word in the record has, so any length of it found
+        # is the credential's.
+        secret = "Kq7Wv" + "Q" * 35
+        env = {"TASK_CREDENTIAL_NAMES": "DEPLOY_TOKEN", "DEPLOY_TOKEN": secret}
+
+        def longest_prefix(text):
+            return max((n for n in range(1, len(secret) + 1) if secret[:n] in text), default=0)
+
+        for name, command, replaced in (
+                # Positive control: the whole credential well inside the cut.
+                ("inside the cut", "curl -H 'token: " + secret + "' https://example.invalid", True),
+                # Cut first, its first 17 characters (27 in the background
+                # list) would stay; taken out first, the line fits whole.
+                ("where the cut would fall", "x" * 170 + " " + secret + " tail", True),
+                # Here the cut falls inside the replacement itself.
+                ("past the cut", "x" * 190 + " " + secret + " tail", False)):
+            with self.subTest(name):
+                activity = bridge.Activity(str(self.path), Registry([{"command": command, "status": "running"}]))
+                with patch.dict(os.environ, env, clear=True):
+                    activity.started("call", "terminal", {"command": command})
+                text = self.path.read_text(encoding="utf-8")
+                record = json.loads(text)
+                self.assertEqual(longest_prefix(text), 0, record)
+                self.assertEqual("[credential]" in record["last"], replaced, record)
+                self.assertLessEqual(len(record["last"]), bridge.ACTIVITY_CHARACTERS)
+                self.assertLessEqual(len(record["background"][0]), bridge.ACTIVITY_CHARACTERS)
+        # The same holds for the sentence a repeated failure stops the role with.
+        stop = bridge.RepeatedFailureStop(repeated.Guardrails(), 2)
+        args = {"command": "y" * 280 + " " + secret}
+        with patch.dict(os.environ, env, clear=True):
+            for _ in range(2):
+                stop.after_call("terminal", args, json.dumps({"error": "z" * 290 + secret}), failed=True)
+        self.assertTrue(stop.stopped)
+        self.assertEqual(longest_prefix(stop.stopped), 0, stop.stopped)
+
+    def test_a_failed_write_leaves_no_older_command_behind(self):
+        activity = bridge.Activity(str(self.path), Registry())
+        activity.started("c1", "terminal", {"command": "cargo build --release"})
+        self.assertEqual(self.read()["last"], "terminal: cargo build --release")
+        draft = self.path.with_name(self.path.name + ".tmp")
+        draft.mkdir()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            activity.started("c2", "terminal", {"command": "make -j64"})
+            activity.started("c3", "terminal", {"command": "pytest -x"})
+        self.assertFalse(self.path.exists(), "the earlier command stayed as the last one")
+        self.assertEqual(errors.getvalue().count("Activity record not written"), 1)
+        draft.rmdir()
+        activity.started("c4", "terminal", {"command": "cargo test"})
+        self.assertEqual(self.read()["last"], "terminal: cargo test")
+
     def test_an_unreadable_process_list_or_unwritable_file_never_stops_the_role(self):
         activity = bridge.Activity(str(self.path), Registry(error=RuntimeError("registry unavailable")))
         activity.started("call", "read_file", {"path": "README.md"})
@@ -100,6 +152,37 @@ class ActivityRecordTests(unittest.TestCase):
         _, _, out, _, code, _ = runner.run_bridge([repeated.WAIT] * 4 + [repeated.LIST], extra_env={"TASK_ACTIVITY": str(self.path)})
         self.assertEqual((code, out), (0, "finished normally"))
         self.assertFalse(self.path.exists())
+
+    def test_a_halt_is_recorded_after_the_background_is_stopped(self):
+        registry = Registry([{"command": "cargo build --release", "status": "running"}])
+        registry.kill_all = lambda: registry.sessions.clear()
+
+        class NativeAgent:
+            def __init__(self, **kwargs):
+                pass
+
+            def run_conversation(self, user_message):
+                return {"final_response": "stopped", "failed": False, "turn_exit_reason": "guardrail_halt",
+                        "guardrail": {"code": "same_tool_failure_halt", "count": 3, "message": "stop"}}
+
+            def interrupt(self, **_):
+                pass
+
+            def close(self):
+                pass
+
+        env = {"OPENROUTER_BASE_URL": "https://model.example/api/v1", "OPENROUTER_API_KEY": "synthetic-test-only",
+               "NATIVE_MODEL": "maker/test", "HERMES_HOME": str(self.path.parent / "home"),
+               "TASK_ACTIVITY": str(self.path)}
+        with patch.dict(sys.modules, {"run_agent": types.SimpleNamespace(AIAgent=NativeAgent),
+                                     "tools.process_registry": types.SimpleNamespace(process_registry=registry)}), \
+             patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", ["bridge"]), \
+             patch.object(sys, "stdin", io.StringIO("request")), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = bridge.main()
+        self.assertEqual(code, 1)
+        self.assertEqual(self.read()["halted"], {"code": "same_tool_failure_halt", "count": 3})
+        self.assertEqual(self.read()["background"], [])
 
     def test_the_bridge_hands_the_hooks_to_the_native_agent(self):
         seen = {}
