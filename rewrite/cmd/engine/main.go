@@ -301,8 +301,21 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		return err
 	}
 	observe := func(message string) { fmt.Fprintln(log, message) }
+	// Watch creates each request's saved limits before launching its child.
+	// Observe once at that child's startup, without changing operator config.
+	environmentFacts, routerInstructions := "", cfg.Instructions
+	if !*watch && !*check {
+		timeFacts, supervised := ctx.Value(acceptedTimeFactsKey{}).(string)
+		if !supervised {
+			// A direct invocation, or the report after an authorized stop:
+			// no saved cap of an accepted request applies to this run.
+			timeFacts = "Time limit for this run: none applies; a single launch can still have its own limit."
+		}
+		environmentFacts = chain.ExecutionEnvironment(timeFacts)
+		routerInstructions += "\n" + environmentFacts
+	}
 	var router chain.Router
-	chatService := chain.ChatRouter{Service: cfg.Router.LLM, Roles: purposes, Instructions: cfg.Instructions}
+	chatService := chain.ChatRouter{Service: cfg.Router.LLM, Roles: purposes, Instructions: routerInstructions}
 	var chat chain.Router = chatService
 	if cfg.ModelSelection != nil {
 		selection := *cfg.ModelSelection
@@ -310,7 +323,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		chat = selectedChatRouter{chat: chatService, selection: selection}
 	}
 	decision := func() chain.Router {
-		var next chain.Router = chain.DecisionRouter{Judge: cfg.Router.Decision, Roles: purposes, Instructions: cfg.Instructions}
+		var next chain.Router = chain.DecisionRouter{Judge: cfg.Router.Decision, Roles: purposes, Instructions: routerInstructions}
 		if cfg.Router.LLM.Model != "" || (cfg.ModelSelection != nil && cfg.Router.LLM.URL != "") {
 			next = chain.Alternate{Primary: next, Secondary: chat, Observe: observe}
 		}
@@ -401,7 +414,8 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		return err
 	}
 	defer store.Close()
-	executor := chain.Processes{Roles: roles, Prepare: prepareAccess, HistoryPath: filepath.Join(store.Dir, "history.json")}
+	executor := chain.Processes{Roles: roles, Prepare: prepareAccess, HistoryPath: filepath.Join(store.Dir, "history.json"),
+		EnvironmentFacts: environmentFacts}
 	if cfg.ModelSelection != nil {
 		selection := *cfg.ModelSelection
 		selection.observe = observe
