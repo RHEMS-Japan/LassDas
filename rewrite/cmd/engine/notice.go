@@ -54,9 +54,11 @@ const (
 // where the work stood, whether the runtime was killed there (nothing of the
 // launch was saved) or stopped it, and what runs next. The stage that runs
 // next comes from the operator's ordered run: the same model stage again, or
-// a command stage's on_failure stage. A request that names no stage of it is
-// told only that the work goes on.
-func restartNoticeText(cfg config, state chain.State) string {
+// a command stage's on_failure stage. After a forced exit it also says how
+// many more pause the request, counted already for this restart, since the
+// rerun right after it is not declared apart from this notice. A request that
+// names no stage of it is told only that the work goes on.
+func restartNoticeText(cfg config, directory string, state chain.State) string {
 	restarts := 1
 	for _, record := range state.History {
 		if record.Speaker == "runtime" && record.Interrupted {
@@ -75,16 +77,16 @@ func restartNoticeText(cfg config, state chain.State) string {
 	if at.Kind == chain.CommandStage && at.OnFailure != "" {
 		next = japaneseStage(at.OnFailure) + "からやり直します。"
 	}
-	how := japaneseStage(stage) + "が失敗で終わっていたため、"
+	how, left := japaneseStage(stage)+"が失敗で終わっていたため、", ""
 	if state.Pending != nil {
 		how = japaneseStage(stage) + "の途中で止まったため、"
 		if !state.PendingSince.IsZero() && !slices.ContainsFunc(state.History, func(record chain.Result) bool {
 			return record.Role == stage && !record.StartedAt.Before(state.PendingSince)
 		}) {
-			how = japaneseStage(stage) + "の途中で強制終了したため、"
+			how, left = japaneseStage(stage)+"の途中で強制終了したため、", forcedExitsLeft(directory, stage)
 		}
 	}
-	return fmt.Sprintf("本体が再起動しました（%d 回目）。%s%s", restarts, how, next)
+	return fmt.Sprintf("本体が再起動しました（%d 回目）。%s%s%s", restarts, how, next, left)
 }
 
 // orderedStage is the stage of the configured ordered run with this name.

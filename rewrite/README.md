@@ -1918,19 +1918,22 @@ way.
 **After a restart.** When the queue picks up a request whose history holds an
 interrupted action or an unfinished recovery, it posts, for example:
 
-> 本体が再起動しました（2 回目）。作業の途中で強制終了したため、作業をやり直します。
+> 本体が再起動しました（2 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 1 回続いたら一時停止して相談します。
 
 The count is this restart and every earlier one that cut a launch of the
 request short. "強制終了" says that nothing of the cut launch had been saved, so
 the runtime itself was killed; a launch the runtime stopped and saved is
 "止まった", as after a deploy that stopped the engine in the ordinary way, which
 is not counted as a forced exit either; a recovery after a failed launch is
-"失敗で終わっていた". What
-runs next is the same model stage, or a command stage's `on_failure` stage
-("要件確定からやり直します"). A request outside an ordered run is told
-`本体が再起動しました。作業を続けます。`. A clean start says nothing. The same request does not say it again inside 30
-minutes, even across further restarts, so a crash loop cannot fill the issue
-with one sentence.
+"失敗で終わっていた". What runs next is the same model stage, or a command
+stage's `on_failure` stage ("要件確定からやり直します"). After a forced exit
+the notice ends with how many more pause the request, as the rerun's
+declaration would (`intake.max_hard_exits`, already counted for this restart;
+"続いたら" without a time limit, "起きたら" with one), because that rerun is
+not declared apart from it. A request outside an ordered run is told
+`本体が再起動しました。作業を続けます。`. A clean start says nothing. The same
+request does not say it again inside 30 minutes, even across further
+restarts, so a crash loop cannot fill the issue with one sentence.
 
 **When the shared model key runs out.** This is the one failure no role can
 recover from: no investigation, redesign or handoff puts money back on a key.

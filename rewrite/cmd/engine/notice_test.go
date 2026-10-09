@@ -350,37 +350,51 @@ func TestRestartNoticeIsPostedOncePerRestartAndNotForACleanStart(t *testing.T) {
 
 // The restart notice says where the work stood, whether the runtime was
 // killed there or stopped it, and which stage runs again: the same model
-// stage, or a command stage's on_failure stage. A request outside an ordered
-// run is told only that the work goes on.
+// stage, or a command stage's on_failure stage. After a forced exit it says
+// how many more pause the request, when the saved limit can say. A request
+// outside an ordered run is told only that the work goes on.
 func TestTheRestartNoticeSaysWhereTheWorkStoodAndWhatRunsAgain(t *testing.T) {
 	cfg := pendingRun(t)
 	cfg.Workflow.Stages[1].OnFailure = "elicit"
 	cfg.Workflow.Stages = append([]chain.Stage{{Name: "elicit", Kind: chain.ModelStage}}, cfg.Workflow.Stages...)
 	began := time.Now().UTC().Add(-time.Minute)
 	cut := chain.Result{Role: "work", Speaker: "runtime", Interrupted: true, Forced: true, StartedAt: began.Add(-time.Hour)}
+	counted := &workLimitRecord{Version: 1, StageExits: &stageExits{Max: 3, Stage: "work", Count: 1, Mark: 0}}
+	timed := &workLimitRecord{Version: 1, Clock: &workClock{MaxMinutes: 60, MaxHardExits: 3, HardExits: 2}}
 	for _, shape := range []struct {
 		name  string
 		state chain.State
 		cfg   config
+		limit *workLimitRecord
 		want  string
 	}{
-		{"killed during a model stage", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began}, cfg,
+		{"killed during a model stage", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began}, cfg, nil,
 			"本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。"},
-		{"killed again, after an earlier cut", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began, History: []chain.Result{cut}}, cfg,
+		{"killed, with the forced exit counted", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began}, cfg, counted,
+			"本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 2 回続いたら一時停止して相談します。"},
+		{"killed under a time limit", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began}, cfg, timed,
+			"本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 1 回起きたら一時停止して相談します。"},
+		{"killed again, after an earlier cut", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began, History: []chain.Result{cut}}, cfg, nil,
 			"本体が再起動しました（2 回目）。作業の途中で強制終了したため、作業をやり直します。"},
 		{"stopped by the runtime, its results saved", chain.State{Pending: &chain.Assignment{Role: "work"}, PendingSince: began, History: []chain.Result{
-			{Role: "work", Speaker: "worker", Interrupted: true, Error: "context canceled", StartedAt: began.Add(time.Second)}}}, cfg,
+			{Role: "work", Speaker: "worker", Interrupted: true, Error: "context canceled", StartedAt: began.Add(time.Second)}}}, cfg, counted,
 			"本体が再起動しました（1 回目）。作業の途中で止まったため、作業をやり直します。"},
-		{"killed during a command stage", chain.State{Pending: &chain.Assignment{Role: "verify"}, PendingSince: began}, cfg,
+		{"killed during a command stage", chain.State{Pending: &chain.Assignment{Role: "verify"}, PendingSince: began}, cfg, nil,
 			"本体が再起動しました（1 回目）。検証の途中で強制終了したため、要件確定からやり直します。"},
-		{"a launch without a start", chain.State{Pending: &chain.Assignment{Role: "work"}}, cfg,
+		{"a launch without a start", chain.State{Pending: &chain.Assignment{Role: "work"}}, cfg, counted,
 			"本体が再起動しました（1 回目）。作業の途中で止まったため、作業をやり直します。"},
-		{"after a failed launch", chain.State{Step: "work", Recovering: true}, cfg,
+		{"after a failed launch", chain.State{Step: "work", Recovering: true}, cfg, counted,
 			"本体が再起動しました（1 回目）。作業が失敗で終わっていたため、作業をやり直します。"},
-		{"outside an ordered run", chain.State{Pending: &chain.Assignment{Role: "implement"}, PendingSince: began}, watchConfiguration(t), resumeNoticeText},
+		{"outside an ordered run", chain.State{Pending: &chain.Assignment{Role: "implement"}, PendingSince: began}, watchConfiguration(t), nil, resumeNoticeText},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
-			if got := restartNoticeText(shape.cfg, shape.state); got != shape.want {
+			directory := t.TempDir()
+			if shape.limit != nil {
+				if err := saveWorkLimit(directory, *shape.limit); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := restartNoticeText(shape.cfg, directory, shape.state); got != shape.want {
 				t.Fatalf("the restart notice is %q, want %q", got, shape.want)
 			}
 		})
@@ -404,6 +418,66 @@ func TestTheRestartNoticeSaysWhereTheWorkStoodAndWhatRunsAgain(t *testing.T) {
 	said := fixture.withPrefix("本体が再起動しました")
 	if len(said) != 1 || said[0] != "本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。" {
 		t.Fatalf("the restarts were said as %q", fixture.all())
+	}
+}
+
+// A request without a time limit whose stage is killed at each restart, the
+// restarts more than the restart notice's interval apart: each restart notice
+// says how many more forced exits in a row pause the request, counted for
+// that restart, and the third pauses it with its own notice and no restart
+// notice. The rerun after each restart is not declared apart from it.
+func TestEachRestartAfterAForcedExitSaysHowManyMorePause(t *testing.T) {
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	run := pendingRun(t)
+	began := time.Now().UTC().Add(-time.Minute)
+	root, directory := noticeJob(t, chain.State{})
+	queueRanSince(t, root, run, began.Add(-3*time.Hour))
+	note := chain.Result{Role: "work", Speaker: "runtime", Interrupted: true, Forced: true, Error: "The process stopped while this action was pending."}
+	for _, step := range []struct {
+		count int
+		want  string
+	}{
+		{0, "本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 2 回続いたら一時停止して相談します。"},
+		{1, "本体が再起動しました（2 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 1 回続いたら一時停止して相談します。"},
+		{2, ""},
+	} {
+		// The state a forced exit leaves: the launch pending with nothing of
+		// it saved, and the active-work marker still set.
+		var history []chain.Result
+		for range step.count {
+			history = append(history, note)
+		}
+		writeJobHistory(t, directory, chain.State{Workflow: run.Workflow, Step: "work", Pending: &chain.Assignment{Role: "work"}, PendingSince: began, History: history})
+		active := began
+		if err := saveWorkLimit(directory, workLimitRecord{Version: 1, StageExits: &stageExits{Max: 3, Active: &active, Stage: "work", Count: step.count, Mark: step.count}}); err != nil {
+			t.Fatal(err)
+		}
+		// The restarts are 40 minutes apart.
+		log := readNotices(t, directory)
+		for i := range log.Notices {
+			log.Notices[i].WrittenAt = log.Notices[i].WrittenAt.Add(-40 * time.Minute)
+		}
+		data, _ := json.Marshal(log)
+		if err := writeRuntimeFile(filepath.Join(directory, "notices.json"), data); err != nil {
+			t.Fatal(err)
+		}
+		finish := startStopQueue(t, run, root, 10*time.Millisecond, io.Discard)
+		if step.want != "" {
+			waitFor(t, func() bool { return loadJobState(t, directory).Done })
+		} else {
+			waitFor(t, func() bool {
+				return len(fixture.withPrefix("この依頼の自動処理を一時停止しています。")) == 1
+			})
+		}
+		finish()
+		said := fixture.withPrefix("本体が再起動しました")
+		if step.want != "" && (len(said) != step.count+1 || said[step.count] != step.want) {
+			t.Fatalf("restart %d was said as %q", step.count+1, said)
+		}
+		if step.want == "" && (len(said) != 2 || loadJobState(t, directory).Done) {
+			t.Fatalf("the third forced exit did not pause the request alone: %q", fixture.all())
+		}
 	}
 }
 

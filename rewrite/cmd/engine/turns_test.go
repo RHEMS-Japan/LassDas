@@ -1222,6 +1222,8 @@ func TestARerunAfterOtherWorkOrTheRequestersWordsIsANewComment(t *testing.T) {
 			{Role: "verify", Speaker: "build", StartedAt: at, FinishedAt: at},
 			{Role: "verify", Speaker: "runtime", Output: "Process build exited 0.", StartedAt: at, FinishedAt: at}}},
 		{"the requester commented", []chain.Result{{Role: "ask_requester", Speaker: "requester", Output: "please go on", StartedAt: at, FinishedAt: at}}},
+		// The 再開 comment after a pause is kept without a role's name.
+		{"the requester resumed a pause", []chain.Result{{Speaker: "requester", Output: "再開", FinishedAt: at}}},
 		// Positive control: nothing between, the comment is rewritten.
 		{"nothing between", nil},
 	} {
@@ -1331,6 +1333,32 @@ func TestARerunAfterARestartIsSaidOnlyWhenTheRestartWasNot(t *testing.T) {
 			declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
 			if got := fixture.all(); len(got) != shape.declared {
 				t.Fatalf("declared %q", got)
+			}
+		})
+	}
+}
+
+// One run of failures of a role ends at anything but the role's own records
+// and the runtime's routing notes: another role, or the requester's words,
+// whichever role's name they are kept under, the role's own included.
+func TestARunOfFailuresEndsAtOtherWorkOrTheRequestersWords(t *testing.T) {
+	at := time.Now().UTC()
+	own := chain.Result{Role: "ask_requester", Speaker: "questioner", Error: "exit status 1", StartedAt: at}
+	for _, shape := range []struct {
+		name    string
+		between chain.Result
+		same    bool
+	}{
+		{"the role's own failure", own, true},
+		{"a routing note", chain.Result{Role: "router", Speaker: "runtime", Output: "routing unavailable"}, true},
+		{"another role", chain.Result{Role: "work", Speaker: "worker"}, false},
+		{"the requester under the role's own name", chain.Result{Role: "ask_requester", Speaker: "requester", Output: "answer"}, false},
+		{"the requester without a role's name", chain.Result{Speaker: "requester", Output: "再開"}, false},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			history := []chain.Result{own, shape.between, own}
+			if got := sameFailures(history, "ask_requester", rerunPrefix+"0", 3); got != shape.same {
+				t.Fatalf("one run of failures: %t", got)
 			}
 		})
 	}

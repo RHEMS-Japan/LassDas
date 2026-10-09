@@ -2303,7 +2303,7 @@ instruction each role was given and its output as it arrives.
 
 The engine also posts three notices of its own when needed: after a restart
 that interrupted the request
-(`本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。`,
+(`本体が再起動しました（1 回目）。作業の途中で強制終了したため、作業をやり直します。強制終了があと 2 回続いたら一時停止して相談します。`,
 at most once in 30 minutes),
 when no stage has completed for `stall_notice_minutes`, and when the model
 budget falls below `min_model_credit` and recovers. rewrite/README.md ("What

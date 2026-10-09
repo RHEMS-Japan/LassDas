@@ -551,7 +551,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			if state.Pending != nil || state.Recovering {
 				stopping = stopping || stopWritten(ctx, cfg, issue, interval)
 				if !stopping {
-					if err := notice.post(ctx, resumeNotice, restartNoticeText(cfg, state), time.Now().UTC()); err != nil {
+					if err := notice.post(ctx, resumeNotice, restartNoticeText(cfg, directory, state), time.Now().UTC()); err != nil {
 						observe("request " + entry.Name() + ": restart notice not confirmed: " + err.Error())
 					}
 				}
