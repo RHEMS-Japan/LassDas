@@ -59,3 +59,8 @@ jobs:
         # The same check image.yml runs before it pushes; what passes is
         # written in the script.
         run: bash .github/scripts/check-role-sandbox.sh "$IMAGE"
+      - name: Stop a role's allocating process through the launcher's memory guard
+        # The same check image.yml runs before it pushes; what passes is
+        # written in the script. It also runs the launcher's tests in the
+        # image, where bubblewrap is.
+        run: bash .github/scripts/check-role-memory-guard.sh "$IMAGE"
