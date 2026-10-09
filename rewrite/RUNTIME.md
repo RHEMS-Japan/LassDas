@@ -101,6 +101,42 @@ namespaces. Its detached local children die when that role exits. Remote jobs
 and prior external effects are not undone. Long-lived delivery services belong
 in the authorized delivery runtime, not the agent's temporary process tree.
 
+### Memory
+
+A role's processes share the controller's container, and so its memory limit.
+On cgroup v2 the kubelet (1.28 and later, unless `singleProcessOOMKill` is set)
+asks the kernel to stop every process of a container once it runs out of
+memory, so a role's build that outgrows the limit used to stop the controller
+too, and the restarted controller ran the same stage again. When the launcher
+can read a limit for its container (`memory.max` in `/sys/fs/cgroup`, which a
+container on cgroup v2 with its own cgroup namespace sees as its own):
+
+- it stays as bubblewrap's parent and five times a second reads the
+  container's memory in use, leaving out file cache, which the kernel drops
+  before it stops anything. Once less than the headroom is left, it stops the
+  largest role process in the container if that process is its role's, and
+  writes one line on the role's standard error naming the process and the
+  memory in use. That line is part of the record and of what the next role
+  reads. Concurrent roles' launchers agree on the same process. The role's
+  other processes continue: a build tool sees its compiler stopped, a model's
+  terminal sees a killed command. The launcher ends as bubblewrap ended;
+- no single role process may allocate more than the limit less the headroom
+  (`RLIMIT_DATA`), so one fast allocation cannot pass between two looks.
+
+Every role process gets `oom_score_adj` 1000 in any case, so where the kernel
+stops one process at a time (Docker, cgroup v1, a kubelet with
+`singleProcessOOMKill`, a node without a container limit) it stops a role's
+first. The headroom is `--memory-headroom MIB`; unset, it is an eighth of the
+limit and at least 512 MiB (768 MiB of 6 GiB).
+
+The guard looks and stops; it reserves nothing. It is not a limit per role:
+concurrent roles share the container's. Several processes that together grow
+by more than the headroom within a fifth of a second, or memory no process
+holds (a role's `/tmp` is in memory), can still reach the limit; each look then
+stops the next largest role process, at worst the role's own command. How many
+compilers a build runs at once is the role's own environment setting (for
+example `CARGO_BUILD_JOBS` for Cargo), not something the launcher sets.
+
 ## Check the target runtime before accepting work
 
 An installed `bwrap` and an enabled user-namespace sysctl do not establish that
