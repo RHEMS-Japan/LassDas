@@ -120,10 +120,11 @@ no bound. The limit notice reports a pause, not completion; read the required
 permission change in the question and run record, fix the configuration, then
 have an authorized user post `再開` on its own first line. This sets the count to
 zero and, for a time-limited request, grants another interval with the same
-saved cap; changing the configuration does not change an already accepted
-request's cap or forced-exit limit. The status page does not show the count in a
-row at one stage; without a time limit, the pause notice names the stage and the
-count.
+saved cap. The cap and the forced-exit limit are saved at acceptance for a
+time-limited request; a request without a time limit saves its forced-exit
+limit at its first launch. A configuration change after that does not alter
+them. The status page does not show the count in a row at one stage; without a
+time limit, the pause notice names the stage and the count.
 Each failure adds a requirements launch and a routing decision, including ordinary
 repairs. A model process that exits with an error still retries its own stage.
 Existing installations need to update their four `on_failure` values and shared
