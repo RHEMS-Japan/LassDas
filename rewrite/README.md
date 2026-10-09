@@ -2305,15 +2305,33 @@ A per-job OS file lock serializes preparation, not the later role work. Both
 parallel launchers enter the published directory before starting their roles.
 This optional launcher requires POSIX file locking and same-filesystem staging.
 
-Any nonempty workspace is reused unchanged, even when the configured upstream
-has moved or is unavailable. There is no fetch, reset, cleaning, repository
-certification or inspection of agent-edited Git configuration outside the role
-sandbox. Changing the configured source/ref does not replace an active job.
-This preserves local commits, dirty edits and untracked progress; it does not
-claim that existing work is a valid or undamaged checkout. A failed clone or
+After an accepted reply at the entrance of an ordered run, the wrapper checks
+the configured source once before the next role starts. It advances only a
+checkout still at its recorded preparation HEAD, with no dirty, untracked or
+ignored files, and no stage after the entrance ever launched. The role's
+diagnostics record the old and new HEAD in one line, which the engine keeps in
+history. An unchanged upstream adds no line. If fetching fails, the original
+checkout is used and the reason is recorded; there is no reset or cleaning.
+The new tree is checked out and checked for unfinished writes in a private
+copy before replacing the original directory. A failed checkout leaves the
+original intact. Linux/macOS atomically exchange the two directories, so the
+workspace path is never absent or half updated. If the exchange is unsupported
+or fails, the old checkout stays in use with a reason. After an interruption,
+the next launch reconciles the preparation record with the old or new HEAD
+before any role runs. An unexpected HEAD is reported without launching a role.
+
+Once a later stage has run, the workspace is reused unchanged even after a
+reply. Local commits and edits are never replaced. Changed Git configuration
+is not executed outside the sandbox: the wrapper only opens the Git metadata
+it prepared with its unchanged local configuration. A changed source/ref,
+an unrecorded checkout, or missing/unreadable run history also leaves the
+workspace alone. Connected-role runs have no designated entrance stage and
+do not perform this refresh. This does not claim that existing work is a
+valid or undamaged checkout. A failed initial clone or
 checkout never starts the role and its reason reaches the existing chain. A
-retry can prepare the still-empty workspace. A killed preparation can leave
-unpublished private staging for operator cleanup; it is never treated as work.
+retry can prepare the still-empty workspace. A killed preparation or refresh
+can leave unpublished private staging, up to a full copy of a checkout, for
+operator cleanup; it is never treated as work.
 Submodule/LFS setup and remote authentication are not automatically provisioned.
 
 Once a checkout is published, a record of it (`.workspace.prepared`) is kept
@@ -2351,6 +2369,11 @@ and preservation of existing work. An actual watch-loop test starts two jobs,
 cancels them mid-work, moves the upstream and makes it unavailable, then resumes
 both with the same original request, base and unfinished files. Its tracker and
 router are fixtures: this proves the connection, not model quality or delivery.
+
+The reply-refresh regression also runs the actual chain, file-backed history,
+workspace launcher and Git: after a saved entrance reply, the next role reads
+the new upstream tree and the old/new HEAD diagnostic remains in history once.
+The requester reply and routing choice are fixtures, not a live tracker test.
 
 ### Existing native-agent connection
 
