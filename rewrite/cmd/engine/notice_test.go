@@ -1316,7 +1316,7 @@ func TestARequestInFlightIsNotToldWhatBeganBeforeTheEngine(t *testing.T) {
 		{Role: "verify", Speaker: "build", Error: "exit status 1", StartedAt: earlier.Add(time.Hour), FinishedAt: earlier.Add(time.Hour)},
 	}})
 	said := earlier.Add(time.Second)
-	announced, _ := json.Marshal(noticeLog{Notices: []noticeRecord{{Kind: stagePrefix + "work", Text: "作業を始めます。 (モデル: maker/first)", WrittenAt: said, PostedAt: &said}}})
+	announced, _ := json.Marshal(noticeLog{Notices: []noticeRecord{{Kind: stagePrefix + "work", Text: "作業を始めます。（モデル: maker/first）", WrittenAt: said, PostedAt: &said}}})
 	if err := writeRuntimeFile(filepath.Join(directory, "notices.json"), announced); err != nil {
 		t.Fatal(err)
 	}

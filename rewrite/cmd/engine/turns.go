@@ -445,7 +445,7 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 				continue
 			}
 			if model != "" {
-				text += " (モデル: " + model + ")"
+				text += "（モデル: " + model + "）"
 			}
 			// A launch that could not choose a model at all named none, and
 			// nothing later will name it for this stage. The operator's
@@ -467,7 +467,7 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 // many more forced exits pause the request; while the stage keeps failing,
 // each such launch rewrites the comment of the one before it.
 const (
-	declaredBegins = "を始めます。選定モデル: "
+	declaredBegins = "を始めます。（モデル: "
 	rerunPrefix    = "rerun:"
 )
 
@@ -555,7 +555,7 @@ func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory
 			}
 			again = slices.ContainsFunc(before, func(result chain.Result) bool { return result.Role == role.Name })
 		}
-		text, event, sameStage := name+declaredBegins+models, "", false
+		text, event, sameStage := name+declaredBegins+models+"）", "", false
 		if again {
 			before := saved()
 			if latest.Launch < len(before) {
@@ -651,6 +651,7 @@ func rerunNoticeText(cfg config, directory, role string, before []chain.Result, 
 	if !sameStage {
 		text.WriteString(name + "をやり直します。")
 	} else {
+		text.WriteString(kindsText(ending))
 		fmt.Fprintf(&text, "%sをやり直します（%d 回目）。", name, ending.Attempt+1)
 		if ending.Forced {
 			text.WriteString(forcedExitsLeft(directory, role))
@@ -678,10 +679,28 @@ func endingText(cfg config, ending chain.Ending) string {
 		return "前の回は" + name + "のモデルを選べませんでした（モデルの API が使えなかった可能性があります）。"
 	case ending.RepeatedFailures > 0:
 		return fmt.Sprintf("前の回は%sの役が同じ操作に %d 回続けて失敗し、自分で止まりました。", name, ending.RepeatedFailures)
-	case ending.Attempt > 1:
-		return fmt.Sprintf("%sの役が %d 回続けてエラーで終わりました。", name, ending.Attempt)
 	}
 	return "前の回は" + name + "の役がエラーで終わりました。"
+}
+
+// kindsText says, when several launches of the stage in a row did not end
+// cleanly, how many there were and how many ended each way: the sentence
+// before it describes the last one only.
+func kindsText(ending chain.Ending) string {
+	if ending.Attempt < 2 {
+		return ""
+	}
+	var parts []string
+	for _, kind := range []struct {
+		count int
+		words string
+	}{{ending.Kinds.Forced, "強制終了"}, {ending.Kinds.Stopped, "本体の停止"}, {ending.Kinds.TimedOut, "時間の上限"},
+		{ending.Kinds.NoModel, "モデルを選べず"}, {ending.Kinds.Errors, "エラー"}} {
+		if kind.count > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d 回", kind.words, kind.count))
+		}
+	}
+	return fmt.Sprintf("正常に終わらなかった回が %d 回続いています（%s）。", ending.Attempt, strings.Join(parts, "、"))
 }
 
 // forcedExitsLeft says how many more forced exits pause the request, as its

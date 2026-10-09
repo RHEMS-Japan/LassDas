@@ -1585,7 +1585,7 @@ second comment), and when it resumes after the requester's answer (a stop writte
 waits is not an answer and is not announced as one); a stage whose `announce` sentence the
 operator wrote in `workflow.stages` is announced once when it first begins.
 That sentence carries the model the launch beginning the stage chose, as
-` (モデル: <catalog id>)` without any gateway prefix; a stage that launches no
+`（モデル: <catalog id>）` without any gateway prefix; a stage that launches no
 model, a runtime that selects none, and a launch that could not choose one at
 all, say it as the operator wrote it. Once the request is delivered, one
 further comment lists every launch that used a model, one line per stage in
@@ -1609,9 +1609,9 @@ return.
 while a stage's work is under way, which model the selection chose for it:
 
 ```
-要件確定を始めます。選定モデル: maker/one
+要件確定を始めます。（モデル: maker/one）
 検証が通りませんでした。要件確定をやり直します。（モデル: maker/two）
-前の回は作業の途中で処理が強制終了しました（メモリ不足の可能性があります）。作業をやり直します（2 回目）。強制終了があと 2 回続いたら一時停止して相談します。（モデル: maker/two）
+前の回は作業の途中で処理が強制終了しました（メモリ不足の可能性があります）。正常に終わらなかった回が 2 回続いています（強制終了 1 回、エラー 1 回）。作業をやり直します（3 回目）。強制終了があと 2 回続いたら一時停止して相談します。（モデル: maker/two）
 ```
 
 The first line is said at a stage's first launch that chose a model; a stage
@@ -1622,8 +1622,9 @@ never from what a role wrote: a check that did not pass, a forced exit of the
 runtime (nothing of the launch was saved; lack of memory is one cause), a stop
 by the runtime, the time limit, a model that could not be selected, a role its
 harness ended after one tool call failed the same way several times in a row,
-or a role's error, with the count when several launches in a row ended so. The
-models come last.
+or a role's error. That sentence is about the last launch only; when several
+launches of the stage in a row did not end cleanly, the next one says how many
+and how many ended each way. The models come last, as in every declaration.
 
 A rerun after a later stage sent the work back is said only when its models
 differ from those the stage was last declared with: the same models again say
