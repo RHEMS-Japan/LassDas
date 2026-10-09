@@ -1610,16 +1610,36 @@ while a stage's work is under way, which model the selection chose for it:
 
 ```
 要件確定を始めます。選定モデル: maker/one
-要件確定をやり直します。選定モデル: maker/two
+検証が通りませんでした。要件確定をやり直します。（モデル: maker/two）
+前の回は作業の途中で処理が強制終了しました（メモリ不足の可能性があります）。作業をやり直します（2 回目）。強制終了があと 2 回続いたら一時停止して相談します。（モデル: maker/two）
 ```
 
 The first line is said at a stage's first launch that chose a model; a stage
-whose `announce` sentence goes out says that launch in its sentence alone. The
-second is said at a later launch, after a later stage sent the work back or a
-launch did not exit 0, and only when its models differ from those the stage was
-last declared with: the same models again say nothing. A stage that ran before
-the setting was turned on is told the second line at its first launch after it,
-since its history shows the earlier one. A launch whose processes choose
+whose `announce` sentence goes out says that launch in its sentence alone. A
+later launch is a rerun, and its line begins with how the launch before it
+ended when that one did not end cleanly, from what the runtime recorded and
+never from what a role wrote: a check that did not pass, a forced exit of the
+runtime (nothing of the launch was saved; lack of memory is one cause), a stop
+by the runtime, the time limit, a model that could not be selected, a role its
+harness ended after one tool call failed the same way several times in a row,
+or a role's error, with the count when several launches in a row ended so. The
+models come last.
+
+A rerun after a later stage sent the work back is said only when its models
+differ from those the stage was last declared with: the same models again say
+nothing. A rerun after the stage's own launch did not end cleanly is said every
+time, with the attempt it is, and after a forced exit with how many more pause
+the request (`intake.max_hard_exits`: in a row at that stage for a request
+without a time limit, all of them for one with it). While the stage keeps
+failing, with nothing else run and no word from the requester in between, each
+such rerun rewrites the comment of the one before it on Backlog (only a comment
+of the engine's own account, still in the words recorded for it; only the
+words are sent), so a crash loop leaves one comment that shows the latest
+attempt. A tracker that cannot edit, a comment that is not the engine's or no
+longer reads as recorded, and a refused edit get a new comment instead; an
+edit whose answer was lost is read back before anything is posted. A stage that
+ran before the setting was turned on is told as a rerun at its first launch
+after it, since its history shows the earlier one. A launch whose processes choose
 several models names them together, separated by `、`, once all have chosen; a
 launch in which some processes' selection failed is declared when it returns,
 with the models that were chosen. A command stage and a launch whose selection
@@ -1864,7 +1884,8 @@ environments remain different observations.
 A request filed at eleven and stopped at two by an outage used to say nothing
 at all: the chain kept retrying, and the only trace was a log nobody was
 reading. Three fixed notices close that silence. The controller writes every
-one of them, always in the same words. No model composes them, none of them
+one of them in its own fixed wording, filled in only with the counts, stage
+names and models it recorded. No model composes them, none of them
 judges a role's answer, and none of them ends a request: the work carries on or
 resumes by itself in every case.
 
@@ -1891,11 +1912,17 @@ is set aside as `notice-kinds.json.unreadable`, said once, and treated the same
 way.
 
 **After a restart.** When the queue picks up a request whose history holds an
-interrupted action or an unfinished recovery, it posts:
+interrupted action or an unfinished recovery, it posts, for example:
 
-> 自動処理は再起動後に同じ依頼を続けています。直前の工程は途中で止まった可能性があるため、確認してから進めます。
+> 本体が再起動しました（2 回目）。作業の途中で強制終了したため、作業をやり直します。
 
-A clean start says nothing. The same request does not say it again inside 30
+The count is this restart and every earlier one that cut a launch of the
+request short. "強制終了" says that nothing of the cut launch had been saved, so
+the runtime itself was killed; a launch the runtime stopped and saved is
+"止まった", and a recovery after a failed launch is "失敗で終わっていた". What
+runs next is the same model stage, or a command stage's `on_failure` stage
+("要件確定からやり直します"). A request outside an ordered run is told
+`本体が再起動しました。作業を続けます。`. A clean start says nothing. The same request does not say it again inside 30
 minutes, even across further restarts, so a crash loop cannot fill the issue
 with one sentence.
 

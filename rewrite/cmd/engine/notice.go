@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/stagename"
 	"ticket-runner/internal/textclip"
 	"ticket-runner/internal/tracker"
 )
@@ -28,7 +29,7 @@ import (
 // judges a role's answer, and none of them ends a request. Each condition says
 // its piece at most once, and the work carries on or resumes by itself.
 const (
-	resumeNoticeText   = "自動処理は再起動後に同じ依頼を続けています。直前の工程は途中で止まった可能性があるため、確認してから進めます。"
+	resumeNoticeText   = "本体が再起動しました。作業を続けます。"
 	pausedNoticeText   = "自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します。"
 	restoredNoticeText = "モデル利用枠が回復し、自動処理を開始しました。"
 )
@@ -47,6 +48,65 @@ const (
 	stallNoticeInterval  = 6 * time.Hour
 	defaultStallMinutes  = 90
 )
+
+// restartNoticeText says what a restart did to the request: how many restarts
+// it has been through, counting each that cut a launch short and this one,
+// where the work stood, whether the runtime was killed there (nothing of the
+// launch was saved) or stopped it, and what runs next. The stage that runs
+// next comes from the operator's ordered run: the same model stage again, or
+// a command stage's on_failure stage. A request that names no stage of it is
+// told only that the work goes on.
+func restartNoticeText(cfg config, state chain.State) string {
+	restarts := 1
+	for _, record := range state.History {
+		if record.Speaker == "runtime" && record.Interrupted {
+			restarts++
+		}
+	}
+	stage := state.Step
+	if state.Pending != nil {
+		stage = state.Pending.Role
+	}
+	at, known := orderedStage(cfg, stage)
+	if !known {
+		return resumeNoticeText
+	}
+	next := japaneseStage(stage) + "をやり直します。"
+	if at.Kind == chain.CommandStage && at.OnFailure != "" {
+		next = japaneseStage(at.OnFailure) + "からやり直します。"
+	}
+	how := japaneseStage(stage) + "が失敗で終わっていたため、"
+	if state.Pending != nil {
+		how = japaneseStage(stage) + "の途中で止まったため、"
+		if !state.PendingSince.IsZero() && !slices.ContainsFunc(state.History, func(record chain.Result) bool {
+			return record.Role == stage && !record.StartedAt.Before(state.PendingSince)
+		}) {
+			how = japaneseStage(stage) + "の途中で強制終了したため、"
+		}
+	}
+	return fmt.Sprintf("本体が再起動しました（%d 回目）。%s%s", restarts, how, next)
+}
+
+// orderedStage is the stage of the configured ordered run with this name.
+func orderedStage(cfg config, name string) (chain.Stage, bool) {
+	if cfg.Workflow == nil || name == "" {
+		return chain.Stage{}, false
+	}
+	for _, stage := range cfg.Workflow.Stages {
+		if stage.Name == name {
+			return stage, true
+		}
+	}
+	return chain.Stage{}, false
+}
+
+// japaneseStage is the stage's name as the requester's notices say it.
+func japaneseStage(name string) string {
+	if label, known := stagename.Japanese(name); known {
+		return label
+	}
+	return name
+}
 
 // The engine knows what it recorded, not what will end the wait. A launch that
 // runs long may be working or may be waiting for its operator to correct a
@@ -105,6 +165,18 @@ type noticeRecord struct {
 	// as, so a later notice of the same kind in the same words is not taken
 	// for this one.
 	CommentID int64 `json:"comment_id,omitempty"`
+	// Edits is the engine's own earlier comment this notice rewrites instead
+	// of adding one: the notice of the same stage's earlier rerun, said again
+	// with its new count. A tracker that cannot edit, or a comment that is not
+	// the engine's or no longer reads as recorded, gets a new comment.
+	Edits int64 `json:"edits,omitempty"`
+}
+
+// commentEditor is a tracker that can replace the words of a comment its own
+// account posted. Backlog can; on any other tracker a notice that would
+// rewrite one is posted as a new comment.
+type commentEditor interface {
+	EditComment(ctx context.Context, issue tracker.Issue, id int64, text string) error
 }
 
 type noticeLog struct {
@@ -374,23 +446,22 @@ func (n notices) post(ctx context.Context, kind, text string, at time.Time) erro
 	})
 }
 
-// declare says which models a launch of a role chose. It is due by its own
-// rule rather than once or after an interval, and its record keeps the
-// models, which is what that rule compares the next launch with.
-func (n notices) declare(ctx context.Context, role, text, models string, at time.Time, due func(noticeLog) bool) error {
-	return n.say(ctx, declarePrefix+role, text, models, at, func(log noticeLog, _ time.Time) bool {
-		return due(log)
-	})
-}
-
-// say is the work of post and declare: due decides, on the record as it
-// stands once an earlier unconfirmed notice is settled, whether this one
-// speaks at all.
+// say is the work of post: due decides, on the record as it stands once an
+// earlier unconfirmed notice is settled, whether this one speaks at all.
 func (n notices) say(ctx context.Context, kind, text, models string, at time.Time, due func(noticeLog, time.Time) bool, events ...string) error {
 	event := ""
 	if len(events) > 0 {
 		event = events[0]
 	}
+	return n.sayAs(ctx, kind, event, at, func(log noticeLog, now time.Time) (noticeRecord, bool) {
+		return noticeRecord{Kind: kind, Text: text, Models: models, Event: event}, due(log, now)
+	})
+}
+
+// sayAs is the work of say. compose reads the record as it stands once an
+// earlier unconfirmed notice is settled, and gives the notice to record, and
+// whether it speaks at all.
+func (n notices) sayAs(ctx context.Context, kind, event string, at time.Time, compose func(noticeLog, time.Time) (noticeRecord, bool)) error {
 	log, err := n.load()
 	if err != nil {
 		return err
@@ -404,7 +475,8 @@ func (n notices) say(ctx context.Context, kind, text, models string, at time.Tim
 		}
 	}
 	now := time.Now().UTC()
-	if !due(log, now) {
+	record, due := compose(log, now)
+	if !due {
 		return nil
 	}
 	since, err := kindSince(n.queue, kind, now)
@@ -419,13 +491,14 @@ func (n notices) say(ctx context.Context, kind, text, models string, at time.Tim
 		// next, current occasion for a whole interval, and this occasion's
 		// time does not move, so every later tick finds it before the kind's
 		// start again.
-		if !onceNotice(kind) && models == "" {
+		if !onceNotice(kind) && record.Models == "" {
 			return nil
 		}
-		log.Notices = append(log.Notices, noticeRecord{Kind: kind, WrittenAt: now, Predates: true, Models: models})
+		log.Notices = append(log.Notices, noticeRecord{Kind: kind, WrittenAt: now, Predates: true, Models: record.Models, Event: record.Event})
 		return n.save(log)
 	}
-	log.Notices = append(log.Notices, noticeRecord{Kind: kind, Text: text, WrittenAt: now, Models: models, Event: event})
+	record.WrittenAt = now
+	log.Notices = append(log.Notices, record)
 	if err := n.save(log); err != nil {
 		return err
 	}
@@ -463,6 +536,15 @@ func (n notices) settle(ctx context.Context, log *noticeLog, i int, fresh bool) 
 			after = earlier.CommentID
 		}
 	}
+	if record.Edits > 0 {
+		done, err := n.edit(ctx, log, i, after)
+		if done || err != nil {
+			return err
+		}
+		// Not rewritten: the notice becomes a new comment, read for first in
+		// case an earlier attempt posted it.
+		fresh = false
+	}
 	if !fresh {
 		id, err := n.postedAfter(ctx, record.Text, after)
 		if err != nil {
@@ -481,6 +563,62 @@ func (n notices) settle(ctx context.Context, log *noticeLog, i int, fresh bool) 
 		return n.confirm(log, i, id)
 	}
 	return n.confirm(log, i, stored)
+}
+
+// edit rewrites the comment a notice replaces, and reports whether the notice
+// is settled. The issue is read first: a rewrite or a new comment an earlier
+// attempt left is confirmed as it is. Only a comment the engine's own account
+// posted, still in the words recorded for it, is rewritten. Otherwise, or when
+// the tracker cannot edit or refuses, the notice gives up the rewrite, which
+// is recorded, and the caller posts it as a new comment.
+func (n notices) edit(ctx context.Context, log *noticeLog, i int, after int64) (bool, error) {
+	record := log.Notices[i]
+	rows, err := n.source.Comments(ctx, n.issue)
+	if err != nil {
+		return false, err
+	}
+	recorded := ""
+	for _, earlier := range log.Notices[:i] {
+		if earlier.CommentID == record.Edits {
+			recorded = earlier.Text
+		}
+	}
+	var target json.RawMessage
+	for _, raw := range rows {
+		id, words, err := n.source.CommentText(raw)
+		if err != nil {
+			return false, errors.New("issue comments could not be read before rewriting a notice")
+		}
+		if words == record.Text && (id == record.Edits || id > after) {
+			return true, n.confirm(log, i, id)
+		}
+		if id == record.Edits && words == recorded {
+			target = raw
+		}
+	}
+	editor, editable := n.source.(commentEditor)
+	if editable && target != nil {
+		editable = false
+		if comment, err := n.source.ReadComment(target, n.issue); err == nil {
+			if me, err := n.source.Myself(ctx); err == nil && me.ID != 0 && comment.Author.ID == me.ID {
+				editable = true
+			}
+		}
+	}
+	if editable && target != nil {
+		editErr := editor.EditComment(ctx, n.issue, record.Edits, record.Text)
+		if editErr == nil {
+			return true, n.confirm(log, i, record.Edits)
+		}
+		// An answer that did not arrive may still have left the new words.
+		if id, err := n.postedAfter(ctx, record.Text, record.Edits-1); err != nil {
+			return false, errors.Join(editErr, err)
+		} else if id == record.Edits {
+			return true, n.confirm(log, i, id)
+		}
+	}
+	log.Notices[i].Edits = 0
+	return false, n.save(*log)
 }
 
 func (n notices) confirm(log *noticeLog, i int, id int64) error {

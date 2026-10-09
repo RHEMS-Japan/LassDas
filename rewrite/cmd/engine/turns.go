@@ -460,12 +460,15 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 // The requester is told which models the selection chose for a stage while
 // its work is under way: at the stage's first launch that chose one, in the
 // operator's sentence when the stage announces itself and in the runtime's
-// own line when it does not, and at a later launch, after the work came back
-// or a launch did not exit 0, only when its models differ from the ones last
-// said. The same models again are no news.
+// own line when it does not. A later launch after another stage sent the work
+// back is said only when its models differ from the ones last said: the same
+// models again are no news. A launch after the stage's own launch did not end
+// cleanly is always said, with how that one ended, the attempt it is and how
+// many more forced exits pause the request; while the stage keeps failing,
+// each such launch rewrites the comment of the one before it.
 const (
 	declaredBegins = "を始めます。選定モデル: "
-	declaredAgain  = "をやり直します。選定モデル: "
+	rerunPrefix    = "rerun:"
 )
 
 // declareModels says, on a tick of a running request, the models of each
@@ -528,7 +531,13 @@ func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory
 		}
 		models := declaredModels(latest.Models)
 		last, told := declared(log, role.Name, sentence, record)
-		if told && last == models {
+		// The same models again are no news after another stage ran, which
+		// a launch of another role in between shows without the history.
+		// After the stage's own launch they are, once for each launch.
+		if told && last == models && !adjacentLaunches(record, role.Name) {
+			continue
+		}
+		if said := lastDeclaration(log, role.Name); said != nil && said.Event == rerunPrefix+strconv.Itoa(latest.Launch) {
 			continue
 		}
 		name, known := stagename.Japanese(role.Name)
@@ -546,18 +555,160 @@ func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory
 			}
 			again = slices.ContainsFunc(before, func(result chain.Result) bool { return result.Role == role.Name })
 		}
-		text := name + declaredBegins + models
+		text, event, sameStage := name+declaredBegins+models, "", false
 		if again {
-			text = name + declaredAgain + models
+			before := saved()
+			if latest.Launch < len(before) {
+				before = before[:latest.Launch]
+			}
+			text, sameStage = rerunNoticeText(cfg, directory, role.Name, before, models)
+			event = rerunPrefix + strconv.Itoa(latest.Launch)
 		}
-		due := func(log noticeLog) bool {
-			last, told := declared(log, role.Name, sentence, record)
-			return !told || last != models
+		compose := func(log noticeLog, _ time.Time) (noticeRecord, bool) {
+			said := noticeRecord{Kind: declarePrefix + role.Name, Text: text, Models: models, Event: event}
+			last := lastDeclaration(log, role.Name)
+			if sameStage {
+				if last != nil && last.Event == event {
+					return said, false
+				}
+				if last != nil && last.PostedAt != nil && !last.Predates && last.CommentID > 0 && sameFailures(saved(), role.Name, last.Event, latest.Launch) {
+					said.Edits = last.CommentID
+				}
+				return said, true
+			}
+			told, known := declared(log, role.Name, sentence, record)
+			return said, !known || told != models
 		}
-		if err := notice.declare(ctx, role.Name, text, models, latest.At, due); err != nil {
+		if err := notice.sayAs(ctx, declarePrefix+role.Name, event, latest.At, compose); err != nil {
 			observe("the models chosen for " + role.Name + " were not declared: " + err.Error())
 		}
 	}
+}
+
+// adjacentLaunches reports that no other role chose a model for a launch
+// between the role's two latest kept launches, so the latest may follow the
+// stage's own launch. A role with one launch kept follows none of its own.
+func adjacentLaunches(record chosenRecord, role string) bool {
+	launches := record.Launches[role]
+	if len(launches) < 2 {
+		return false
+	}
+	previous, latest := launches[len(launches)-2].Launch, launches[len(launches)-1].Launch
+	for other, kept := range record.Launches {
+		if other == role {
+			continue
+		}
+		for _, launch := range kept {
+			if launch.Launch > previous && launch.Launch < latest {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// lastDeclaration is the role's latest declaration in the record, if any.
+func lastDeclaration(log noticeLog, role string) *noticeRecord {
+	for i := len(log.Notices) - 1; i >= 0; i-- {
+		if log.Notices[i].Kind == declarePrefix+role {
+			return &log.Notices[i]
+		}
+	}
+	return nil
+}
+
+// sameFailures reports that the rerun a declaration was said for and the
+// launch now beginning belong to one run of failures of the role: between
+// them the history holds the role's own records and the runtime's routing
+// notes only, so no other stage ran and the requester said nothing.
+func sameFailures(history []chain.Result, role, event string, launch int) bool {
+	earlier, err := strconv.Atoi(strings.TrimPrefix(event, rerunPrefix))
+	if !strings.HasPrefix(event, rerunPrefix) || err != nil || earlier < 0 || earlier >= launch || launch > len(history) {
+		return false
+	}
+	for _, record := range history[earlier:launch] {
+		if record.Speaker == "requester" || record.Role != role && record.Role != "router" {
+			return false
+		}
+	}
+	return true
+}
+
+// rerunNoticeText says a rerun in the requester's words: how the launch
+// before it ended, when it did not end cleanly; which attempt this is when
+// it follows the stage's own failed or cut-off launch; how many more forced
+// exits pause the request, when the launch before was one; and the models
+// last. sameStage reports a rerun after the stage's own launch.
+func rerunNoticeText(cfg config, directory, role string, before []chain.Result, models string) (string, bool) {
+	name := japaneseStage(role)
+	ending, ended := chain.State{History: before}.LastEnding()
+	if !ended {
+		return name + "をやり直します。（モデル: " + models + "）", false
+	}
+	sameStage := ending.Role == role
+	var text strings.Builder
+	text.WriteString(endingText(cfg, ending))
+	if !sameStage {
+		text.WriteString(name + "をやり直します。")
+	} else {
+		fmt.Fprintf(&text, "%sをやり直します（%d 回目）。", name, ending.Attempt+1)
+		if ending.Forced {
+			text.WriteString(forcedExitsLeft(directory, role))
+		}
+	}
+	text.WriteString("（モデル: " + models + "）")
+	return text.String(), sameStage
+}
+
+// endingText is how a launch that did not end cleanly ended, from what the
+// runtime recorded of it and never from what a role wrote.
+func endingText(cfg config, ending chain.Ending) string {
+	name := japaneseStage(ending.Role)
+	if stage, known := orderedStage(cfg, ending.Role); known && stage.Kind == chain.CommandStage && !ending.Interrupted {
+		return name + "が通りませんでした。"
+	}
+	switch {
+	case ending.Forced:
+		return "前の回は" + name + "の途中で処理が強制終了しました（メモリ不足の可能性があります）。"
+	case ending.Interrupted:
+		return "前の回は" + name + "の途中で本体が止まりました。"
+	case ending.TimedOut:
+		return "前の回は" + name + "が時間の上限に達して止まりました。"
+	case ending.NoModel:
+		return "前の回は" + name + "のモデルを選べませんでした（モデルの API が使えなかった可能性があります）。"
+	case ending.RepeatedFailures > 0:
+		return fmt.Sprintf("前の回は%sの役が同じ操作に %d 回続けて失敗し、自分で止まりました。", name, ending.RepeatedFailures)
+	case ending.Attempt > 1:
+		return fmt.Sprintf("%sの役が %d 回続けてエラーで終わりました。", name, ending.Attempt)
+	}
+	return "前の回は" + name + "の役がエラーで終わりました。"
+}
+
+// forcedExitsLeft says how many more forced exits pause the request, as its
+// saved limits count them: in a row at one stage for a request without a time
+// limit, all of them for one with it. A record that cannot be read says
+// nothing rather than a number it does not know.
+func forcedExitsLeft(directory, role string) string {
+	record, err := readWorkLimit(directory)
+	if err != nil {
+		return ""
+	}
+	if clock := record.Clock; clock != nil {
+		if left := clock.MaxHardExits - clock.HardExits; left > 0 {
+			return fmt.Sprintf("強制終了があと %d 回起きたら一時停止して相談します。", left)
+		}
+		return ""
+	}
+	if exits := record.StageExits; exits != nil && exits.Max > 0 {
+		counted := 0
+		if exits.Stage == role {
+			counted = exits.Count
+		}
+		if left := exits.Max - counted; left > 0 {
+			return fmt.Sprintf("強制終了があと %d 回続いたら一時停止して相談します。", left)
+		}
+	}
+	return ""
 }
 
 // declared reports which models the requester was last told a launch of the
