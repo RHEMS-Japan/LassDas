@@ -615,6 +615,20 @@ owner resolve the intended access; do not disable the rules as a test shortcut.
 
 ### Requests running side by side
 
+When a reply resumes an ordered request still at its entrance, its next role
+uses the latest configured integration branch if the prepared checkout has no
+edits, local commits or untracked files and no later stage has run. A successful
+update records the previous and new HEAD in the role's history. An unavailable
+source leaves the original checkout usable and records the reason.
+Replacement is prepared away from the original;
+a failed checkout leaves the old files together. The directory exchange is
+atomic on supported Linux/macOS filesystems; if unavailable, the old checkout
+stays in use and the reason is recorded. Once work
+has started, the wrapper never updates that request's checkout; later upstream
+changes are handled at delivery as described below. See the README's
+[workspace preparation](../../rewrite/README.md#optional-git-workspace-preparation)
+for the conditions and limits.
+
 With `intake.max_running` above 1, two requests can start from the same
 integration branch, and the second to deliver finds the branch moved. Under
 the merge method, and with the merge left to a person, the delivery first

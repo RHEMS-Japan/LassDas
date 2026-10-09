@@ -134,6 +134,161 @@ os.execv(os.environ['TEST_REAL_GIT'], [os.environ['TEST_REAL_GIT'], *sys.argv[1:
         self.assertEqual(out, "Create the initial project.\n")
         self.assertEqual((workspace / "entry.txt").read_text(), "first implementation")
 
+    def answered_history(self, workspace, worked=False):
+        path = workspace.parent / "history.json"
+        history = [{"role": "understand", "speaker": "agent", "output": "needs an answer"},
+                   {"role": "question", "speaker": "agent", "output": "which option?"}]
+        if worked:
+            # A clean tree does not mean no work was attempted, even when the
+            # runtime only has a record that a launch was interrupted.
+            history.append({"role": "implement", "speaker": "runtime", "error": "interrupted"})
+        history.append({"role": "question", "speaker": "requester", "output": "recommended"})
+        path.write_text(json.dumps({"workflow": {"stages": [{"name": "understand", "kind": "model"},
+                                                          {"name": "implement", "kind": "model"}],
+                                               "question": "question"},
+                                    "history": history, "pending": {"role": "understand"}}))
+        return {"TASK_HISTORY": str(path)}
+
+    def advance_source(self):
+        (self.source / "entry.txt").write_text("new upstream\n")
+        self.commit("upstream advanced while waiting")
+        return self.git(self.source, "rev-parse", "HEAD").stdout.strip()
+
+    def test_answer_before_work_refreshes_head_and_records_it_once(self):
+        workspace = self.workspace("answered")
+        self.assertEqual(self.run_launcher(workspace)[0], 0)
+        latest = self.advance_source()
+        environment = self.answered_history(workspace)
+        child = self.start(workspace, environment, CHILD +
+                           ";import subprocess;print(subprocess.check_output(['git','show','HEAD:entry.txt'],text=True),end='')")
+        out, err = child.communicate("request", timeout=15)
+        self.assertEqual(child.returncode, 0, err)
+        self.assertEqual(json.loads(out.splitlines()[0])["body"], "new upstream\n")
+        self.assertEqual(out.splitlines()[-1], "new upstream", "verification reads the refreshed HEAD")
+        self.assertEqual(self.git(workspace, "rev-parse", "HEAD").stdout.strip(), latest)
+        notice = "Workspace updated from " + self.original_head + " to " + latest
+        self.assertEqual(err.count(notice), 1)
+        self.assertNotIn("Workspace updated", self.run_launcher(workspace, environment)[2])
+
+    def test_answer_preserves_started_dirty_committed_and_untracked_work(self):
+        for change in ("started", "dirty", "committed", "untracked", "git-config"):
+            with self.subTest(change=change):
+                workspace = self.workspace(change)
+                self.assertEqual(self.run_launcher(workspace)[0], 0)
+                if change in ("dirty", "committed"):
+                    (workspace / "entry.txt").write_text("local work\n")
+                if change == "committed":
+                    self.git(workspace, "add", "entry.txt")
+                    self.git(workspace, "commit", "-m", "Codex: fixture work")
+                if change == "untracked":
+                    (workspace / "notes.txt").write_text("unfinished notes")
+                if change == "git-config":
+                    self.git(workspace, "config", "core.fsmonitor", str(self.root / "must-not-run"))
+                original = self.git(workspace, "rev-parse", "HEAD").stdout
+                before = (workspace / "entry.txt").read_text()
+                (self.source / "entry.txt").write_text("upstream for " + change)
+                self.commit("next source")
+                code, out, err = self.run_launcher(workspace, self.answered_history(workspace, change == "started"))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(json.loads(out)["body"], before)
+                self.assertEqual(self.git(workspace, "rev-parse", "HEAD").stdout, original)
+                self.assertNotIn("Workspace updated", err)
+                self.assertNotIn("must-not-run", err)
+                if change == "untracked":
+                    self.assertEqual((workspace / "notes.txt").read_text(), "unfinished notes")
+
+    def test_refresh_fetch_failure_keeps_work_and_explains_why(self):
+        workspace = self.workspace("fetch-failed")
+        self.assertEqual(self.run_launcher(workspace)[0], 0)
+        environment = self.answered_history(workspace)
+        self.source.rename(self.root / "source-offline")
+        code, out, err = self.run_launcher(workspace, environment)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["body"], "original\n")
+        self.assertEqual(self.git(workspace, "rev-parse", "HEAD").stdout.strip(), self.original_head)
+        self.assertIn("Workspace refresh could not fetch", err)
+        self.assertIn("does not appear to be a git repository", err)
+
+    def test_answer_with_unchanged_upstream_is_silent(self):
+        workspace = self.workspace("unchanged")
+        self.assertEqual(self.run_launcher(workspace)[0], 0)
+        code, out, err = self.run_launcher(workspace, self.answered_history(workspace))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["body"], "original\n")
+        self.assertEqual(self.git(workspace, "rev-parse", "HEAD").stdout.strip(), self.original_head)
+        self.assertEqual(err, "")
+
+    def test_a_partially_written_refresh_keeps_the_whole_original_checkout(self):
+        # Real Git can exit zero while unable to replace a tracked file.
+        (self.source / "blocked").mkdir()
+        (self.source / "blocked/other.txt").write_text("original other\n")
+        self.git(self.source, "add", "blocked/other.txt")
+        self.commit("two original files")
+        workspace = self.workspace("failed-refresh")
+        self.assertEqual(self.run_launcher(workspace)[0], 0)
+        original = self.git(workspace, "rev-parse", "HEAD").stdout
+        (self.source / "blocked/other.txt").write_text("updated other\n")
+        self.git(self.source, "add", "blocked/other.txt")
+        self.advance_source()
+        blocked = workspace / "blocked"
+        blocked.chmod(0o500)
+        try:
+            code, out, err = self.run_launcher(workspace, self.answered_history(workspace))
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(out)["body"], "original\n")
+            self.assertEqual((blocked / "other.txt").read_text(), "original other\n")
+            self.assertEqual(self.git(workspace, "rev-parse", "HEAD").stdout, original)
+            self.assertEqual(self.git(workspace, "status", "--porcelain").stdout, "")
+            self.assertIn("Workspace refresh", err)
+            self.assertIn("original checkout", err)
+            self.assertNotIn("Workspace updated", err)
+        finally:
+            blocked.chmod(0o700)
+
+    def test_refresh_interrupted_at_exchange_recovers_before_the_role(self):
+        import importlib.util
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("workspace_refresh", LAUNCHER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for cut in (1, 2):
+            with self.subTest(exchange_boundary=cut):
+                (self.source / "entry.txt").write_text("before cut " + str(cut) + "\n")
+                self.commit("starting point for interruption")
+                workspace = self.workspace("refresh-cut-" + str(cut))
+                self.assertEqual(self.run_launcher(workspace)[0], 0)
+                before = (workspace / "entry.txt").read_text()
+                self.advance_source()
+                environment = self.answered_history(workspace)
+                real_exchange = getattr(module, "exchange_directories", None)
+                real_replace = os.replace
+                moves = []
+
+                def observe_replace(source, target):
+                    result = real_replace(source, target)
+                    self.assertTrue(workspace.is_dir(), "replacement made the workspace path disappear")
+                    return result
+
+                def interrupt(source, target):
+                    moves.append((source, target))
+                    if cut == 2:
+                        real_exchange(source, target)
+                    raise KeyboardInterrupt("simulated hard stop at directory exchange")
+
+                with patch.dict(os.environ, dict(self.env, **environment), clear=True), \
+                        patch.object(module, "exchange_directories", side_effect=interrupt, create=True), \
+                        patch.object(module.os, "replace", side_effect=observe_replace):
+                    with self.assertRaises(KeyboardInterrupt):
+                        module.prepare(workspace, str(self.source))
+                self.assertEqual(len(moves), 1)
+                self.assertTrue(workspace.is_dir(), "a restart must be able to enter its working directory")
+                code, out, err = self.run_launcher(workspace, environment)
+                self.assertEqual(code, 0, err)
+                expected = before if cut == 1 else "new upstream\n"
+                self.assertEqual(json.loads(out)["body"], expected)
+                self.assertEqual(self.git(workspace, "status", "--porcelain").stdout, "")
+                self.assertIn("Workspace refresh recovered", err)
+
     def test_separate_requests_get_independent_work_and_new_source_tip(self):
         first, second = self.workspace("first"), self.workspace("second")
         self.assertEqual(self.run_launcher(first)[0], 0)
