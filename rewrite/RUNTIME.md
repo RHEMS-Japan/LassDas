@@ -107,33 +107,70 @@ A role's processes share the controller's container, and so its memory limit.
 On cgroup v2 the kubelet (1.28 and later, unless `singleProcessOOMKill` is set)
 asks the kernel to stop every process of a container once it runs out of
 memory, so a role's build that outgrows the limit used to stop the controller
-too, and the restarted controller ran the same stage again. When the launcher
-can read a limit for its container (`memory.max` in `/sys/fs/cgroup`, which a
-container on cgroup v2 with its own cgroup namespace sees as its own):
+too, and the restarted controller ran the same stage again.
 
-- it stays as bubblewrap's parent and five times a second reads the
-  container's memory in use, leaving out file cache, which the kernel drops
-  before it stops anything. Once less than the headroom is left, it stops the
-  largest role process in the container if that process is its role's, and
-  writes one line on the role's standard error naming the process and the
-  memory in use. That line is part of the record and of what the next role
-  reads. Concurrent roles' launchers agree on the same process. The role's
-  other processes continue: a build tool sees its compiler stopped, a model's
-  terminal sees a killed command. The launcher ends as bubblewrap ended;
-- no single role process may allocate more than the limit less the headroom
-  (`RLIMIT_DATA`), so one fast allocation cannot pass between two looks.
+When the launcher finds a memory limit for its own cgroup (the `0::` line of
+`/proc/self/cgroup` under `/sys/fs/cgroup`, with or without a cgroup namespace
+of its own), it stays as bubblewrap's parent and guards the role:
 
-Every role process gets `oom_score_adj` 1000 in any case, so where the kernel
-stops one process at a time (Docker, cgroup v1, a kubelet with
-`singleProcessOOMKill`, a node without a container limit) it stops a role's
-first. The headroom is `--memory-headroom MIB`; unset, it is an eighth of the
-limit and at least 512 MiB (768 MiB of 6 GiB).
+- Ten times a second it reads the container's memory in use, leaving out what
+  the kernel takes back before it stops any process: file cache
+  (`active_file`, `inactive_file`) and reclaimable kernel caches
+  (`slab_reclaimable`, the directory and inode entries a checkout or build
+  leaves behind). Anonymous and shared memory, kernel stacks, page tables and
+  unreclaimable kernel memory stay in.
+- Once less than the headroom is left, it stops (SIGKILL) the largest role
+  process in the container if that process is its role's. Concurrent roles'
+  launchers agree on the same process. The role's other processes continue:
+  a build tool sees its compiler stopped, a model's terminal sees a killed
+  command, and the role decides what to do next.
+- It writes one line naming the process, its size, the role's total and the
+  memory in use: on the launcher's standard error, which is the role's record,
+  and, when the stopped process's own standard error is a pipe or a terminal
+  other than that, there too, so the tool that started it shows why it ended
+  (a file is never written to, and a full pipe is skipped). The next role's
+  prompt carries only the last 4,000 characters of a record's diagnostics, so
+  a role that writes much after the stop can push the line out of that prompt;
+  the record keeps it.
+- When the anonymous memory outside every role's processes (the controller's,
+  for example) is over the threshold by itself, stopping role processes would
+  not bring the use back under: it stops none, and says so once.
+- A stop signal sent to the launcher is passed on to bubblewrap, and the
+  launcher waits for bubblewrap and the sandbox's first process before it ends
+  by the same signal, so a cancelled role leaves no process for the controller
+  to collect. Only a SIGKILL to the launcher alone, which it cannot handle,
+  leaves bubblewrap and that process behind.
 
-The guard looks and stops; it reserves nothing. It is not a limit per role:
-concurrent roles share the container's. Several processes that together grow
-by more than the headroom within a fifth of a second, or memory no process
-holds (a role's `/tmp` is in memory), can still reach the limit; each look then
-stops the next largest role process, at worst the role's own command. How many
+The headroom is `--memory-headroom MIB`; unset, it is an eighth of the limit
+and at least 512 MiB (768 MiB of 6 GiB). A role can use at most the limit less
+the headroom, while the controller's own memory counts against the same limit.
+
+When the guard cannot run, the launcher says so on the role's standard error,
+`(launcher) The memory guard is off for this role: <reason>.`, and starts the
+role as before: no cgroup v2 line, a cgroup whose memory files cannot be read,
+or a limit too small for the headroom. A container without a limit (`max`)
+has nothing to guard and says nothing.
+
+Where the kernel stops one process at a time (Docker, cgroup v1, a kubelet
+with `singleProcessOOMKill`), every role process gets `oom_score_adj` 1000, so
+the kernel stops a role's process first. Where the container's cgroup has
+`memory.oom.group` set, the role keeps the controller's score: a higher one
+would only make the whole container the node's first choice when the node
+runs short of memory.
+
+The guard looks and stops; it reserves nothing and is not a limit per process
+or per role. Two kinds of growth can still reach the limit between two looks:
+several processes that together grow by more than the headroom within a tenth
+of a second (two processes allocating 128 MiB blocks at full speed did, three
+times out of three, in a 2 GiB container with the 512 MiB headroom), and memory no process holds
+(a role's `/tmp` is in memory), which goes only when the role ends; each look
+then stops the next largest role process, at worst the role's own command.
+
+No per-process limit (`RLIMIT_DATA` or `RLIMIT_AS`) is set. Both count address
+space a program reserves without using: under `RLIMIT_DATA` at the limit less
+the headroom, programs built with AddressSanitizer and ThreadSanitizer failed
+to start (they reserve their shadow memory that way), and under `RLIMIT_AS`
+even of 8 GiB, so did Node.js with WebAssembly and Chromium. How many
 compilers a build runs at once is the role's own environment setting (for
 example `CARGO_BUILD_JOBS` for Cargo), not something the launcher sets.
 

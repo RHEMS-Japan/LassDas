@@ -14,7 +14,10 @@
 # failed on "loopback: Failed RTM_NEWADDR"), and the container has no network.
 # On a runner whose kernel.apparmor_restrict_unprivileged_userns is 1, the
 # uid map write fails ("setting up uid map: Permission denied") whatever the
-# container's settings; the workflows set that sysctl to 0 first.
+# container's settings; the workflows set that sysctl to 0 first. The
+# container has a memory limit, as the engine's has in a cluster, so the
+# launcher runs the build under its memory guard (check-role-memory-guard.sh
+# checks the guard itself); a launch without the guard fails this check.
 #
 # Usage: bash .github/scripts/check-role-sandbox.sh IMAGE
 # image-check.yml runs it on every pull request; image.yml runs it after the
@@ -27,7 +30,7 @@ fi
 crate="$(cd "$(dirname "$0")/rust-toolchain-check" && pwd)" || exit 1
 status=0
 output="$(docker run --rm --network none --platform linux/arm64 --read-only --tmpfs /tmp:rw,exec,nosuid,size=2g \
-  --cap-drop ALL --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
+  --memory 4g --memory-swap 4g --cap-drop ALL --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
   -v "$crate:/work:ro" --workdir /work --entrypoint /usr/bin/env "$1" -i \
   PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin TASK_WORKSPACE=/work TASK_HOME=/tmp/home \
   bash -c 'set -euo pipefail
@@ -37,6 +40,10 @@ output="$(docker run --rm --network none --platform linux/arm64 --read-only --tm
 printf 'exit status %s\n%s\n' "$status" "$output"
 if [ "$status" -ne 0 ]; then
   echo "::error::a role inside the image could not build and test the small crate"
+  exit 1
+fi
+if grep -q 'The memory guard is off' <<<"$output"; then
+  echo "::error::the launcher ran without its memory guard in a container with a memory limit"
   exit 1
 fi
 for line in "test tests::adds ... ok" "test src/lib.rs - add (line 6) ... ok"; do

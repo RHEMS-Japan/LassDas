@@ -6,9 +6,9 @@ and requires the outer runtime's egress policy; this is not a network firewall.
 """
 import argparse
 from collections import namedtuple
+import ctypes
 import os
 from pathlib import Path, PurePosixPath
-import resource
 import shutil
 import signal
 import stat
@@ -21,12 +21,19 @@ import time
 # leaves those programs dangling (rustc found no `cc` in a role).
 ALTERNATIVES = Path("/etc/alternatives")
 
-# The container's own memory accounting. A container on cgroup v2 with its own
-# cgroup namespace sees its cgroup here; without one, or without a limit,
-# there is nothing for the memory guard below to keep the role under.
+# The container's own memory accounting: cgroup v2, mounted here, the
+# process's own cgroup named in /proc/self/cgroup ("0::/" with a cgroup
+# namespace of its own, the full path without one).
 CGROUP = Path("/sys/fs/cgroup")
 PROC = Path("/proc")
 MIB = 1 << 20
+# What the kernel takes back before it stops any process: file cache and the
+# reclaimable kernel caches (directory and inode entries). It stays out of the
+# memory the guard counts as in use.
+RECLAIMABLE = ("active_file", "inactive_file", "slab_reclaimable")
+# Signals the controller sends to stop a role. The launcher passes them on to
+# bubblewrap and waits for it, so it is not left for the controller to collect.
+PASSED_ON = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
 
 def absolute(value):
@@ -191,39 +198,64 @@ def command(args, environment):
         raise
 
 
-def container_memory(cgroup=None):
-    """The container's memory limit and the part of its use the kernel cannot
-    drop, in bytes, or None when there is no limit or no cgroup v2 to read.
-
-    File cache is left out: the kernel reclaims it before it stops anything.
-    Anonymous memory, shared memory (a role's private /tmp is one) and kernel
-    memory stay in."""
+def own_cgroup(cgroup=None, proc=None):
+    """This process's cgroup v2 directory and None, or None and the reason
+    there is none to read."""
     cgroup = CGROUP if cgroup is None else cgroup
+    proc = PROC if proc is None else proc
     try:
-        limit = (cgroup / "memory.max").read_text().strip()
-        if limit == "max":
-            return None
-        current = int((cgroup / "memory.current").read_text())
-        stat = dict(line.split(None, 1) for line in (cgroup / "memory.stat").read_text().splitlines() if line.strip())
-        cache = int(stat.get("active_file", 0)) + int(stat.get("inactive_file", 0))
-        return int(limit), current - cache
-    except (OSError, ValueError):
-        return None
+        lines = (proc / "self" / "cgroup").read_text().splitlines()
+    except OSError as error:
+        return None, "%s could not be read (%s)" % (proc / "self" / "cgroup", error.strerror)
+    for line in lines:
+        if line.startswith("0::"):
+            return cgroup / line[3:].lstrip("/"), None
+    return None, "this process is in no cgroup v2 hierarchy (%s has no 0:: line)" % (proc / "self" / "cgroup")
 
 
-def memory_threshold(headroom_mib, cgroup=None):
-    """The use at which the guard stops a role process, or None without a limit.
+def memory_reading(directory):
+    """The cgroup's memory in use, less what the kernel reclaims before it
+    stops a process, and the anonymous memory in it. Anonymous and shared
+    memory (a role's /tmp is shared memory), kernel stacks, page tables and
+    unreclaimable kernel memory stay in."""
+    current = int((directory / "memory.current").read_text())
+    stat = dict(line.split(None, 1) for line in (directory / "memory.stat").read_text().splitlines() if line.strip())
+    return current - sum(int(stat.get(name, 0)) for name in RECLAIMABLE), int(stat["anon"])
 
-    The headroom is kept for the controller and the processes that are not a
-    role's. Unset, it is an eighth of the limit and at least 512 MiB."""
-    usage = container_memory(cgroup)
-    if usage is None:
-        return None
-    limit = usage[0]
+
+def memory_in_use(directory):
+    return memory_reading(directory)[0]
+
+
+Limits = namedtuple("Limits", "directory limit threshold")
+
+
+def memory_guard(directory, headroom_mib):
+    """Limits when the guard can run; otherwise None and the reason it cannot,
+    which is None when there is no limit to keep under."""
+    try:
+        text = (directory / "memory.max").read_text().strip()
+        if text == "max":
+            return None, None
+        limit = int(text)
+        memory_in_use(directory)
+    except (OSError, ValueError, KeyError) as error:
+        return None, "the container's memory use could not be read in %s (%s)" % (
+            directory, getattr(error, "strerror", None) or error)
     headroom = max(512 * MIB, limit // 8) if headroom_mib is None else headroom_mib * MIB
-    if headroom <= 0 or headroom >= limit:
-        raise ValueError("The memory headroom must be above zero and below the container's memory limit")
-    return limit - headroom
+    if not 0 < headroom < limit:
+        return None, "a headroom of %d MiB does not fit under the container's memory limit of %d MiB" % (
+            headroom // MIB, limit // MIB)
+    return Limits(directory, limit, limit - headroom), None
+
+
+def kills_the_whole_container(directory):
+    """Whether the kernel stops every process of this cgroup together once one
+    is chosen (the kubelet sets this on cgroup v2)."""
+    try:
+        return directory is not None and (directory / "memory.oom.group").read_text().strip() == "1"
+    except OSError:
+        return False
 
 
 Process = namedtuple("Process", "parent name anon uid nested")
@@ -284,46 +316,122 @@ def victim(table, root, uid):
     return largest if largest in descendants(table, root) else None
 
 
-def guard(root, threshold, report, alive, *, pause=time.sleep, cgroup=None, proc=None, interval=0.2, settle=1.0):
+def printable(text):
+    return "".join(character if character.isprintable() else "?" for character in text)
+
+
+def tell(pid, text, proc=None):
+    """Write text to a process's standard error before it is stopped, when that
+    is a pipe or a terminal: the tool that started it (a build tool, a model's
+    terminal) then shows why it ended. Never a file: the role's own files are
+    not written to. Never waits: a full pipe or one without a reader is skipped.
+    Not the launcher's own standard error either, which gets the line anyway."""
+    proc = PROC if proc is None else proc
+    path = os.path.join(proc, str(pid), "fd", "2")
+    try:
+        target = os.stat(path)
+        if not (stat.S_ISFIFO(target.st_mode) or stat.S_ISCHR(target.st_mode)):
+            return
+        try:
+            own = os.fstat(2)
+            if (own.st_dev, own.st_ino) == (target.st_dev, target.st_ino):
+                return
+        except OSError:
+            pass
+        descriptor = os.open(path, os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+    except OSError:
+        return
+    try:
+        os.write(descriptor, text.encode("utf-8", "replace"))
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=0.1, settle=1.0):
     """Stop the role's largest process while the container's use is at or
     over the threshold, before the kernel's out-of-memory handling can stop
     the whole container (the kubelet asks for that on cgroup v2) and the
-    controller with it. A stopped process is reported on report."""
+    controller with it. A stopped process is told why on its standard error,
+    and the same line goes to report (the role's record)."""
     uid = os.getuid()
+    current = limits.directory / "memory.current"
+    said = False
     while alive():
-        usage = container_memory(cgroup)
-        if usage is not None and usage[1] >= threshold:
-            table = processes(proc)
-            pid = victim(table, root, uid)
-            if pid is not None:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                else:
-                    report.write("(launcher) Stopped %s (pid %d, %d MiB resident) because this container's memory "
-                                 "in use reached %d of %d MiB. The launcher stops a role's largest process before "
-                                 "the kernel would stop the whole container; the role's other processes continue.\n"
-                                 % (table[pid].name, pid, table[pid].anon // MIB, usage[1] // MIB, usage[0] // MIB))
-                    report.flush()
+        # memory.current bounds the use from above; the full reading is needed only near the threshold.
+        if int(current.read_text()) >= limits.threshold:
+            used, anon = memory_reading(limits.directory)
+            if used >= limits.threshold:
+                table = processes(proc)
+                outside = anon - sum(process.anon for process in table.values() if process.nested and process.uid == uid)
+                if outside >= limits.threshold:
+                    # The controller, or another process outside every role, holds that much
+                    # by itself: stopping role processes would not bring the use back under.
+                    if not said:
+                        report.write("(launcher) This container's memory in use reached %d of %d MiB, %d MiB of it "
+                                     "anonymous memory outside every role's processes; no role process was stopped.\n"
+                                     % (used // MIB, limits.limit // MIB, outside // MIB))
+                        report.flush()
+                        said = True
                     pause(settle)
                     continue
+                pid = victim(table, root, uid)
+                if pid is not None:
+                    own = sum(table[other].anon for other in descendants(table, root) if table[other].nested)
+                    line = ("(launcher) Stopped %s (pid %d, %d MiB resident; this role's processes %d MiB in all) "
+                            "because this container's memory in use, file and reclaimable kernel caches left out, "
+                            "reached %d of %d MiB. The launcher stops a role's largest process before the kernel "
+                            "would stop the whole container; the role's other processes continue.\n"
+                            % (printable(table[pid].name), pid, table[pid].anon // MIB, own // MIB,
+                               used // MIB, limits.limit // MIB))
+                    tell(pid, line, proc)
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    else:
+                        report.write(line)
+                        report.flush()
+                        pause(settle)
+                        continue
         pause(interval)
 
 
-def supervise(argv, environment, descriptors, threshold):
+def collect_children(seconds):
+    """Collect the children left once bubblewrap has ended (the sandbox's
+    first process, when bubblewrap ended before it), for up to seconds."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            signal.sigtimedwait({signal.SIGCHLD}, min(remaining, 0.1))
+
+
+def supervise(argv, environment, descriptors, limits, kill_together):
     """Run bubblewrap as this process's child and guard the role while it runs.
 
-    The launcher ends as bubblewrap ended, with its exit status or its signal,
-    and leaves no process behind for the controller to collect. A signal the
-    controller sends the launcher's process group reaches bubblewrap as it
-    did before; bubblewrap also ends with this process (--die-with-parent)."""
-    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
+    The launcher ends as bubblewrap ended, with its exit status or its signal.
+    A stop signal sent to the launcher is passed on to bubblewrap, and the
+    launcher waits for it, so neither is left behind for the controller to
+    collect; bubblewrap also ends with this process (--die-with-parent)."""
+    held = {signal.SIGCHLD, *PASSED_ON}
+    signal.pthread_sigmask(signal.SIG_BLOCK, held)
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+    except (OSError, AttributeError):
+        pass
     child = os.fork()
     if child == 0:
         try:
-            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
-            contain(threshold)
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, held)
+            contain(kill_together)
             for descriptor in descriptors:
                 os.set_inheritable(descriptor, True)
             os.execve(argv[0], argv, environment)
@@ -331,6 +439,16 @@ def supervise(argv, environment, descriptors, threshold):
             print("(launcher) bubblewrap could not be started: %s" % error, file=sys.stderr, flush=True)
         finally:
             os._exit(127)
+
+    def pass_on(number, _frame):
+        try:
+            os.kill(child, number)
+        except ProcessLookupError:
+            pass
+
+    for number in PASSED_ON:
+        signal.signal(number, pass_on)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, set(PASSED_ON))
     ended = []
 
     def alive():
@@ -341,14 +459,19 @@ def supervise(argv, environment, descriptors, threshold):
         return not ended
 
     try:
-        guard(child, threshold, sys.stderr, alive, pause=lambda seconds: signal.sigtimedwait({signal.SIGCHLD}, seconds))
+        guard(child, limits, sys.stderr, alive, pause=lambda seconds: signal.sigtimedwait({signal.SIGCHLD}, seconds))
     except Exception as error:
         # A fault of the guard is not a reason to end the role: it runs on unguarded.
         print("(launcher) The memory guard stopped: %s" % error, file=sys.stderr, flush=True)
-    if not ended:
-        ended.append(os.waitpid(child, 0)[1])
+    while not ended:
+        try:
+            ended.append(os.waitpid(child, 0)[1])
+        except InterruptedError:
+            continue
+    collect_children(2)
     if os.WIFSIGNALED(ended[0]):
         number = os.WTERMSIG(ended[0])
+        signal.pthread_sigmask(signal.SIG_BLOCK, set(PASSED_ON))
         try:
             signal.signal(number, signal.SIG_DFL)
         except (OSError, ValueError):
@@ -359,20 +482,19 @@ def supervise(argv, environment, descriptors, threshold):
     return os.WEXITSTATUS(ended[0])
 
 
-def contain(threshold):
-    """Make the role's processes the first the kernel stops for memory, and
-    keep any single one of them under the guard's threshold. The guard sees a
-    process only between its looks; this limit holds at every allocation."""
+def contain(kill_together):
+    """Make the role's processes the first the kernel stops for memory, where it
+    stops one process at a time. Where it stops a whole container together
+    (memory.oom.group), that would only make this container the node's first
+    choice when the node runs short, so the role keeps the controller's score."""
+    if kill_together:
+        return
     try:
         with open("/proc/self/oom_score_adj", "w") as handle:
             handle.write("1000")
     except OSError as error:
         print("(launcher) The role's processes could not be made the first the kernel stops for memory: %s"
               % error.strerror, file=sys.stderr)
-    if threshold is not None:
-        _, hard = resource.getrlimit(resource.RLIMIT_DATA)
-        limit = threshold if hard == resource.RLIM_INFINITY else min(threshold, hard)
-        resource.setrlimit(resource.RLIMIT_DATA, (limit, limit))
 
 
 def main():
@@ -390,10 +512,16 @@ def main():
     try:
         # Without a guard, a role's build that outgrows the container takes the
         # controller down with it, and the restart repeats the same stage.
-        threshold = memory_threshold(args.memory_headroom)
-        if threshold is not None:
-            sys.exit(supervise(argv, environment, descriptors, threshold))
-        contain(None)
+        directory, reason = own_cgroup()
+        limits = None
+        if directory is not None:
+            limits, reason = memory_guard(directory, args.memory_headroom)
+        if reason is not None:
+            print("(launcher) The memory guard is off for this role: %s." % reason, file=sys.stderr, flush=True)
+        kill_together = kills_the_whole_container(directory)
+        if limits is not None:
+            sys.exit(supervise(argv, environment, descriptors, limits, kill_together))
+        contain(kill_together)
         for descriptor in descriptors:
             os.set_inheritable(descriptor, True)
         # Stdin, stdout and stderr pass through. No buffering, output decoding,

@@ -303,39 +303,83 @@ class HistoryIsolationTests(unittest.TestCase):
                     os.close(descriptor)
 
 
-def write_cgroup(directory, limit, current, active_file=0, inactive_file=0):
+def write_cgroup(directory, limit, current, active_file=0, inactive_file=0, slab_reclaimable=0, oom_group=0, anon=None):
     directory.mkdir(exist_ok=True)
     (directory / "memory.max").write_text("%s\n" % limit)
     (directory / "memory.current").write_text("%d\n" % current)
-    (directory / "memory.stat").write_text("anon %d\nfile %d\nactive_file %d\ninactive_file %d\nshmem 0\n"
-                                          % (current - active_file - inactive_file, active_file + inactive_file,
-                                             active_file, inactive_file))
+    (directory / "memory.oom.group").write_text("%d\n" % oom_group)
+    reclaimable = active_file + inactive_file + slab_reclaimable
+    anon = 0 if anon is None else anon  # unless a test says otherwise, no memory is anonymous outside the roles
+    (directory / "memory.stat").write_text(
+        "anon %d\nfile %d\nshmem %d\nactive_file %d\ninactive_file %d\nslab_reclaimable %d\nslab_unreclaimable 0\n"
+        % (anon, active_file + inactive_file, current - reclaimable - anon, active_file, inactive_file, slab_reclaimable))
 
 
 class MemoryAccountingTests(unittest.TestCase):
     """Portable checks of what the memory guard reads and decides."""
 
-    def test_use_leaves_out_file_cache_and_no_limit_means_no_guard(self):
+    def test_the_own_cgroup_is_found_from_the_process_cgroup_line_or_its_absence_is_said(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cgroup, proc = root / "cgroup", root / "proc"
+            (proc / "self").mkdir(parents=True)
+            for line, expected in (("0::/\n", cgroup), ("0::/system.slice/engine.scope\n", cgroup / "system.slice/engine.scope")):
+                (proc / "self" / "cgroup").write_text(line)
+                self.assertEqual(launcher.own_cgroup(cgroup, proc), (expected, None))
+            (proc / "self" / "cgroup").write_text("12:memory:/docker/engine\n1:name=systemd:/docker/engine\n")
+            directory, reason = launcher.own_cgroup(cgroup, proc)
+            self.assertIsNone(directory)
+            self.assertIn("no cgroup v2 hierarchy", reason)
+            (proc / "self" / "cgroup").unlink()
+            directory, reason = launcher.own_cgroup(cgroup, proc)
+            self.assertIsNone(directory)
+            self.assertIn("could not be read", reason)
+
+    def test_use_leaves_out_file_cache_and_reclaimable_kernel_caches(self):
         with tempfile.TemporaryDirectory() as temporary:
             cgroup = Path(temporary) / "cgroup"
-            write_cgroup(cgroup, 6 << 30, 5 << 30, active_file=300 << 20, inactive_file=500 << 20)
-            self.assertEqual(launcher.container_memory(cgroup), (6 << 30, (5 << 30) - (800 << 20)))
-            write_cgroup(cgroup, "max", 5 << 30)
-            self.assertIsNone(launcher.container_memory(cgroup))
-            self.assertIsNone(launcher.memory_threshold(None, cgroup))
-            self.assertIsNone(launcher.container_memory(Path(temporary) / "absent"))
+            write_cgroup(cgroup, 6 << 30, 5 << 30, active_file=300 << 20, inactive_file=500 << 20, slab_reclaimable=653 << 20)
+            self.assertEqual(launcher.memory_in_use(cgroup), (5 << 30) - (1453 << 20))
 
-    def test_the_headroom_is_an_eighth_at_least_512_mib_or_the_operators(self):
+    def test_the_guard_is_on_with_a_limit_and_off_with_a_reason_otherwise(self):
         with tempfile.TemporaryDirectory() as temporary:
             cgroup = Path(temporary) / "cgroup"
             write_cgroup(cgroup, 6 << 30, 1 << 30)
-            self.assertEqual(launcher.memory_threshold(None, cgroup), (6 << 30) - (768 << 20))
-            self.assertEqual(launcher.memory_threshold(1024, cgroup), 5 << 30)
-            for headroom in (0, -1, 6 << 10, 7 << 10):
-                with self.subTest(headroom=headroom), self.assertRaisesRegex(ValueError, "headroom"):
-                    launcher.memory_threshold(headroom, cgroup)
+            self.assertEqual(launcher.memory_guard(cgroup, None), (launcher.Limits(cgroup, 6 << 30, (6 << 30) - (768 << 20)), None))
+            self.assertEqual(launcher.memory_guard(cgroup, 1024), (launcher.Limits(cgroup, 6 << 30, 5 << 30), None))
             write_cgroup(cgroup, 2 << 30, 1 << 30)
-            self.assertEqual(launcher.memory_threshold(None, cgroup), (2 << 30) - (512 << 20))
+            self.assertEqual(launcher.memory_guard(cgroup, None)[0].threshold, (2 << 30) - (512 << 20))
+            # No limit: nothing to keep under, and nothing to say.
+            write_cgroup(cgroup, "max", 1 << 30)
+            self.assertEqual(launcher.memory_guard(cgroup, None), (None, None))
+            # A limit too small for the headroom, or a headroom that does not fit: off, with the reason.
+            for limit, headroom in ((512 << 20, None), (256 << 20, None), (6 << 30, 0), (6 << 30, -1), (6 << 30, 6 << 10)):
+                write_cgroup(cgroup, limit, 1 << 20)
+                with self.subTest(limit=limit, headroom=headroom):
+                    limits, reason = launcher.memory_guard(cgroup, headroom)
+                    self.assertIsNone(limits)
+                    self.assertIn("does not fit under the container's memory limit", reason)
+            # Nothing readable there.
+            for name in ("memory.max", "memory.stat"):
+                write_cgroup(cgroup, 6 << 30, 1 << 30)
+                (cgroup / name).unlink()
+                with self.subTest(missing=name):
+                    limits, reason = launcher.memory_guard(cgroup, None)
+                    self.assertIsNone(limits)
+                    self.assertIn("could not be read", reason)
+            limits, reason = launcher.memory_guard(Path(temporary) / "absent", None)
+            self.assertIsNone(limits)
+            self.assertIn("could not be read", reason)
+
+    def test_the_whole_container_is_stopped_together_only_where_its_cgroup_says_so(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            cgroup = Path(temporary) / "cgroup"
+            write_cgroup(cgroup, 6 << 30, 1 << 30, oom_group=1)
+            self.assertTrue(launcher.kills_the_whole_container(cgroup))
+            write_cgroup(cgroup, 6 << 30, 1 << 30, oom_group=0)
+            self.assertFalse(launcher.kills_the_whole_container(cgroup))
+            self.assertFalse(launcher.kills_the_whole_container(Path(temporary) / "absent"))
+            self.assertFalse(launcher.kills_the_whole_container(None))
 
     def test_only_the_largest_role_process_in_the_container_is_chosen_and_only_by_its_own_launcher(self):
         P = launcher.Process
@@ -357,6 +401,116 @@ class MemoryAccountingTests(unittest.TestCase):
         self.assertIsNone(launcher.victim(table, 10, 1000))
         self.assertIsNone(launcher.victim({1: P(0, "ticket-engine", 5 << 30, 1000, False)}, 10, 1000))
 
+    def test_reclaimable_memory_over_the_threshold_stops_nothing(self):
+        # A container that has read many files: in use by memory.current, but
+        # the kernel would take it back before stopping anything.
+        with tempfile.TemporaryDirectory() as temporary:
+            cgroup = Path(temporary) / "cgroup"
+            write_cgroup(cgroup, 2 << 30, (2 << 30) - (100 << 20), slab_reclaimable=653 << 20)
+            looks = iter(range(5))
+            report = io.StringIO()
+            with patch.object(launcher, "processes", side_effect=AssertionError("no process should be looked at")), \
+                    patch.object(os, "kill", side_effect=AssertionError("nothing should be stopped")):
+                launcher.guard(10, launcher.Limits(cgroup, 2 << 30, (2 << 30) - (512 << 20)), report,
+                               lambda: next(looks, None) is not None, pause=lambda _: None)
+            self.assertEqual(report.getvalue(), "")
+
+    def test_memory_held_outside_every_role_stops_no_role_process_and_is_said_once(self):
+        P = launcher.Process
+        with tempfile.TemporaryDirectory() as temporary:
+            cgroup = Path(temporary) / "cgroup"
+            limits = launcher.Limits(cgroup, 2 << 30, (2 << 30) - (512 << 20))
+            for controller, role, stopped in ((1650 << 20, 18 << 20, False), (300 << 20, 1282 << 20, True)):
+                write_cgroup(cgroup, 2 << 30, controller + role + (10 << 20), anon=controller + role)
+                table = {1: P(0, "ticket-engine", controller, 1000, False), 10: P(1, "bwrap", 1 << 20, 1000, False),
+                         11: P(10, "python3", role, 1000, True)}
+                looks = iter(range(3))
+                report, killed = io.StringIO(), []
+                with self.subTest(controller=controller >> 20, role=role >> 20), \
+                        patch.object(launcher, "processes", return_value=table), patch.object(launcher, "tell"), \
+                        patch.object(os, "getuid", return_value=1000), \
+                        patch.object(os, "kill", side_effect=lambda pid, number: killed.append(pid)):
+                    launcher.guard(10, limits, report, lambda: next(looks, None) is not None, pause=lambda _: None)
+                    lines = report.getvalue().splitlines()
+                    if stopped:
+                        # The stand-in is never really stopped, so every look stops it again.
+                        self.assertEqual(killed, [11, 11, 11])
+                        self.assertEqual(len(lines), 3, lines)
+                        self.assertTrue(lines[0].startswith("(launcher) Stopped python3 (pid 11, 1282 MiB resident"), lines[0])
+                    else:
+                        self.assertEqual(killed, [])
+                        self.assertEqual(len(lines), 1, lines)
+                        self.assertEqual(lines[0], "(launcher) This container's memory in use reached 1678 of 2048 MiB, "
+                                                   "1650 MiB of it anonymous memory outside every role's processes; "
+                                                   "no role process was stopped.")
+
+    def test_the_reason_reaches_a_pipe_or_terminal_but_never_a_file_and_never_waits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fd = root / "proc" / "123" / "fd"
+            fd.mkdir(parents=True)
+            fifo, regular = root / "pipe", root / "role-file.txt"
+            os.mkfifo(fifo)
+            regular.write_text("the role's own data\n")
+            (fd / "2").symlink_to(fifo)
+            # No reader: skipped, not waited for.
+            launcher.tell(123, "(launcher) Stopped x\n", proc=root / "proc")
+            reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                launcher.tell(123, "(launcher) Stopped x\n", proc=root / "proc")
+                self.assertEqual(os.read(reader, 100), b"(launcher) Stopped x\n")
+            finally:
+                os.close(reader)
+            (fd / "2").unlink()
+            (fd / "2").symlink_to(regular)
+            launcher.tell(123, "(launcher) Stopped x\n", proc=root / "proc")
+            self.assertEqual(regular.read_text(), "the role's own data\n")
+            launcher.tell(456, "(launcher) Stopped x\n", proc=root / "proc")  # gone already: nothing happens
+
+    def test_a_guard_that_cannot_run_says_so_in_the_roles_record(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            work, home, cgroup = root / "work", root / "home", root / "cgroup"
+            for directory in (work, home, cgroup):
+                directory.mkdir()
+
+            def portable_open(path, **_):
+                return os.open(path, os.O_RDONLY)
+
+            class Started(Exception):
+                pass
+
+            def execve(path, argv, environment):
+                raise Started(argv)
+
+            arguments = ["linux_role.py", "--network", "none", "--", "/bin/true"]
+            for state, expected in (
+                    ("absent", "The memory guard is off for this role: the container's memory use could not be read in %s" % cgroup),
+                    ("small", "The memory guard is off for this role: a headroom of 512 MiB does not fit under the "
+                              "container's memory limit of 512 MiB."),
+                    ("no limit", None)):
+                if state == "small":
+                    write_cgroup(cgroup, 512 << 20, 1 << 20)
+                elif state == "no limit":
+                    write_cgroup(cgroup, "max", 1 << 20)
+                report = io.StringIO()
+                with self.subTest(state), patch.object(sys, "platform", "linux"), \
+                        patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"), \
+                        patch.object(launcher, "open_path", side_effect=portable_open), \
+                        patch.object(os, "O_PATH", 0, create=True), \
+                        patch.object(launcher, "own_cgroup", return_value=(cgroup, None)), \
+                        patch.object(launcher, "contain"), patch.object(os, "execve", side_effect=execve), \
+                        patch.object(sys, "argv", arguments), patch.object(sys, "stderr", report), \
+                        patch.dict(os.environ, {"TASK_WORKSPACE": str(work), "TASK_HOME": str(home)}):
+                    with self.assertRaises(Started):
+                        launcher.main()
+                    lines = report.getvalue().splitlines()
+                    if expected is None:
+                        self.assertEqual(lines, [])
+                    else:
+                        self.assertEqual(len(lines), 1, lines)
+                        self.assertTrue(lines[0].startswith("(launcher) " + expected), lines[0])
+
 
 @unittest.skipUnless(sys.platform == "linux", "requires Linux /proc")
 class ProcessTableTests(unittest.TestCase):
@@ -367,6 +521,16 @@ class ProcessTableTests(unittest.TestCase):
         self.assertGreater(own.anon, 0)
 
 
+REASON = (r"\(launcher\) Stopped python3 \(pid \d+, \d+ MiB resident; this role's processes \d+ MiB in all\) because "
+          r"this container's memory in use, file and reclaimable kernel caches left out, reached 1948 of 2048 MiB\.")
+
+HOLDER = ("import time\n"
+          "held = bytearray(64 << 20)\n"
+          "held[::4096] = b'\\x01' * (len(held) // 4096)\n"
+          "print('holding', flush=True)\n"
+          "time.sleep(60)\n")
+
+
 @unittest.skipUnless(sys.platform == "linux" and shutil.which("bwrap"), "requires real Linux bubblewrap isolation")
 class MemoryGuardTests(unittest.TestCase):
     def test_the_largest_role_process_is_stopped_the_role_continues_and_the_reason_is_reported(self):
@@ -375,12 +539,7 @@ class MemoryGuardTests(unittest.TestCase):
             work, home, cgroup = root / "workspace", root / "home", root / "cgroup"
             work.mkdir()
             home.mkdir()
-            (work / "hold.py").write_text(
-                "import sys, time\n"
-                "held = bytearray(64 << 20)\n"
-                "held[::4096] = b'\\x01' * (len(held) // 4096)\n"
-                "print('holding', flush=True)\n"
-                "time.sleep(60)\n")
+            (work / "hold.py").write_text(HOLDER)
             program = ["--", "/bin/sh", "-c", 'python3 -B hold.py; echo "the holder ended with $?"']
             args = argparse.Namespace(program=program, write=[], create=[], runtime=[], network="none")
             argv, environment, descriptors = launcher.command(args, {
@@ -391,22 +550,15 @@ class MemoryGuardTests(unittest.TestCase):
             finally:
                 for descriptor in descriptors:
                     os.close(descriptor)
-            report = []
-
-            class Report:
-                def write(self, text):
-                    report.append(text)
-
-                def flush(self):
-                    pass
-
+            report = io.StringIO()
             try:
                 self.assertEqual(role.stdout.readline(), "holding\n", "the role did not start")
                 # The container's use as the guard reads it: over the threshold.
                 write_cgroup(cgroup, 2 << 30, (2 << 30) - (100 << 20))
                 watcher = threading.Thread(target=launcher.guard,
-                                           args=(role.pid, (2 << 30) - (512 << 20), Report(), lambda: role.poll() is None),
-                                           kwargs={"cgroup": cgroup, "interval": 0.05, "settle": 0.2})
+                                           args=(role.pid, launcher.Limits(cgroup, 2 << 30, (2 << 30) - (512 << 20)),
+                                                 report, lambda: role.poll() is None),
+                                           kwargs={"interval": 0.05, "settle": 0.2})
                 watcher.start()
                 try:
                     output, errors = role.communicate(timeout=20)
@@ -420,27 +572,42 @@ class MemoryGuardTests(unittest.TestCase):
             self.assertIsNotNone(output, "the guard did not stop the holder within 20 s")
             self.assertEqual(role.returncode, 0, output + errors)
             self.assertIn("the holder ended with 137", output, "the holder was not the process stopped")
-            self.assertEqual(len(report), 1, report)
-            self.assertRegex(report[0], r"^\(launcher\) Stopped python3 \(pid \d+, \d+ MiB resident\) because this "
-                                        r"container's memory in use reached 1948 of 2048 MiB\.")
+            lines = report.getvalue().splitlines()
+            self.assertEqual(len(lines), 1, lines)
+            self.assertRegex(lines[0], "^" + REASON)
+            # The holder's standard error was the launcher's pipe: the reason reached it too.
+            self.assertRegex(errors, REASON)
 
 
 # Runs the launcher's main() with the container's cgroup read from a given
 # directory, under a parent that collects every process left behind (it is a
-# child subreaper, as a container's main process is the parent of orphans),
-# and prints how many it collected after the launcher ended.
+# child subreaper, as a container's main process is the parent of orphans).
+# "check" prints how many it collected after the launcher ended; "cancel"
+# also stops the launcher's process group once the role printed a line, as the
+# controller does when it cancels a role.
 SUPERVISED = """
-import ctypes, importlib.util, os, subprocess, sys, time
+import ctypes, importlib.util, os, signal, subprocess, sys, time
 from pathlib import Path
-if sys.argv[1] == "launch":
+if sys.argv[1] in ("launch", "launch-faulty"):
     spec = importlib.util.spec_from_file_location("linux_role", sys.argv[2])
     launcher = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(launcher)
-    launcher.CGROUP = Path(sys.argv[3])
+    cgroup = Path(sys.argv[3])
+    launcher.own_cgroup = lambda *_: (cgroup, None)
+    if sys.argv[1] == "launch-faulty":
+        def guard(*_, **__):
+            raise RuntimeError("a fault")
+        launcher.guard = guard
     sys.argv = [sys.argv[2], *sys.argv[4:]]
     launcher.main()
 ctypes.CDLL(None, use_errno=True).prctl(36, 1)  # PR_SET_CHILD_SUBREAPER
-role = subprocess.Popen([sys.executable, "-B", "-c", sys.argv[2], "launch", *sys.argv[3:]], stdin=subprocess.DEVNULL)
+mode = sys.argv[1]
+launch = "launch-faulty" if mode == "check-faulty" else "launch"
+role = subprocess.Popen([sys.executable, "-B", "-c", sys.argv[2], launch, *sys.argv[3:]], stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE if mode == "cancel" else None, start_new_session=mode == "cancel")
+if mode == "cancel":
+    print(role.stdout.readline().decode(), end="", flush=True)
+    os.killpg(role.pid, signal.SIGTERM)
 status = role.wait()
 time.sleep(0.5)
 left = 0
@@ -464,19 +631,19 @@ print("launcher status %d, processes left behind %d" % (status, left), file=sys.
 class SupervisedLaunchTests(unittest.TestCase):
     """main() with a container memory limit: bubblewrap runs under the guard."""
 
-    def launch(self, root, program, usage=1 << 30, over_after=None):
+    def launch(self, root, program, usage=1 << 30, over_after=None, mode="check", oom_group=0):
         work, home, cgroup = root / "workspace", root / "home", root / "cgroup"
         work.mkdir(exist_ok=True)
         home.mkdir(exist_ok=True)
-        write_cgroup(cgroup, 2 << 30, usage)
+        write_cgroup(cgroup, 2 << 30, usage, oom_group=oom_group)
         environment = {"TASK_WORKSPACE": str(work), "TASK_HOME": str(home), "PATH": os.environ["PATH"]}
-        role = subprocess.Popen([sys.executable, "-B", "-c", SUPERVISED, "check", SUPERVISED,
+        role = subprocess.Popen([sys.executable, "-B", "-c", SUPERVISED, mode, SUPERVISED,
                                  str(Path(__file__).with_name("linux_role.py")), str(cgroup), "--network", "none",
                                  "--", *program], env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             if over_after is not None:
                 self.assertEqual(role.stdout.readline(), over_after, "the role did not start")
-                write_cgroup(cgroup, 2 << 30, (2 << 30) - (100 << 20))
+                write_cgroup(cgroup, 2 << 30, (2 << 30) - (100 << 20), oom_group=oom_group)
             try:
                 output, errors = role.communicate(timeout=30)
             except subprocess.TimeoutExpired:
@@ -487,28 +654,58 @@ class SupervisedLaunchTests(unittest.TestCase):
                 role.wait()
         return output, errors
 
+    def test_the_exit_status_passes_through_and_nothing_is_left_behind(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output, errors = self.launch(Path(temporary), ["/bin/sh", "-c", "sleep 0.3; exit 7"])
+        self.assertEqual(errors, "launcher status 7, processes left behind 0\n", output)
+
+    def test_role_processes_come_first_unless_the_kernel_stops_the_container_together_and_no_limit_is_set(self):
+        program = ["/bin/sh", "-c", "cat /proc/self/oom_score_adj; ulimit -d; grep SigBlk /proc/self/status"]
+        own = Path("/proc/self/oom_score_adj").read_text()
+        for oom_group, adj in ((0, "1000\n"), (1, own)):
+            with self.subTest(oom_group=oom_group), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                output, errors = self.launch(Path(temporary), program, oom_group=oom_group)
+                # The guard waits for bubblewrap with signals blocked; the role must not inherit that.
+                self.assertEqual(output, adj + "unlimited\nSigBlk:\t0000000000000000\n", errors)
+
+    def test_the_largest_role_process_is_stopped_its_tool_and_the_record_say_why_and_the_launcher_ends_as_the_role_did(self):
+        # Through a tool: the holder's standard error is a pipe to sed, as a
+        # compiler's is to its build tool. Directly: it is the launcher's own,
+        # which carries the line once.
+        for name, role, started in (
+                ("through a tool", 'python3 -B hold.py 2>&1 | sed -u "s/^/tool| /"; echo "the holder ended with ${PIPESTATUS[0]}"',
+                 "tool| holding\n"),
+                ("directly", 'python3 -B hold.py; echo "the holder ended with $?"', "holding\n")):
+            with self.subTest(name), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                root = Path(temporary)
+                (root / "workspace").mkdir()
+                (root / "workspace" / "hold.py").write_text(HOLDER)
+                output, errors = self.launch(root, ["/bin/bash", "-c", role], over_after=started)
+                self.assertIsNotNone(output, errors)
+                if name == "through a tool":
+                    self.assertRegex(output, "^tool\\| " + REASON, errors)
+                else:
+                    self.assertNotIn("(launcher)", output)
+                self.assertTrue(output.endswith("the holder ended with 137\n"), output)
+                lines = errors.splitlines()
+                # The shell's own "Killed" may stand between the two; only one process was stopped.
+                self.assertEqual(len([line for line in lines if "(launcher)" in line]), 1, errors)
+                self.assertRegex(lines[0], "^" + REASON)
+                self.assertEqual(lines[-1], "launcher status 0, processes left behind 0")
+
     def test_a_fault_of_the_guard_leaves_the_role_running_unguarded_to_its_own_end(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
-            root = Path(temporary)
-            work, home = root / "workspace", root / "home"
-            work.mkdir()
-            home.mkdir()
-            args = argparse.Namespace(program=["--", "/bin/sh", "-c", "sleep 0.3; exit 7"], write=[], create=[],
-                                      runtime=[], network="none")
-            argv, environment, descriptors = launcher.command(args, {
-                "TASK_WORKSPACE": str(work), "TASK_HOME": str(home), "PATH": os.environ["PATH"]})
-            report = io.StringIO()
-            try:
-                with patch.object(launcher, "guard", side_effect=RuntimeError("a fault")), patch.object(sys, "stderr", report):
-                    status = launcher.supervise(argv, environment, descriptors, 1 << 30)
-            finally:
-                signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
-                for descriptor in descriptors:
-                    os.close(descriptor)
-            self.assertEqual(status, 7)
-            self.assertEqual(report.getvalue(), "(launcher) The memory guard stopped: a fault\n")
+            output, errors = self.launch(Path(temporary), ["/bin/sh", "-c", "sleep 0.3; exit 7"], mode="check-faulty")
+        self.assertEqual(errors, "(launcher) The memory guard stopped: a fault\n"
+                                 "launcher status 7, processes left behind 0\n", output)
 
-    def test_a_signal_ends_the_launcher_as_it_ended_bubblewrap_or_the_controllers_process_group(self):
+    def test_a_cancel_ends_the_launcher_by_the_same_signal_and_leaves_nothing_behind(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output, errors = self.launch(Path(temporary), ["/bin/sh", "-c", "echo started; sleep 30"], mode="cancel")
+        self.assertEqual(output, "started\n")
+        self.assertEqual(errors, "launcher status %d, processes left behind 0\n" % -signal.SIGTERM)
+
+    def test_bubblewrap_ending_by_a_signal_ends_the_launcher_by_it(self):
         def children(parent):
             found = []
             for entry in os.listdir("/proc"):
@@ -521,65 +718,28 @@ class SupervisedLaunchTests(unittest.TestCase):
                     found.append((int(entry), line[line.index("(") + 1:line.rindex(")")]))
             return found
 
-        for name, stop, expected in (("bubblewrap alone", "bwrap", -signal.SIGKILL),
-                                     ("the process group", "group", -signal.SIGTERM)):
-            with self.subTest(name), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
-                root = Path(temporary)
-                work, home, cgroup = root / "workspace", root / "home", root / "cgroup"
-                work.mkdir()
-                home.mkdir()
-                write_cgroup(cgroup, 2 << 30, 1 << 30)
-                role = subprocess.Popen([sys.executable, "-B", "-c", SUPERVISED, "launch",
-                                         str(Path(__file__).with_name("linux_role.py")), str(cgroup), "--network", "none",
-                                         "--", "/bin/sh", "-c", "echo started; sleep 30"],
-                                        env={"TASK_WORKSPACE": str(work), "TASK_HOME": str(home), "PATH": os.environ["PATH"]},
-                                        stdout=subprocess.PIPE, text=True, start_new_session=True)
-                try:
-                    self.assertEqual(role.stdout.readline(), "started\n")
-                    bubblewrap = [pid for pid, command in children(role.pid) if command == "bwrap"]
-                    self.assertEqual(len(bubblewrap), 1, children(role.pid))
-                    if stop == "bwrap":
-                        os.kill(bubblewrap[0], signal.SIGKILL)
-                    else:
-                        os.killpg(role.pid, signal.SIGTERM)
-                    self.assertEqual(role.wait(timeout=10), expected)
-                finally:
-                    if role.poll() is None:
-                        os.killpg(role.pid, signal.SIGKILL)
-                        role.wait()
-                    role.stdout.close()
-
-    def test_the_exit_status_passes_through_and_nothing_is_left_behind(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
-            output, errors = self.launch(Path(temporary), ["/bin/sh", "-c", "sleep 0.3; exit 7"])
-        self.assertEqual(errors, "launcher status 7, processes left behind 0\n", output)
-
-    def test_role_processes_are_the_kernels_first_choice_and_none_may_pass_the_threshold_alone(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
-            output, errors = self.launch(Path(temporary), ["/bin/sh", "-c",
-                                                           "cat /proc/self/oom_score_adj; ulimit -d; grep SigBlk /proc/self/status"])
-        # The guard waits for bubblewrap with SIGCHLD blocked; the role must not inherit that.
-        self.assertEqual(output, "1000\n%d\nSigBlk:\t0000000000000000\n" % (((2 << 30) - (512 << 20)) // 1024), errors)
-
-    def test_the_largest_role_process_is_stopped_and_the_launcher_ends_as_the_role_did(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             root = Path(temporary)
-            (root / "workspace").mkdir()
-            (root / "workspace" / "hold.py").write_text(
-                "import time\n"
-                "held = bytearray(64 << 20)\n"
-                "held[::4096] = b'\\x01' * (len(held) // 4096)\n"
-                "print('holding', flush=True)\n"
-                "time.sleep(60)\n")
-            output, errors = self.launch(root, ["/bin/sh", "-c", 'python3 -B hold.py; echo "the holder ended with $?"'],
-                                         over_after="holding\n")
-        self.assertEqual(output, "the holder ended with 137\n", errors)
-        lines = errors.splitlines()
-        # The shell's own "Killed" may stand between the two; only one process was stopped.
-        self.assertEqual(len([line for line in lines if line.startswith("(launcher)")]), 1, errors)
-        self.assertRegex(lines[0], r"^\(launcher\) Stopped python3 \(pid \d+, \d+ MiB resident\) because this "
-                                   r"container's memory in use reached 1948 of 2048 MiB\.")
-        self.assertEqual(lines[-1], "launcher status 0, processes left behind 0")
+            work, home, cgroup = root / "workspace", root / "home", root / "cgroup"
+            work.mkdir()
+            home.mkdir()
+            write_cgroup(cgroup, 2 << 30, 1 << 30)
+            role = subprocess.Popen([sys.executable, "-B", "-c", SUPERVISED, "launch",
+                                     str(Path(__file__).with_name("linux_role.py")), str(cgroup), "--network", "none",
+                                     "--", "/bin/sh", "-c", "echo started; sleep 30"],
+                                    env={"TASK_WORKSPACE": str(work), "TASK_HOME": str(home), "PATH": os.environ["PATH"]},
+                                    stdout=subprocess.PIPE, text=True, start_new_session=True)
+            try:
+                self.assertEqual(role.stdout.readline(), "started\n")
+                bubblewrap = [pid for pid, command in children(role.pid) if command == "bwrap"]
+                self.assertEqual(len(bubblewrap), 1, children(role.pid))
+                os.kill(bubblewrap[0], signal.SIGKILL)
+                self.assertEqual(role.wait(timeout=10), -signal.SIGKILL)
+            finally:
+                if role.poll() is None:
+                    os.killpg(role.pid, signal.SIGKILL)
+                    role.wait()
+                role.stdout.close()
 
 
 if __name__ == "__main__":
