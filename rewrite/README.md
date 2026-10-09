@@ -2247,8 +2247,9 @@ workspace alone. Connected-role runs have no designated entrance stage and
 do not perform this refresh. This does not claim that existing work is a
 valid or undamaged checkout. A failed initial clone or
 checkout never starts the role and its reason reaches the existing chain. A
-retry can prepare the still-empty workspace. A killed preparation can leave
-unpublished private staging for operator cleanup; it is never treated as work.
+retry can prepare the still-empty workspace. A killed preparation or refresh
+can leave unpublished private staging, up to a full copy of a checkout, for
+operator cleanup; it is never treated as work.
 Submodule/LFS setup and remote authentication are not automatically provisioned.
 
 Once a checkout is published, a record of it (`.workspace.prepared`) is kept

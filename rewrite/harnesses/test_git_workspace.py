@@ -289,6 +289,77 @@ os.execv(os.environ['TEST_REAL_GIT'], [os.environ['TEST_REAL_GIT'], *sys.argv[1:
                 self.assertEqual(self.git(workspace, "status", "--porcelain").stdout, "")
                 self.assertIn("Workspace refresh recovered", err)
 
+    def refresh_in_process(self, name, owner, attribute, replacement):
+        """Run one refresh in this process with one function replaced."""
+        import contextlib
+        import importlib.util
+        import io
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("workspace_refresh", LAUNCHER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        workspace = self.workspace(name)
+        self.assertEqual(self.run_launcher(workspace)[0], 0)
+        latest = self.advance_source()
+        environment = self.answered_history(workspace)
+        stderr = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, dict(self.env, **environment), clear=True))
+            stack.enter_context(patch.object(owner(module), attribute, side_effect=replacement))
+            stack.enter_context(contextlib.redirect_stderr(stderr))
+            module.prepare(workspace, str(self.source))
+        return workspace, latest, environment, stderr.getvalue()
+
+    def test_an_update_is_recorded_even_when_the_replaced_copy_cannot_be_removed(self):
+        import errno
+        real_rmtree = shutil.rmtree
+
+        def busy(path, *args, **kwargs):
+            if Path(path).name.startswith(".refresh-"):
+                raise OSError(errno.EBUSY, "simulated busy staging")
+            return real_rmtree(path, *args, **kwargs)
+
+        workspace, latest, _, err = self.refresh_in_process(
+            "cleanup-failed", lambda module: module.shutil, "rmtree", busy)
+        self.assertEqual((workspace / "entry.txt").read_text(), "new upstream\n")
+        self.assertEqual(err.count("Workspace updated from " + self.original_head + " to " + latest), 1, err)
+        self.assertNotIn("continuing without a reset", err)
+
+    def test_an_unavailable_exchange_keeps_the_original_and_says_so(self):
+        import errno
+
+        def unsupported(source, target):
+            raise OSError(errno.EINVAL, "Invalid argument")
+
+        workspace, _, environment, err = self.refresh_in_process(
+            "no-exchange", lambda module: module, "exchange_directories", unsupported)
+        self.assertEqual((workspace / "entry.txt").read_text(), "original\n")
+        self.assertEqual(self.git(workspace, "rev-parse", "HEAD").stdout.strip(), self.original_head)
+        self.assertEqual(self.git(workspace, "status", "--porcelain", "--untracked-files=all").stdout, "")
+        self.assertIn("could not exchange", err)
+        self.assertIn("Invalid argument", err)
+        self.assertNotIn("recovered", err)
+        self.assertNotIn("Workspace updated", err)
+        code, out, again = self.run_launcher(workspace, environment)
+        self.assertEqual((code, json.loads(out)["body"], again), (0, "original\n", ""))
+
+    def test_work_appearing_during_a_refresh_is_not_replaced(self):
+        workspace = self.workspace("refresh-writer")
+        self.assertEqual(self.run_launcher(workspace)[0], 0)
+        self.advance_source()
+        pause = self.paused_git()
+        child = self.start(workspace, dict(self.answered_history(workspace), **pause))
+        self.wait_file(Path(pause["TEST_CHECKOUT_REACHED"]))
+        (workspace / "notes.txt").write_text("work from another writer\n")
+        Path(pause["TEST_CHECKOUT_RELEASE"]).touch()
+        out, err = child.communicate("request", timeout=15)
+        self.assertEqual(child.returncode, 0, err)
+        self.assertEqual(json.loads(out)["body"], "original\n")
+        self.assertEqual((workspace / "notes.txt").read_text(), "work from another writer\n")
+        self.assertEqual(self.git(workspace, "rev-parse", "HEAD").stdout.strip(), self.original_head)
+        self.assertIn("changed during preparation", err)
+        self.assertNotIn("Workspace updated", err)
+
     def test_separate_requests_get_independent_work_and_new_source_tip(self):
         first, second = self.workspace("first"), self.workspace("second")
         self.assertEqual(self.run_launcher(first)[0], 0)

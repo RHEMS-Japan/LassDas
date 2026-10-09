@@ -619,12 +619,13 @@ When a reply resumes an ordered request still at its entrance, its next role
 uses the latest configured integration branch if the prepared checkout has no
 edits, local commits or untracked files and no later stage has run. A successful
 update records the previous and new HEAD in the role's history. An unavailable
-source leaves the original checkout usable and records the reason.
-Replacement is prepared away from the original;
-a failed checkout leaves the old files together. The directory exchange is
-atomic on supported Linux/macOS filesystems; if unavailable, the old checkout
-stays in use and the reason is recorded. Once work
-has started, the wrapper never updates that request's checkout; later upstream
+source leaves the original checkout usable and records the reason. The
+replacement is prepared away from the original, so a failed checkout leaves the
+original files as they were. Swapping it in needs the job directory's
+filesystem to support an atomic directory exchange (Linux `renameat2` with
+`RENAME_EXCHANGE`, macOS `renamex_np` with `RENAME_SWAP`); where it does not,
+the old checkout stays in use and the reason is recorded. Once work has
+started, the wrapper never updates that request's checkout; later upstream
 changes are handled at delivery as described below. See the README's
 [workspace preparation](../../rewrite/README.md#optional-git-workspace-preparation)
 for the conditions and limits.

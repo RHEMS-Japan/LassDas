@@ -117,6 +117,7 @@ def exchange_directories(source, target):
 
 def refresh(workspace, repository, branch):
     """Called under the preparation lock. Failure never discards local work."""
+    exchanged = False
     try:
         with record_path(workspace).open() as handle:
             record = json.load(handle)
@@ -186,12 +187,19 @@ def refresh(workspace, repository, branch):
             write_record(workspace, **record)
             try:
                 exchange_directories(staged, workspace)
-            except OSError:
-                finish_refresh(workspace)
-                raise
+            except OSError as error:
+                finish_refresh(workspace, recovered=False)
+                print("Workspace refresh could not exchange the directories; continuing with the original checkout: " +
+                      str(error), file=sys.stderr, flush=True)
+                return
+            # Say so before removing the replaced copy, which can still fail.
+            exchanged = True
+            print("Workspace updated from " + original + " to " + latest, file=sys.stderr, flush=True)
             finish_refresh(workspace, recovered=False)
-        print("Workspace updated from " + original + " to " + latest, file=sys.stderr, flush=True)
     except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError, subprocess.SubprocessError) as error:
+        if exchanged:
+            print("Workspace was updated, but finishing the update failed: " + str(error), file=sys.stderr, flush=True)
+            return
         print("Workspace refresh could not be checked; continuing without a reset: " + str(error),
               file=sys.stderr, flush=True)
 
