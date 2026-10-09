@@ -693,11 +693,14 @@ func bindRequestConfig(cfg config, directory, issue string) (config, error) {
 			process.Directory = filepath.Join(workspace, process.Directory)
 			// The running copy of each process's output, shown by the status page.
 			process.Live = filepath.Join(directory, "live")
-			process.Env = make(map[string]string, len(role.Processes[j].Env)+3)
+			process.Env = make(map[string]string, len(role.Processes[j].Env)+4)
 			for key, value := range role.Processes[j].Env {
 				process.Env[key] = value
 			}
-			for key, value := range map[string]string{"TASK_WORKSPACE": workspace, "TASK_HOME": filepath.Join(directory, "homes", fmt.Sprintf("%d-%d", i, j)), "TASK_ISSUE": issue} {
+			// The activity record lives in the process's own home, which the
+			// launcher already lets it write and which outlasts a restart.
+			home := filepath.Join(directory, "homes", fmt.Sprintf("%d-%d", i, j))
+			for key, value := range map[string]string{"TASK_WORKSPACE": workspace, "TASK_HOME": home, "TASK_ISSUE": issue, chain.ActivityEnv: filepath.Join(home, "task-activity.json")} {
 				if process.ModelEnv == key {
 					return config{}, fmt.Errorf("watch environment %s overlaps model selection", key)
 				}

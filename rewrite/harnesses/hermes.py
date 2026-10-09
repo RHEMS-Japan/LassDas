@@ -126,9 +126,11 @@ class RepeatedFailureStop:
             decision, action="halt", code="repeated_identical_failure", count=self.count,
             message=(f"{tool_name} failed {self.count} times in a row with the same arguments and "
                      "the same result. The role ends here."))
-        # Recorded only once the SDK has a halt to act on.
+        # Recorded only once the SDK has a halt to act on. Credentials come out
+        # before anything is cut: a cut one would leave its start behind.
+        values = credentials()
         self.stopped = scrub(f"Stopped: the same failure repeated {self.count} times in a row: "
-                             f"{tool_name} {clip(arguments)}: {failure_summary(text)}", credentials())
+                             f"{tool_name} {clip(scrub(arguments, values))}: {failure_summary(scrub(text, values))}", values)
         return halt
 
 
@@ -149,6 +151,123 @@ def failure_summary(text):
         if data.get("exit_code") is not None:
             return clip(f"exit {data['exit_code']}: {data.get('output', '')}")
     return clip(text)
+
+
+# What the activity record keeps of one command, and how many background
+# processes it names. The record is rewritten at every command, so it stays a
+# few hundred bytes.
+ACTIVITY_CHARACTERS = 200
+ACTIVITY_BACKGROUND = 5
+# The arguments that say what a tool was asked to do, in the order they are
+# looked for; a tool without any of them is named alone.
+ACTIVITY_ARGUMENTS = ("command", "path", "file_path", "pattern", "query", "url", "action", "session_id")
+
+
+def command_summary(name, args):
+    """One line naming the tool and what it was asked to do, never the whole
+    argument record: a file tool's content stays out of it."""
+    summary = str(name or "unknown tool")
+    if isinstance(args, dict):
+        details = [str(args[key]) for key in ACTIVITY_ARGUMENTS if args.get(key) not in (None, "")]
+        if details:
+            summary += ": " + " ".join(details)
+        if args.get("background"):
+            summary += " (in the background)"
+    return activity_text(summary)
+
+
+def activity_text(text):
+    """A command as the record keeps it: credentials taken out first, then cut,
+    so a credential the cut falls inside leaves nothing of itself."""
+    return clip(scrub(text, credentials()), ACTIVITY_CHARACTERS - 1)
+
+
+# The SDK's list of background processes gives each command cut at this many
+# characters, before the bridge sees it.
+SDK_COMMAND_CHARACTERS = 200
+
+
+def sdk_cut_command(command):
+    """A background command as the SDK's list gives it. One the SDK cut may end
+    in the first part of a credential, which no whole-value replacement finds:
+    the longest such ending goes, and "…" marks the cut. A command of any
+    other length was not cut there."""
+    if len(command) != SDK_COMMAND_CHARACTERS:
+        return command
+    values = credentials()
+    command = scrub(command, values)
+    ending = 0
+    for value in values:
+        ending = max([ending] + [k for k in range(1, len(value)) if command.endswith(value[:k])])
+    return command[:len(command) - ending] + "…"
+
+
+class Activity:
+    """Keeps TASK_ACTIVITY, the small file the runtime reads after a launch
+    that did not finish: the command the native agent started last, whether it
+    had returned, and the background processes it had running. A forced exit
+    of the whole runtime leaves no other trace of what the role was doing, so
+    the file is rewritten at every command start and end. Credentials are
+    taken out before it is written; a failure to write never stops the role."""
+
+    def __init__(self, path, registry):
+        self.path = Path(path) if path else None
+        self.registry = registry
+        self.lock = threading.Lock()
+        self.last, self.call, self.returned = "", None, True
+        self.halt = None
+        self.said = False
+
+    def started(self, call_id, name, args, *_):
+        with self.lock:
+            self.last, self.call, self.returned = command_summary(name, args), call_id, False
+            self.write()
+
+    def completed(self, call_id, name, args, *_):
+        with self.lock:
+            if call_id == self.call:
+                self.returned = True
+            self.write()
+
+    def halted(self, code, count):
+        """The tool-call guardrail ended the role: which rule, and for a call
+        that kept failing the same way, how many times in a row."""
+        with self.lock:
+            self.halt = {"code": str(code or "unknown"), "count": count if isinstance(count, int) else 0}
+            self.write()
+
+    def background(self):
+        try:
+            sessions = self.registry.list_sessions()
+        except Exception:
+            return []
+        running = [activity_text(sdk_cut_command(str(session.get("command", "")))) for session in sessions
+                   if isinstance(session, dict) and session.get("status") == "running" and session.get("command")]
+        return running[:ACTIVITY_BACKGROUND]
+
+    def write(self):
+        if self.path is None:
+            return
+        record = {"last": self.last, "returned": self.returned, "background": self.background()}
+        if self.halt:
+            record["halted"] = self.halt
+        text = scrub(json.dumps(record, ensure_ascii=False), credentials())
+        try:
+            draft = self.path.with_name(self.path.name + ".tmp")
+            draft.write_text(text, encoding="utf-8")
+            os.replace(draft, self.path)
+        except Exception as error:
+            # An earlier command left in place would read as the last one, so
+            # the record goes (removing needs no space); the runtime then says
+            # the last command is unknown, and a later write that succeeds
+            # puts it back. Said once: the role still works.
+            for path in (self.path, self.path.with_name(self.path.name + ".tmp")):
+                with contextlib.suppress(Exception):
+                    if not path.is_dir():
+                        path.unlink(missing_ok=True)
+            if not self.said:
+                self.said = True
+                print(f"Activity record not written: {error}", file=sys.stderr)
 
 
 def save_transcript(result):
@@ -208,6 +327,7 @@ def main():
 
     prompt = sys.stdin.read()
     reasoning = {"effort": os.environ.get("NATIVE_REASONING_EFFORT", "low")}
+    activity = Activity(os.environ.get("TASK_ACTIVITY"), process_registry)
     sys.stderr = WithoutKeyLines(sys.stderr)
     with contextlib.redirect_stdout(sys.stderr):
         agent = AIAgent(
@@ -231,6 +351,9 @@ def main():
             # operator may set one, and none is set otherwise.
             max_iterations=max(0, int(os.environ.get("NATIVE_MAX_TURNS", "0"))) or 1_000_000_000,
             skip_context_files=True, skip_memory=True, skip_background_review=True,
+            # The SDK's own hooks for a tool call's start and end; they only
+            # record what is running, for the runtime to read after a crash.
+            tool_start_callback=activity.started, tool_complete_callback=activity.completed,
         )
     repeated_failures = None
     if repeated_failure_limit:
@@ -278,20 +401,25 @@ def main():
         # A turn the SDK's tool-call guardrail ended did not finish the role's
         # work, whichever rule stopped it. What the role started in the
         # background is stopped first: it may be what was using up the machine.
-        halted = None
+        halted, rule = None, None
         guardrail = result.get("guardrail")
         if repeated_failures is not None and repeated_failures.stopped:
             halted = repeated_failures.stopped
+            rule = ("repeated_identical_failure", repeated_failures.count)
         elif guardrail or result.get("turn_exit_reason") == "guardrail_halt":
             details = guardrail if isinstance(guardrail, dict) else {}
             halted = scrub(f"Stopped by the native agent's tool-call guardrail ({details.get('code', 'unknown')}): "
                            f"{details.get('message', '')}", credentials())
+            rule = (details.get("code"), details.get("count"))
         if halted:
             try:
                 with contextlib.redirect_stdout(sys.stderr):
                     process_registry.kill_all()
             except Exception as error:
                 print(f"\nBackground processes not stopped: {error}", file=sys.stderr)
+            # Recorded once the background is stopped, so the record does
+            # not name processes that are no longer running.
+            activity.halted(*rule)
         # No stripping, clipping, classification, JSON parsing or approval test.
         # Preserve partial work even when the native run failed, and publish the
         # report before cleanup so a cleanup error cannot erase it.

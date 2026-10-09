@@ -32,9 +32,22 @@ type Result struct {
 	Error       string `json:"error,omitempty"`
 	// Interrupted is the controller stopping this invocation, not a process
 	// failure or a successful result. Partial output and the reason stay intact.
-	Interrupted bool      `json:"interrupted,omitempty"`
-	StartedAt   time.Time `json:"started_at"`
-	FinishedAt  time.Time `json:"finished_at"`
+	Interrupted bool `json:"interrupted,omitempty"`
+	// Forced marks the runtime's note for an action a restart cut short when
+	// nothing of that launch had been saved: the runtime was killed while the
+	// launch ran, rather than stopping it and keeping what it returned.
+	Forced bool `json:"forced,omitempty"`
+	// Activity is what the role's harness last recorded it was running, read
+	// back by the runtime after a launch that did not end cleanly: the last
+	// command and what was running in the background. It is an observation
+	// for the next launch, never a verdict, and empty when nothing was kept.
+	Activity string `json:"activity,omitempty"`
+	// RepeatedFailures is how many times in a row one tool call failed the
+	// same way when the role's harness ended the role for that, as its
+	// record says; zero for any other end.
+	RepeatedFailures int       `json:"repeated_failures,omitempty"`
+	StartedAt        time.Time `json:"started_at"`
+	FinishedAt       time.Time `json:"finished_at"`
 }
 
 // State is ordinary restart state. There are no signatures or model-authored
@@ -118,6 +131,10 @@ type Chain struct {
 	RequesterReply func(context.Context, int64) (string, error)
 	// Observe shows progress/errors without making the observer a judge.
 	Observe func(string)
+	// Activity reads what a role's processes last recorded they were running.
+	// The note left for an action a restart cut short carries it, so the next
+	// launch knows what the previous one was doing when the runtime stopped.
+	Activity func(role string) string
 }
 
 // Run keeps handing work on until the router selects done or the caller
@@ -155,12 +172,17 @@ func (c Chain) Run(ctx context.Context) error {
 		}
 	}
 	if state.Pending != nil {
+		activity := ""
+		if c.Activity != nil {
+			activity = c.Activity(state.Pending.Role)
+		}
+		forced := !state.PendingSince.IsZero() && !savedSince(state.History, state.Pending.Role, state.PendingSince)
 		state.Step, state.Recovering = state.Pending.Role, true
 		state.History = append(state.History, Result{
 			Role: state.Pending.Role, Instruction: state.Pending.Instruction, Speaker: "runtime",
-			Interrupted: true,
-			Error:       "The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.",
-			StartedAt:   state.PendingSince, FinishedAt: time.Now().UTC(),
+			Interrupted: true, Forced: forced, Activity: activity, Output: interruptedOutput(forced, activity),
+			Error:     "The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.",
+			StartedAt: state.PendingSince, FinishedAt: time.Now().UTC(),
 		})
 		state.Pending, state.PendingSince = nil, time.Time{}
 		if err := c.save(ctx, state); err != nil {
@@ -350,6 +372,36 @@ func (c Chain) Run(ctx context.Context) error {
 		confirming = asking || next.Role == c.WaitAfter && state.confirmingQuestion()
 		checkQuestion = c.WaitAfter != "" && next.Role == c.WaitAfter && (!state.Recovering || confirming)
 	}
+}
+
+// savedSince reports that the history keeps a record of the role from a launch
+// that began at since: the launch returned and its results were saved before
+// the runtime stopped. A launch that saved nothing was cut by a forced exit.
+func savedSince(history []Result, role string, since time.Time) bool {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == role && !history[i].StartedAt.Before(since) {
+			return true
+		}
+	}
+	return false
+}
+
+// interruptedOutput is the note's own account of the cut launch, so the record
+// says what was going on and not only that something stopped.
+func interruptedOutput(forced bool, activity string) string {
+	text := "The runtime stopped while this launch was running."
+	if forced {
+		text = "The runtime was killed while this launch was running, before anything of the launch was saved (lack of memory is one cause)."
+	}
+	return text + " " + activityOrUnknown(activity)
+}
+
+// activityOrUnknown says what the role last recorded, or that nothing says.
+func activityOrUnknown(activity string) string {
+	if activity == "" {
+		return "Its last command is unknown: the role left no record of it."
+	}
+	return activity
 }
 
 // Retry writing the result already in memory, not the completed external
