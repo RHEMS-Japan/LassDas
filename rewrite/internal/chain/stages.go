@@ -306,7 +306,7 @@ type Ending struct {
 	// one of those that saved nothing, so the runtime itself was killed.
 	Interrupted, Forced bool
 	// TimedOut is a process stopped at its configured time limit, and
-	// NoModel a launch for which no current model could be selected.
+	// NoModel a launch for which a process could not select a current model.
 	TimedOut, NoModel bool
 	// RepeatedFailures is how many times in a row one tool call failed the
 	// same way when the role's harness ended the role for that, else zero.
@@ -373,7 +373,7 @@ func (e Ending) instruction() string {
 	case e.TimedOut:
 		how = "was stopped at its time limit"
 	case e.NoModel:
-		how = "could not start: no current model could be selected"
+		how = "could not select a current model for every process"
 	}
 	return fmt.Sprintf("The previous launch of %s (attempt %d in a row that did not end cleanly) %s. %s Do not repeat what it did unchanged: suspect the cause (memory, time or wrong arguments) and change the plan.\n",
 		e.Role, e.Attempt, how, activityOrUnknown(e.Activity))

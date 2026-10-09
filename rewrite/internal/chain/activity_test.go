@@ -254,3 +254,32 @@ func TestALaunchReadsBackOnlyItsOwnRecordAndOnlyWhenItFailed(t *testing.T) {
 		t.Fatalf("a role without processes said %q", got)
 	}
 }
+
+// How a launch ended is read from what the runtime recorded of it: its time
+// limit, a process that could not select a model, a role its harness ended
+// for one call that kept failing, and a plain process error.
+func TestTheEndingOfALaunchIsReadFromItsRecords(t *testing.T) {
+	record := Result{Role: "work", Speaker: "runtime", Output: "Runtime record."}
+	for _, shape := range []struct {
+		name    string
+		process Result
+		check   func(Ending) bool
+		says    string
+	}{
+		{"its time limit", Result{Error: "context deadline exceeded\nlast words"}, func(e Ending) bool { return e.TimedOut }, "was stopped at its time limit"},
+		{"no model", Result{Error: selectionFailure + "catalog HTTP 503"}, func(e Ending) bool { return e.NoModel }, "could not select a current model for every process"},
+		{"the same call failing", Result{Error: "exit status 1", RepeatedFailures: 5}, func(e Ending) bool { return e.RepeatedFailures == 5 }, "ended with a process error"},
+		{"an error", Result{Error: "exit status 1"}, func(e Ending) bool { return !e.TimedOut && !e.NoModel && !e.Interrupted }, "ended with a process error"},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			shape.process.Role, shape.process.Speaker = "work", "worker"
+			ending, ok := State{History: []Result{shape.process, record}}.LastEnding()
+			if !ok || ending.Role != "work" || ending.Attempt != 1 || !shape.check(ending) || !strings.Contains(ending.instruction(), shape.says) {
+				t.Fatalf("the ending was read as %+v: %s", ending, ending.instruction())
+			}
+		})
+	}
+	if _, ok := (State{History: []Result{{Role: "work", Speaker: "worker"}, record}}).LastEnding(); ok {
+		t.Fatal("a launch that ended cleanly was read as one that did not")
+	}
+}
