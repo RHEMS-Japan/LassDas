@@ -37,6 +37,13 @@ class NativeFailureCheckTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     check.verify_run(CompletedProcess([], 1, "stopped early", ""), failures, failures, enabled)
 
+    def test_a_repeated_successful_call_must_not_be_stopped(self):
+        # An SDK that reported every result as failed would stop healthy roles.
+        stop = "Stopped: the same failure repeated 5 times in a row: process"
+        check.verify_run(CompletedProcess([], 0, "Script finished.", ""), 7, 6, True, failing=False)
+        with self.assertRaises(AssertionError):
+            check.verify_run(CompletedProcess([], 1, stop, stop), 5, 6, True, failing=False)
+
 
 if __name__ == "__main__":
     unittest.main()

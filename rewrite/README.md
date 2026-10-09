@@ -2315,14 +2315,14 @@ Provide these process settings explicitly:
   (`tool_loop_guardrails` in its configuration) counts every failure of a
   call however much happened in between and is left as the operator
   configured it; a turn that it, or any other guardrail rule, ends also exits
-  1 with its reason. This setting and `NATIVE_MAX_TURNS` take a whole number:
-  any other value, an empty one included, ends the bridge at launch with
-  Python's `ValueError` on stderr and exit 1, before any model call, at every
-  launch until it is corrected. The image workflows hold the stop to the
-  image's own pinned Hermes before an image is accepted
+  1 with its reason. This setting and `NATIVE_MAX_TURNS` are read with
+  Python's `int()`: a value it cannot read, an empty one included, ends the
+  bridge at launch with `ValueError` on stderr and exit 1, before any model
+  call, at every launch until it is corrected. The image workflows hold the
+  stop to the image's own pinned Hermes before an image is accepted
   (`.github/scripts/check-native-repeated-failures.sh`, which says what passes):
-  a Hermes that stops handing the bridge its verdict on a failed call, or has
-  no tool-call guardrail to extend, fails there.
+  a Hermes that stops handing the bridge its verdict on a failed call, has no
+  tool-call guardrail to extend, or calls every result a failure, fails there.
 - Optional `NATIVE_LOG_PREFIX_CHARS` (default `2000`): how much of each tool
   call's arguments and result the harness prints as it happens; the lines reach
   stderr, so the runtime's live copy shows them, and only the tail of them

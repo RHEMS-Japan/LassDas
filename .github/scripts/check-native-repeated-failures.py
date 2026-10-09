@@ -9,20 +9,21 @@ import tempfile
 import threading
 
 
-def verify_run(result, calls, failures, enabled):
-    """A stopped role is not proved by a nonzero exit alone."""
-    if enabled and failures >= 5:
+def verify_run(result, calls, repeats, enabled, failing=True):
+    """A stopped role is not proved by a nonzero exit alone. The same call
+    repeated `repeats` times, failing or (as a control) succeeding."""
+    if failing and enabled and repeats >= 5:
         assert result.returncode == 1, "the fifth identical failure did not end the role"
         assert calls == 5, f"expected exactly five model calls, got {calls}"
         reason = "same failure repeated 5 times in a row"
         assert reason in result.stdout and reason in result.stderr, "the failure-stop reason was not reported"
     else:
         assert result.returncode == 0, "the control stopped before finishing"
-        assert calls == failures + 1, "the control did not execute every scripted step"
+        assert calls == repeats + 1, "the control did not execute every scripted step"
         assert "Script finished." in result.stdout, "the control lost the final model response"
 
 
-def run_case(failures, enabled):
+def run_case(repeats, enabled, action="wait"):
     calls = []
 
     class Model(BaseHTTPRequestHandler):
@@ -53,10 +54,10 @@ def run_case(failures, enabled):
                 number = 0  # SDK auxiliary requests do not consume a tool step.
             message = {"role": "assistant", "content": "Script finished."}
             finish = "stop"
-            if number and number <= failures:
+            if number and number <= repeats:
                 message = {"role": "assistant", "content": None, "tool_calls": [
                     {"index": 0, "id": f"call_{number}", "type": "function",
-                     "function": {"name": "process", "arguments": '{"action":"wait"}'}}]}
+                     "function": {"name": "process", "arguments": json.dumps({"action": action})}}]}
                 finish = "tool_calls"
             usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
             base = {"id": f"reply_{number}", "created": 0, "model": "maker/test"}
@@ -104,10 +105,10 @@ def run_case(failures, enabled):
             server.shutdown()
             thread.join(timeout=2)
         stops = [line for line in result.stdout.splitlines() if line.startswith("Stopped")]
-        print(f"failures={failures} enabled={enabled} exit={result.returncode} model_calls={len(calls)} "
+        print(f"process({action})x{repeats} enabled={enabled} exit={result.returncode} model_calls={len(calls)} "
               f"stop={stops}", flush=True)
         try:
-            verify_run(result, len(calls), failures, enabled)
+            verify_run(result, len(calls), repeats, enabled, failing=action == "wait")
         except AssertionError as error:
             print("--- stdout ---", result.stdout, "--- stderr ---", result.stderr, sep="\n", file=sys.stderr)
             print(f"::error::{error}", flush=True)
@@ -115,5 +116,6 @@ def run_case(failures, enabled):
 
 
 if __name__ == "__main__":
-    for failures, enabled in ((12, True), (4, True), (6, False)):
-        run_case(failures, enabled)
+    # process(wait) without a session fails every time; process(list) succeeds.
+    for repeats, enabled, action in ((12, True, "wait"), (4, True, "wait"), (6, False, "wait"), (6, True, "list")):
+        run_case(repeats, enabled, action)
