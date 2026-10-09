@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 // BacklogProject is one Backlog project as the engine's tracker. The ids are
@@ -130,6 +132,31 @@ func (p BacklogProject) AddComment(ctx context.Context, issue Issue, text string
 	var stored struct{ ID int64 }
 	json.Unmarshal(receipt, &stored)
 	return stored.ID, nil
+}
+
+// EditComment replaces the words of a comment, which Backlog allows only to
+// the account that posted it; nothing else of the comment is sent. The
+// answer must name the same comment with the new words.
+func (p BacklogProject) EditComment(ctx context.Context, issue Issue, id int64, text string) error {
+	if id <= 0 {
+		return errors.New("provide a positive comment id")
+	}
+	if !utf8.ValidString(text) {
+		return errors.New("comment contains invalid UTF-8; it was not sent")
+	}
+	data, err := p.Client.call(ctx, http.MethodPatch, "/issues/"+url.PathEscape(issue.Key)+"/comments/"+strconv.FormatInt(id, 10), nil,
+		url.Values{"content": {text}}, http.StatusOK)
+	if err != nil {
+		return fmt.Errorf("comment edit not confirmed; it may already be applied; read the comment before retrying: %w", err)
+	}
+	var edited struct {
+		ID      int64  `json:"id"`
+		Content string `json:"content"`
+	}
+	if json.Unmarshal(data, &edited) != nil || edited.ID != id || edited.Content != text {
+		return errors.New("tracker did not confirm the comment edit; read the comment before retrying")
+	}
+	return nil
 }
 
 func (p BacklogProject) Myself(ctx context.Context) (Account, error) {
