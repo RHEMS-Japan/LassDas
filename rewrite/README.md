@@ -1722,16 +1722,30 @@ A positive cap is saved at acceptance. Configuration changes do not silently
 change an accepted request's cap. Do not delete or edit runtime records to change
 the policy. No migration or backward-format support is provided.
 
-For these time-limited requests, `intake.max_hard_exits` sets the number of
-forced exits that pauses the request (default 3). Omission and zero both select
-3; negative and fractional values are invalid. A value of 1 pauses after the
-first forced exit. This bound is saved with the time cap. It is not a count of
+`intake.max_hard_exits` sets the number of forced exits that pauses a request
+(default 3). Omission and zero both select 3; negative and fractional values are
+invalid. A value of 1 pauses after the first forced exit. It is not a count of
 ordinary failed commands or model requests. Zero does not mean unlimited
-restarts. For example, `"max_active_minutes": 120, "max_hard_exits": 3` allows
-two automatic recoveries before a third forced exit requires attention.
-The shipped example leaves this optional time limit off and does not set a
-hard-exit count alone. Pause notices show measured time in ordinary units
-(for example, `0 秒` or `2 分 0 秒`), as other requester notices do.
+restarts. For a time-limited request this bound is saved with the time cap and
+counts every forced exit of the request. For example,
+`"max_active_minutes": 120, "max_hard_exits": 3` allows two automatic
+recoveries before a third forced exit requires attention. A request without a
+time limit saves the bound at its first watched launch and counts only forced
+exits in a row at one stage (see "Restart and operator action"). The shipped
+example sets neither setting, so its requests have no time limit and pause at
+the third forced exit in a row at one stage. Pause notices show measured time
+in ordinary units (for example, `0 秒` or `2 分 0 秒`), as other requester
+notices do.
+
+Set both in a production installation. Without a positive
+`intake.max_active_minutes`, forced exits are counted only while they come one
+after another at one stage: when the controller is killed during a stage, for
+example because its container ran out of memory, each restart runs that stage
+again, and at the `intake.max_hard_exits`th forced exit in a row there the
+request pauses and tells the requester. Forced exits at different stages are not
+counted together, and nothing bounds the request's total active time. Choose a
+cap above the active time that the largest expected request needs; a request
+that reaches it pauses until an authorized `再開`.
 
 Time accumulates while the request runtime is active, across successful stages,
 failures and routing retries. Success does not reset it. Waiting for a slot,
@@ -1770,6 +1784,24 @@ time or downtime, counts one forced exit, and continues using the saved remainin
 allowance. It posts one automatic-recovery notice with the count and saved limit.
 At the forced-exit limit it instead pauses, posts that reason and waits for the
 existing authorized resume. This never marks a request complete.
+
+A request without a time limit has no allowance to continue with, and nothing
+else bounds a stage that is cut off at the same point after every restart, for
+example by a build that exhausts the container's memory. Its watched launches
+write the same start marker, which an ordinary return or shutdown clears.
+Recovery from a marker left behind counts one forced exit at the stage the
+history shows running: the pending action, or else the stage that ran last. The
+count goes on while forced exits come one after another at that stage. It
+starts again from one at a forced exit at another stage, after a process of the
+counted stage ended by itself, successfully or not, and after the requester's
+words. The runtime's notes for a cut-off action or for routing, a process the
+controller stopped and another stage that ran in between do not restart it.
+At the saved `intake.max_hard_exits` the request pauses with one notice that
+names the stage and the count, and waits for the same authorized `再開`, which
+sets the count to zero. Below that count it continues with no notice of its
+own; the restart notice under "What the requester is told at night" is
+unchanged. The status page shows this pause as it shows a time-limited one,
+without a measured time or this count.
 
 The status page shows the time cap, confirmed time and forced-exit count/limit
 as ordinary information, not as an attention alert. Completed requests do not
@@ -2262,6 +2294,25 @@ Provide these process settings explicitly:
   instead of passing an empty result to the next one.
 - Optional `NATIVE_MAX_TURNS`: the number of model calls after which the native
   agent stops. None is set unless the operator names one.
+- Optional `NATIVE_MAX_REPEATED_FAILURES` (default `5`, `0` turns it off): the
+  role ends when one tool call fails the same way that many times in a row,
+  the same tool with the same arguments returning the same result. Any other
+  call in between, or a success, starts the count again, so a check that fails
+  again after each edit is not stopped. The SDK only warns about such a loop:
+  a role once repeated a call that could not succeed, a wait for a background
+  process without naming it, for as long as it ran, while the build it had
+  started used up the memory. At the limit the SDK makes no further model
+  call; the bridge stops the processes the role started in the background,
+  adds `Stopped: the same failure repeated N times in a row: <tool>
+  <arguments>: <error>` to the report and to stderr, and exits 1, so the
+  runtime takes its next decision. The count extends the SDK's own tool-call
+  guardrail, which sees each result before the SDK's warning is added to it.
+  With an SDK that has no such guardrail, the bridge says so on stderr at
+  launch and the role runs without the stop. The SDK's own hard stop
+  (`tool_loop_guardrails` in its configuration) counts every failure of a
+  call however much happened in between and is left as the operator
+  configured it; a turn that it, or any other guardrail rule, ends also exits
+  1 with its reason.
 - Optional `NATIVE_LOG_PREFIX_CHARS` (default `2000`): how much of each tool
   call's arguments and result the harness prints as it happens; the lines reach
   stderr, so the runtime's live copy shows them, and only the tail of them

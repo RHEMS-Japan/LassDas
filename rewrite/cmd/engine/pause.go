@@ -31,11 +31,13 @@ const workResumeText = "再開の指示を受け取り、一時停止の解除�
 
 // workLimitRecord belongs to one accepted request. Keeping earlier episodes
 // also keeps their consumed control comments out of ordinary question answers.
-// With no configured limit or recorded pause, this optional record is absent.
+// A request with a time limit keeps its Clock; one without keeps StageExits
+// from its first watched launch. Before either and any pause, it is absent.
 type workLimitRecord struct {
-	Version int            `json:"version"`
-	Pauses  []pauseEpisode `json:"pauses,omitempty"`
-	Clock   *workClock     `json:"clock,omitempty"`
+	Version    int            `json:"version"`
+	Pauses     []pauseEpisode `json:"pauses,omitempty"`
+	Clock      *workClock     `json:"clock,omitempty"`
+	StageExits *stageExits    `json:"stage_exits,omitempty"`
 }
 
 type pauseEpisode struct {
@@ -67,7 +69,8 @@ func readWorkLimit(directory string) (workLimitRecord, error) {
 		return workLimitRecord{}, err
 	}
 	var record workLimitRecord
-	if json.Unmarshal(raw, &record) != nil || record.Version != 1 || !record.Clock.valid() {
+	if json.Unmarshal(raw, &record) != nil || record.Version != 1 || !record.Clock.valid() || !record.StageExits.valid() ||
+		(record.Clock != nil && record.StageExits != nil) {
 		return workLimitRecord{}, errPauseRecord
 	}
 	for i, pause := range record.Pauses {
@@ -121,10 +124,12 @@ func pauseReason(reason string) string {
 	return "強制終了が設定の回数上限に達したためです。"
 }
 
-func pausedWorkText(pause pauseEpisode, clock *workClock) string {
+func pausedWorkText(pause pauseEpisode, clock *workClock, exits *stageExits) string {
 	reason := pauseReason(pause.Reason)
 	if pause.Reason == hardExitPause && clock != nil {
 		reason = fmt.Sprintf("強制終了が上限の %d 回に達したためです。", clock.MaxHardExits)
+	} else if pause.Reason == hardExitPause && exits != nil {
+		reason = stageExitsReason(exits)
 	}
 	return "この依頼の自動処理を一時停止しています。" + reason + workPauseMeasured(clock, pause.Elapsed) +
 		"依頼は未完了です。中断前の操作が既に反映されている場合があり、取り消してはいません。\n" +
@@ -297,7 +302,7 @@ func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	if record.held() {
 		applyStatus(ctx, cfg, issue, directory, awaitingStatus, observe)
 		assignTurn(ctx, cfg, issue, directory, "requester", observe)
-		id, err := n.sayPauseEvent(ctx, workPauseNotice, event, pausedWorkText(*pause, record.Clock))
+		id, err := n.sayPauseEvent(ctx, workPauseNotice, event, pausedWorkText(*pause, record.Clock, record.StageExits))
 		if err != nil {
 			return true, err
 		}
@@ -425,6 +430,9 @@ func applyPauseResume(ctx context.Context, cfg config, issue sourceIssue, direct
 		record.Clock.Active = nil
 		record.Clock.HardExits = 0
 		record.Clock.RecoveryNoticeAt = nil
+	}
+	if exits := record.StageExits; exits != nil {
+		exits.Active, exits.Stage, exits.Count, exits.Mark = nil, "", 0, 0
 	}
 	return saveWorkLimit(directory, *record)
 }
