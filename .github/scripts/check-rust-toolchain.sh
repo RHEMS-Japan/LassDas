@@ -6,10 +6,14 @@
 # its build into HOME (CARGO_TARGET_DIR), never into the checkout. It shows
 # that rustc links with the image's gcc, that a unit test and a doc test run,
 # and which versions the image carries. It also holds cc, gcc, cargo, rustc and
-# python3 to resolving inside /usr without any link through /etc: a role sees
-# /usr but only named files of /etc, so a program linked through
-# /etc/alternatives (Debian's /usr/bin/cc) is dangling in a role (rustc found
-# no linker there once). Anything else fails here.
+# python3 to resolving inside /usr without any link through /etc (rustc found
+# no linker in a role once, when cc was a link through /etc/alternatives).
+# Roles now see /etc/alternatives as well, but these five are held to /usr so
+# they do not depend on it; check-role-sandbox.sh runs tools that do. Each hop
+# is normalized as text, without following later links, so a relative link
+# through /etc or to a place outside /usr is caught where it points; resolving
+# the whole chain at once would skip a hop through /etc. Anything else fails
+# here.
 #
 # Usage: bash .github/scripts/check-rust-toolchain.sh IMAGE
 # image-check.yml runs it on every pull request; image.yml runs it after the
@@ -34,9 +38,9 @@ output="$(docker run --rm --network none --platform linux/arm64 --read-only --tm
       while [ -L "$path" ]; do
         next=$(readlink "$path")
         case "$next" in /*) ;; *) next="$(dirname "$path")/$next" ;; esac
-        path=$next
+        path=$(python3 -c "import os, sys; print(os.path.normpath(os.sep + sys.argv[1].lstrip(os.sep)))" "$next")
         hops=$((hops + 1))
-        case "$path" in /etc/*) echo "$program resolves through $path, which a role does not see"; exit 1 ;; esac
+        case "$path" in /etc/*) echo "$program resolves through $path instead of staying inside /usr"; exit 1 ;; esac
         [ "$hops" -lt 16 ] || { echo "$program: too many links"; exit 1; }
       done
       case "$path" in /usr/*) ;; *) echo "$program resolves to $path, outside /usr"; exit 1 ;; esac

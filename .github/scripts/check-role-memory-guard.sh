@@ -22,9 +22,9 @@
 #    skipped test fails this check.
 #
 # The container runs as check-role-sandbox.sh's does (the image's user, every
-# capability dropped, seccomp, AppArmor and system paths unconfined). The
-# runner's kernel.apparmor_restrict_unprivileged_userns must be 0, as for that
-# script.
+# capability dropped, no-new-privileges, seccomp, AppArmor and system paths
+# unconfined). The runner's kernel.apparmor_restrict_unprivileged_userns must
+# be 0, as for that script.
 #
 # Usage: bash .github/scripts/check-role-memory-guard.sh IMAGE
 set -uo pipefail
@@ -34,8 +34,8 @@ if [ "$#" -ne 1 ]; then
 fi
 harnesses="$(cd "$(dirname "$0")/../../rewrite/harnesses" && pwd)" || exit 1
 container=(--rm --network none --platform linux/arm64 --read-only --tmpfs /tmp:rw,exec,nosuid,size=64m
-  --cap-drop ALL --security-opt seccomp=unconfined --security-opt apparmor=unconfined
-  --security-opt systempaths=unconfined)
+  --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=unconfined
+  --security-opt apparmor=unconfined --security-opt systempaths=unconfined)
 
 status=0
 output="$(docker run -i "${container[@]}" --memory 1g --memory-swap 1g --entrypoint /usr/bin/env "$1" -i \
