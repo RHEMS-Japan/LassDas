@@ -544,6 +544,72 @@ class MemoryAccountingTests(unittest.TestCase):
             self.assertGreaterEqual(killed[0][1], 101.0)
             self.assertLess(killed[0][1], 101.1)
 
+    def test_while_a_role_process_ends_no_other_is_chosen_for_a_moment_unless_the_use_is_at_the_last_resort(self):
+        P = launcher.Process
+        with tempfile.TemporaryDirectory() as temporary:
+            cgroup = Path(temporary) / "cgroup"
+            # Role A's process was stopped and is ending: its 970 MiB are still in memory.current, but its
+            # table entry shows none. Role B's steady 602 MiB process then looks like the largest.
+            table = {1: P(0, "ticket-engine", 300 << 20, 1000, False),
+                     10: P(1, "bwrap", 1 << 20, 1000, False), 11: P(10, "python3", 602 << 20, 1000, True, 5),
+                     20: P(1, "bwrap", 1 << 20, 1000, False), 21: P(20, "python3", 0, 1000, True, 6, True)}
+            for used, expected in ((1570 << 20, []), (1800 << 20, [11])):
+                write_cgroup(cgroup, 2 << 30, used, anon=used)
+                clock, killed = [100.0], []
+                looks = iter(range(40))
+                with self.subTest(used=used >> 20), patch.object(launcher, "processes", return_value=table), \
+                        patch.object(launcher.time, "monotonic", side_effect=lambda: clock[0]), \
+                        patch.object(launcher, "tell"), patch.object(os, "getuid", return_value=1000), \
+                        patch.object(os, "kill", side_effect=lambda pid, number: killed.append((pid, clock[0]))):
+                    # Looks over 0.15 s: B's process is never chosen while the use is under the last resort
+                    # (1,792 MiB), and at once when it is over.
+                    launcher.guard(10, launcher.Limits(cgroup, 2 << 30, 3 << 29), io.StringIO(),
+                                   lambda: next(looks, None) is not None and clock[0] < 100.15 and not killed,
+                                   pause=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+                    self.assertEqual([pid for pid, _ in killed], expected)
+                    if expected:
+                        self.assertEqual(killed[0][1], 100.0)
+            # A process that stays so (a zombie nobody collects), or processes that keep ending one after
+            # another, hold off stops for 0.2 s only each time the use goes over the threshold.
+            write_cgroup(cgroup, 2 << 30, 1570 << 20, anon=1570 << 20)
+            clock, killed = [100.0], []
+            looks = iter(range(100))
+            with patch.object(launcher, "processes", return_value=table), \
+                    patch.object(launcher.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.object(launcher, "tell"), patch.object(os, "getuid", return_value=1000), \
+                    patch.object(os, "kill", side_effect=lambda pid, number: killed.append((pid, clock[0]))):
+                launcher.guard(10, launcher.Limits(cgroup, 2 << 30, 3 << 29), io.StringIO(),
+                               lambda: next(looks, None) is not None and not killed,
+                               pause=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+            self.assertEqual([pid for pid, _ in killed], [11])
+            self.assertGreaterEqual(killed[0][1], 100.2)
+            self.assertLess(killed[0][1], 100.22)
+
+    def test_processes_ending_one_after_another_hold_off_stops_only_once_while_the_use_stays_over(self):
+        P = launcher.Process
+        with tempfile.TemporaryDirectory() as temporary:
+            cgroup = Path(temporary) / "cgroup"
+            base = {1: P(0, "ticket-engine", 300 << 20, 1000, False), 10: P(1, "bwrap", 1 << 20, 1000, False),
+                    11: P(10, "cc1", 1250 << 20, 1000, True, 5)}
+            write_cgroup(cgroup, 2 << 30, 1570 << 20, anon=1560 << 20)
+            clock, killed, step = [100.0], [], [0]
+
+            def table(proc=None):
+                # A new short-lived process is ending at every look, as a busy build's are.
+                step[0] += 1
+                return {**base, 100 + step[0]: P(11, "cc1", 0, 1000, True, 1000 + step[0], True)}
+
+            looks = iter(range(200))
+            with patch.object(launcher, "processes", side_effect=table), \
+                    patch.object(launcher.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.object(launcher, "tell"), patch.object(os, "getuid", return_value=1000), \
+                    patch.object(os, "kill", side_effect=lambda pid, number: killed.append((pid, clock[0]))):
+                launcher.guard(10, launcher.Limits(cgroup, 2 << 30, 3 << 29), io.StringIO(),
+                               lambda: next(looks, None) is not None and not killed,
+                               pause=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+            self.assertEqual([pid for pid, _ in killed], [11])
+            self.assertLess(killed[0][1], 100.22)
+
     def test_the_reason_reaches_a_pipe_or_terminal_but_never_a_file_and_never_waits(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

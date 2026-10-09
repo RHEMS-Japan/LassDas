@@ -130,7 +130,13 @@ of its own), it stays as bubblewrap's parent and guards the role:
   command, and the role decides what to do next. It looks again a hundredth
   of a second later, counting a stopped process that is still ending as
   already gone, so a second compiler growing beside the first is stopped in
-  turn if the use is still over the threshold.
+  turn if the use is still over the threshold. A process giving its memory
+  back no longer shows that memory in its own entry, though the container
+  still counts it; while one of the role processes is in that state, the
+  guard chooses no process for up to 0.2 seconds (once each time the use
+  goes over the threshold, and not at all at the last resort below), so the
+  launcher of another role running at the same time does not take its own
+  steady process for the largest.
 - It writes one line naming the process, its size, the role's total and the
   memory in use: on the launcher's standard error, which is the role's record,
   and, when the stopped process's own standard error is a pipe or a terminal

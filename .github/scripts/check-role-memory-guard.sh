@@ -11,7 +11,12 @@
 #    stopped nothing (memory.events oom_kill 0). Then two processes of one
 #    role grow side by side, as a build tool's two compilers do: both are
 #    stopped in turn, and the kernel still stopped nothing.
-# 2. The launcher's tests (rewrite/harnesses/test_linux_role.py) run in the
+# 2. Two roles run at once, ten times over: one grows, the other holds 600 MiB
+#    and does not grow. Only the growing one is stopped; the steady one holds
+#    to its end every time. (The other role's launcher once took the steady
+#    process for the largest while the stopped one was still giving its
+#    memory back, in about a third of such runs.)
+# 3. The launcher's tests (rewrite/harnesses/test_linux_role.py) run in the
 #    image, where bubblewrap is: the tests of the guard and of the launch it
 #    supervises are skipped in the Python job of ci.yml, which has none. A
 #    skipped test fails this check.
@@ -94,6 +99,57 @@ if [ "$stops" -ne 2 ]; then
   exit 1
 fi
 echo "the launcher stopped the role's allocating processes, said why, and the kernel stopped nothing"
+
+status=0
+output="$(docker run -i "${container[@]}" --memory 2g --memory-swap 2g --entrypoint /usr/bin/env "$1" -i \
+  PATH=/usr/local/bin:/usr/bin:/bin TASK_WORKSPACE=/tmp/work bash -s 2>&1 <<'CHECK'
+set -u
+mkdir -p "$TASK_WORKSPACE" /tmp/home-growing /tmp/home-steady
+cat > "$TASK_WORKSPACE/allocate.py" <<'PY'
+import time
+held = []
+while len(held) < 64:
+    block = bytearray(64 << 20)
+    block[::4096] = b"\x01" * (len(block) // 4096)
+    held.append(block)
+    time.sleep(0.05)
+print("the growing role was never stopped")
+PY
+cat > "$TASK_WORKSPACE/hold.py" <<'PY'
+import time
+block = bytearray(600 << 20)
+block[::4096] = b"\x01" * (len(block) // 4096)
+time.sleep(4)
+print("the steady role held to its end")
+PY
+launch() {
+  TASK_HOME=/tmp/home-$1 python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py --network none -- \
+    /usr/bin/python3 -B "$2" </dev/null
+}
+for run in 1 2 3 4 5 6 7 8 9 10; do
+  launch steady hold.py > /tmp/steady.out 2>&1 & steady=$!
+  sleep 0.5
+  launch growing allocate.py > /tmp/growing.out 2>&1; growing=$?
+  wait $steady; held=$?
+  echo "pair $run: growing role's launcher $growing, steady role's launcher $held," \
+    "steady role stopped $(grep -c '^(launcher) Stopped' /tmp/steady.out) times, $(grep -c 'held to its end' /tmp/steady.out) end line"
+done
+echo "kernel out-of-memory kills in this container: $(sed -n 's/^oom_kill //p' /sys/fs/cgroup/memory.events)"
+CHECK
+)" || status=$?
+printf 'exit status %s\n%s\n' "$status" "$output"
+if [ "$status" -ne 0 ]; then
+  echo "::error::the container of the two-role check ended with $status"
+  exit 1
+fi
+expected="$(for run in 1 2 3 4 5 6 7 8 9 10; do
+  echo "pair $run: growing role's launcher 137, steady role's launcher 0, steady role stopped 0 times, 1 end line"; done
+  echo "kernel out-of-memory kills in this container: 0")"
+if [ "$(grep -E '^(pair |kernel out-of-memory)' <<<"$output")" != "$expected" ]; then
+  echo "::error::in one pair or more, the steady role was stopped or the growing one was not, or the kernel stopped a process"
+  exit 1
+fi
+echo "in ten pairs, only the growing role was stopped"
 
 status=0
 output="$(docker run "${container[@]}" --memory 2g --memory-swap 2g -v "$harnesses:/harnesses:ro" --workdir /harnesses \

@@ -36,6 +36,13 @@ RECLAIMABLE = ("active_file", "inactive_file", "slab_reclaimable")
 # could reach the line it acts at even growing this fast: every tenth of a
 # second at most and every hundredth at least.
 FILL_RATE = 32 << 30  # bytes per second
+# How long a role process whose memory is being given back holds off every
+# stop. While it ends, its memory is still counted in memory.current, but its
+# table entry shows none of it once its memory is detached (no RssAnon):
+# choosing then would take another role's process for the largest. At most
+# this long each time the use goes over the threshold, so processes that keep
+# ending (a busy build's) cannot hold stops off; at the last resort, not at all.
+SETTLE = 0.2  # seconds
 # Signals the controller sends to stop a role. The launcher passes them on to
 # bubblewrap and waits for it, so it is not left for the controller to collect.
 PASSED_ON = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
@@ -391,6 +398,7 @@ def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=
     uid = os.getuid()
     last_resort = limits.limit - (limits.limit - limits.threshold) // 2
     stopped = set()  # (pid, start) of the processes this launcher stopped
+    settling_since = None  # when a role process was first seen giving its memory back, over the threshold
     said = False
     waiting_since = None  # when the table last showed only memory outside the roles over the threshold
     current = os.open(limits.directory / "memory.current", os.O_RDONLY | os.O_CLOEXEC)
@@ -417,7 +425,13 @@ def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=
                     roles = sum(process.anon for pid, process in table.items()
                                 if process.nested and process.uid == uid and pid not in ending)
                     outside = anon - roles - sum(table[pid].anon for pid in ending)
-                    if used >= limits.threshold and outside >= limits.threshold and used < last_resort:
+                    if settling_since is None and any(process.leaving and process.anon == 0 and process.nested
+                                                      and process.uid == uid for process in table.values()):
+                        settling_since = time.monotonic()  # once each time the use is over the threshold
+                    if used >= limits.threshold and used < last_resort and settling_since is not None \
+                            and time.monotonic() - settling_since < SETTLE:
+                        pass  # a role process is still giving its memory back: look again shortly
+                    elif used >= limits.threshold and outside >= limits.threshold and used < last_resort:
                         # The controller, or another process outside every role, holds that much
                         # by itself: stopping role processes would not bring the use back under
                         # the threshold. Only nearer the limit is a role process stopped anyway.
@@ -450,6 +464,8 @@ def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=
                                 stopped.add((pid, table[pid].start))
                                 report.write(line)
                                 report.flush()
+            if in_use < limits.threshold:
+                settling_since = None
             # The pace follows the memory still held, a stopped process's included until it is gone.
             line = last_resort if waiting_since is not None else limits.threshold
             pause(min(interval, max(near, (line - in_use) / FILL_RATE)))
