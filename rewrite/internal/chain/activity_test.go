@@ -1,0 +1,256 @@
+package chain
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// A launch cut by a forced exit leaves nothing of its own. The note written
+// for it after the restart says what the role was running then, and the
+// launch that follows is told how the previous one ended and how many in a
+// row ended so, instead of walking into the same end without knowing.
+func TestALaunchAfterAForcedExitIsToldWhatThePreviousOneWasRunning(t *testing.T) {
+	const doing = "Last command: terminal: cargo build --release (it had not returned). Running in the background: cargo build --release."
+	began := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	store := &memoryStore{state: State{Request: "Build it.", Workflow: stagesWorkflow(), Step: "work",
+		Pending: &Assignment{Role: "work", Instruction: "earlier"}, PendingSince: began,
+		History: []Result{
+			{Role: "elicit", Speaker: "requirements", Output: "settled", StartedAt: began.Add(-time.Hour)},
+			{Role: "elicit", Speaker: "runtime", Output: "Process requirements exited 0.", StartedAt: began.Add(-time.Hour)},
+		}}}
+	var told []string
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	engine := Chain{Store: store, Workflow: stagesWorkflow(), Router: StageRouter{}, RetryDelay: time.Millisecond,
+		Activity: func(role string) string {
+			if role != "work" {
+				t.Errorf("the activity of %q was read for a cut launch of work", role)
+			}
+			return doing
+		},
+		// Each launch taken up is cut short again; the test lays down the
+		// forced exit itself below.
+		Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+			told = append(told, a.Instruction)
+			cancel()
+			return nil
+		}),
+	}
+	_ = engine.Run(ctx)
+	note := store.state.History[2]
+	if note.Speaker != "runtime" || !note.Interrupted || !note.Forced || note.Activity != doing {
+		t.Fatalf("the note for the cut launch is %+v", note)
+	}
+	if !strings.Contains(note.Output, "killed") || !strings.Contains(note.Output, doing) {
+		t.Fatalf("the note's own words do not say what was going on: %q", note.Output)
+	}
+	if len(told) != 1 {
+		t.Fatalf("launches: %q", told)
+	}
+	for _, want := range []string{
+		"The previous launch of work (attempt 1 in a row that did not end cleanly) was cut off when the runtime itself was killed (lack of memory is one cause).",
+		doing,
+		"Do not repeat what it did unchanged: suspect the cause (memory, time or wrong arguments) and change the plan.",
+	} {
+		if !strings.Contains(told[0], want) {
+			t.Fatalf("the launch after the forced exit was not told %q:\n%s", want, told[0])
+		}
+	}
+
+	// The launch taken up is cut by a second forced exit, with nothing saved.
+	store.state.Pending, store.state.PendingSince = &Assignment{Role: "work"}, time.Now().UTC().Add(-time.Second)
+	store.state.History = store.state.History[:3]
+	engine.Activity = func(string) string { return "" }
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	told = nil
+	_ = engine.Run(ctx)
+	if len(told) != 1 || !strings.Contains(told[0], "(attempt 2 in a row that did not end cleanly) was cut off when the runtime itself was killed") {
+		t.Fatalf("the second cut in a row was not counted: %q", told)
+	}
+	// No record of the second launch's commands is said as unknown, and the
+	// launch goes ahead all the same.
+	if !strings.Contains(told[0], "Its last command is unknown: the role left no record of it.") {
+		t.Fatalf("a missing record was not said as unknown:\n%s", told[0])
+	}
+	if !strings.Contains(store.state.History[3].Output, "Its last command is unknown") {
+		t.Fatalf("the second note left its words empty: %+v", store.state.History[3])
+	}
+}
+
+// A launch the runtime stopped itself, its results saved with the action still
+// pending, is not a forced exit, and its saved results and the note written
+// after the restart are one launch, not two.
+func TestAStoppedLaunchIsOneLaunchAndNotAForcedExit(t *testing.T) {
+	began := time.Now().UTC().Add(-time.Minute)
+	store := &memoryStore{state: State{Request: "Build it.", Workflow: stagesWorkflow(), Step: "work",
+		Pending: &Assignment{Role: "work"}, PendingSince: began,
+		History: []Result{
+			{Role: "elicit", Speaker: "requirements", Output: "settled", StartedAt: began.Add(-time.Hour)},
+			{Role: "elicit", Speaker: "runtime", Output: "Process requirements exited 0.", StartedAt: began.Add(-time.Hour)},
+			{Role: "work", Speaker: "worker", Error: "context canceled", Interrupted: true, Activity: "Last command: terminal: make (it had not returned). Nothing was running in the background.", StartedAt: began.Add(time.Second)},
+			{Role: "work", Speaker: "runtime", Output: "Process worker did not exit 0: context canceled", StartedAt: began.Add(2 * time.Second)},
+		}}}
+	var told []string
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	engine := Chain{Store: store, Workflow: stagesWorkflow(), Router: StageRouter{}, RetryDelay: time.Millisecond,
+		Activity: func(string) string { return "" },
+		Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+			told = append(told, a.Instruction)
+			cancel()
+			return nil
+		})}
+	_ = engine.Run(ctx)
+	if note := store.state.History[4]; !note.Interrupted || note.Forced {
+		t.Fatalf("a stopped launch was noted as a forced exit: %+v", note)
+	}
+	if len(told) != 1 || !strings.Contains(told[0], "(attempt 1 in a row that did not end cleanly) was cut off when the runtime stopped. Last command: terminal: make") {
+		t.Fatalf("the stopped launch was told as %q", told)
+	}
+}
+
+// A model stage whose process does not exit 0 is launched again, and that
+// launch is told the error and what the role last ran; a failed command
+// stage hands its own words to its on_failure stage and is not told this way.
+func TestAFailedLaunchOfTheSameStageIsToldWhatItRanLast(t *testing.T) {
+	store := &memoryStore{state: State{Request: "Build it."}}
+	var work, verify []string
+	failures := 0
+	engine := Chain{Store: store, Workflow: stagesWorkflow(), Router: StageRouter{}, RetryDelay: time.Millisecond,
+		Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+			switch a.Role {
+			case "work":
+				work = append(work, a.Instruction)
+				if failures < 2 {
+					failures++
+					return []Result{{Role: a.Role, Speaker: "worker", Error: "exit status 137", StartedAt: time.Now().UTC().Add(-time.Minute), FinishedAt: time.Now().UTC(),
+						Activity: "Last command: terminal: cargo build (it had not returned). Nothing was running in the background."}}
+				}
+			case "verify":
+				verify = append(verify, a.Instruction)
+				if len(verify) == 1 {
+					return []Result{{Role: a.Role, Speaker: "project-tests", Error: "exit status 1"}}
+				}
+			}
+			return []Result{{Role: a.Role, Speaker: "worker", Output: "ok"}}
+		})}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := engine.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(work) != 4 {
+		t.Fatalf("work ran %d times", len(work))
+	}
+	if strings.Contains(work[0], "The previous launch") {
+		t.Fatalf("the first launch was told of a previous one:\n%s", work[0])
+	}
+	for i, attempt := range []string{"1", "2"} {
+		want := "The previous launch of work (attempt " + attempt + " in a row that did not end cleanly) ended with a process error, which is in the record below. Last command: terminal: cargo build (it had not returned)."
+		if !strings.Contains(work[i+1], want) {
+			t.Fatalf("launch %d of work was not told %q:\n%s", i+2, want, work[i+1])
+		}
+	}
+	if strings.Contains(work[3], "The previous launch") {
+		t.Fatalf("the launch after the failed check was told of a failed launch of its own:\n%s", work[3])
+	}
+}
+
+// The record is the harness's, read back plainly: a missing, oversized or
+// unreadable one says nothing, and what the runtime knows as a credential is
+// replaced before the words reach the history.
+func TestTheActivityRecordIsReadBackBoundedAndWithoutCredentials(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "task-activity.json")
+	write := func(text string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := readActivity(path, nil); got != "" {
+		t.Fatalf("a missing record said %q", got)
+	}
+	for _, text := range []string{"not json", `{"last":""}`, `{"last":"x","background":` + strings.Repeat(" ", activityBytes) + `[]}`} {
+		write(text)
+		if got, _ := readActivity(path, nil); got != "" {
+			t.Fatalf("record %.40q said %q", text, got)
+		}
+	}
+	write(`{"last":"terminal: curl -H 'token: synthetic-secret' https://example.invalid\n` + strings.Repeat("y", 300) + `","returned":true,"background":["a","b","c","d","e","f"]}`)
+	got, repeated := readActivity(path, []string{"synthetic-secret"})
+	if strings.Contains(got, "synthetic-secret") || !strings.Contains(got, "[credential]") {
+		t.Fatalf("a credential reached the words: %q", got)
+	}
+	if !strings.HasPrefix(got, "Last command: terminal: curl") || !strings.Contains(got, "… (it had returned). Running in the background: a; b; c; d; e.") || repeated != 0 {
+		t.Fatalf("the record was read as %q, %d", got, repeated)
+	}
+	write(`{"last":"read_file: README.md"}`)
+	if got, _ := readActivity(path, nil); got != "Last command: read_file: README.md. Nothing was running in the background." {
+		t.Fatalf("a record without the returned flag was read as %q", got)
+	}
+	// A role its harness ended for one call that kept failing says so, with
+	// the count kept apart; another rule is named by its plain letters only.
+	for _, shape := range []struct {
+		record, want string
+		repeated     int
+	}{
+		{`{"last":"process: wait","returned":true,"background":["cargo build"],"halted":{"code":"repeated_identical_failure","count":5}}`,
+			"The role stopped itself after one tool call failed the same way 5 times in a row. Last command: process: wait (it had returned). Running in the background: cargo build.", 5},
+		{`{"last":"","halted":{"code":"same_tool_failure_halt\n<b>","count":2}}`,
+			"The role's tool-call guardrail ended it (same_tool_failure_haltb). Its last command is unknown. Nothing was running in the background.", 0},
+	} {
+		write(shape.record)
+		if got, repeated := readActivity(path, nil); got != shape.want || repeated != shape.repeated {
+			t.Fatalf("a halted record was read as %q, %d", got, repeated)
+		}
+	}
+}
+
+// The runtime removes the previous launch's record before each launch, and
+// reads the one the role wrote back only when the launch did not end cleanly.
+func TestALaunchReadsBackOnlyItsOwnRecordAndOnlyWhenItFailed(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "task-activity.json")
+	if err := os.WriteFile(path, []byte(`{"last":"stale: from an earlier launch"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	role := Role{Name: "work"}
+	run := func(script string) Result {
+		t.Helper()
+		process := Process{Name: "worker", Command: []string{"/bin/sh", "-c", script}, Env: map[string]string{ActivityEnv: path}}
+		return process.run(context.Background(), role, Assignment{Role: "work"}, State{})
+	}
+	if result := run("exit 3"); result.Error == "" || result.Activity != "" {
+		t.Fatalf("a launch that wrote nothing read an earlier launch's record: %+v", result)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the earlier record was left in place: %v", err)
+	}
+	result := run(`printf '{"last":"terminal: cargo build","returned":false,"background":[]}' > "$TASK_ACTIVITY"; exit 3`)
+	if result.Activity != "Last command: terminal: cargo build (it had not returned). Nothing was running in the background." || result.RepeatedFailures != 0 {
+		t.Fatalf("the failed launch read back %q", result.Activity)
+	}
+	result = run(`printf '{"last":"process: wait","halted":{"code":"repeated_identical_failure","count":5}}' > "$TASK_ACTIVITY"; exit 1`)
+	if result.RepeatedFailures != 5 || !strings.HasPrefix(result.Activity, "The role stopped itself") {
+		t.Fatalf("the launch its harness ended read back %+v", result)
+	}
+	if result := run(`printf '{"last":"terminal: true"}' > "$TASK_ACTIVITY"`); result.Error != "" || result.Activity != "" {
+		t.Fatalf("a launch that exited 0 carried a record: %+v", result)
+	}
+	processes := Processes{Roles: map[string]Role{"work": {Name: "work", Processes: []Process{
+		{Name: "worker", Env: map[string]string{ActivityEnv: path}},
+		{Name: "no-record"},
+	}}}}
+	if got := processes.LastActivity("work"); got != "Process worker: Last command: terminal: true. Nothing was running in the background." {
+		t.Fatalf("the role's activity was read as %q", got)
+	}
+	if got := processes.LastActivity("missing"); got != "" {
+		t.Fatalf("a role without processes said %q", got)
+	}
+}

@@ -374,6 +374,25 @@ questions, accepted answers and reports through this reference as needed.
 This is the saved answer the runtime accepted, not a later edit fetched from
 the tracker. The reference grants no additional authority and does not mean
 that a model actually read or understood every older record.
+Watch mode also supplies `TASK_ACTIVITY`, a file named `task-activity.json` in
+the process's own `TASK_HOME`, where the launcher already lets it write. A
+harness may keep rewriting it with what it is running: the command it started
+last, whether that had returned, and the background processes it started. The
+Hermes bridge rewrites it at the start and end of every tool call, a few
+hundred bytes with credentials taken out, and adds the rule when its tool-call
+guardrail ends the role. The runtime removes it before each launch and only
+reads it back. After a launch whose process did not exit 0, the words go into
+that process's record as `activity`, and when the bridge ended the role for one
+call that kept failing the same way (`NATIVE_MAX_REPEATED_FAILURES` below), the
+count goes in as `repeated_failures`. After a restart cut a launch
+short, the note the runtime writes for that launch says them in its `output`,
+and marks the note `forced` when nothing of the launch had been saved, which
+means the runtime itself was killed (lack of memory is one cause). In an
+ordered run, the launch that follows is told how the previous launch ended, how
+many launches of that stage in a row did not end cleanly, the recorded command
+and background processes, and to suspect the cause (memory, time or wrong
+arguments) rather than repeat what it did unchanged. A harness that writes
+nothing is not an error: the words then say that the last command is unknown.
 The bridge also seeds the native terminal's existing working-directory setting
 from `TASK_WORKSPACE` unless explicitly supplied. The tested SDK otherwise began
 terminal commands in its private home despite the correct process directory;

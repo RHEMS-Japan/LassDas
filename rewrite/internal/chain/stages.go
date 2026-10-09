@@ -78,6 +78,8 @@ func (r StageRouter) Next(ctx context.Context, state State) (Assignment, error) 
 type stageRun struct {
 	role      string
 	satisfied bool
+	// from and to bound the launch's records in the history.
+	from, to int
 }
 
 // stageRuns groups the history into the launches the runtime made. A launch is
@@ -100,10 +102,10 @@ func (s State) stageRuns() []stageRun {
 				break
 			}
 		}
-		i = j
 		if role != "" && role != "router" {
-			runs = append(runs, stageRun{role: role, satisfied: satisfied})
+			runs = append(runs, stageRun{role: role, satisfied: satisfied, from: i, to: j})
 		}
+		i = j
 	}
 	return runs
 }
@@ -286,7 +288,95 @@ func (s State) stageInstruction(name string) string {
 			fmt.Fprintf(&text, "The %s stage did not exit 0. What its commands returned is in the record below; this run has no failing end state, so it is tried again after you.\n", failed.Name)
 		}
 	}
+	if ending, ok := s.LastEnding(); ok && (ending.Interrupted || ending.Role == name) {
+		text.WriteString(ending.instruction())
+	}
 	return text.String()
+}
+
+// Ending is how the latest launch ended when it did not end cleanly, as the
+// runtime observed it: never what a role wrote about itself.
+type Ending struct {
+	// Role is the role the launch ran.
+	Role string
+	// Attempt counts the launches of Role in a row, this one included, that
+	// did not end cleanly, since another role ran or the requester replied.
+	Attempt int
+	// Interrupted is a launch a restart of the runtime cut short. Forced is
+	// one of those that saved nothing, so the runtime itself was killed.
+	Interrupted, Forced bool
+	// TimedOut is a process stopped at its configured time limit, and
+	// NoModel a launch for which no current model could be selected.
+	TimedOut, NoModel bool
+	// RepeatedFailures is how many times in a row one tool call failed the
+	// same way when the role's harness ended the role for that, else zero.
+	RepeatedFailures int
+	// Activity is what the role last recorded it was running, or empty.
+	Activity string
+}
+
+// LastEnding reports how the latest launch ended, when it did not end
+// cleanly. The records a launch saved before a restart and the runtime's note
+// written for it afterwards are one launch, not two.
+func (s State) LastEnding() (Ending, bool) {
+	var launches []stageRun
+	for _, run := range s.stageRuns() {
+		if n := len(launches); n > 0 && launches[n-1].role == run.role && run.to-run.from == 1 {
+			note := s.History[run.from]
+			if note.Speaker == "runtime" && note.Interrupted && !note.Forced && launchStopped(s.History[launches[n-1].from:launches[n-1].to]) {
+				launches[n-1].to, launches[n-1].satisfied = run.to, false
+				continue
+			}
+		}
+		launches = append(launches, run)
+	}
+	if len(launches) == 0 || launches[len(launches)-1].satisfied {
+		return Ending{}, false
+	}
+	last := launches[len(launches)-1]
+	ending := Ending{Role: last.role}
+	for i := len(launches) - 1; i >= 0 && launches[i].role == last.role && !launches[i].satisfied; i-- {
+		ending.Attempt++
+	}
+	for _, record := range s.History[last.from:last.to] {
+		ending.Interrupted = ending.Interrupted || record.Interrupted
+		ending.Forced = ending.Forced || record.Forced
+		ending.TimedOut = ending.TimedOut || record.Speaker != "runtime" && strings.HasPrefix(record.Error, context.DeadlineExceeded.Error())
+		ending.NoModel = ending.NoModel || record.Speaker != "runtime" && strings.HasPrefix(record.Error, selectionFailure)
+		if record.Activity != "" {
+			ending.Activity = record.Activity
+		}
+		ending.RepeatedFailures = max(ending.RepeatedFailures, record.RepeatedFailures)
+	}
+	return ending, true
+}
+
+// launchStopped reports a launch whose processes the runtime stopped itself.
+func launchStopped(records []Result) bool {
+	for _, record := range records {
+		if record.Interrupted && record.Speaker != "runtime" {
+			return true
+		}
+	}
+	return false
+}
+
+// instruction is the runtime's plain account of the ending for the launch
+// that follows it, so it does not walk into the same end without knowing.
+func (e Ending) instruction() string {
+	how := "ended with a process error, which is in the record below"
+	switch {
+	case e.Forced:
+		how = "was cut off when the runtime itself was killed (lack of memory is one cause)"
+	case e.Interrupted:
+		how = "was cut off when the runtime stopped"
+	case e.TimedOut:
+		how = "was stopped at its time limit"
+	case e.NoModel:
+		how = "could not start: no current model could be selected"
+	}
+	return fmt.Sprintf("The previous launch of %s (attempt %d in a row that did not end cleanly) %s. %s Do not repeat what it did unchanged: suspect the cause (memory, time or wrong arguments) and change the plan.\n",
+		e.Role, e.Attempt, how, activityOrUnknown(e.Activity))
 }
 
 // What the runtime tells a stage that confirms the change, and the question

@@ -3,6 +3,7 @@ package chain
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -121,7 +122,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 			}
 			if err != nil {
 				results[index] = Result{Role: name, Speaker: process.Name, Instruction: assignment.Instruction,
-					Error: "Selecting a current model: " + err.Error(), Interrupted: ctx.Err() != nil, StartedAt: started, FinishedAt: time.Now().UTC()}
+					Error: selectionFailure + err.Error(), Interrupted: ctx.Err() != nil, StartedAt: started, FinishedAt: time.Now().UTC()}
 				continue
 			}
 			selected = append(selected, model)
@@ -305,6 +306,11 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 		command.Stdout, command.Stderr = io.MultiWriter(&output, live.stdout), io.MultiWriter(&diagnostics, live.stderr)
 		defer live.close()
 	}
+	// What the previous launch left is no record of this one: a harness
+	// that writes nothing must read as having recorded nothing.
+	if activity := p.Env[ActivityEnv]; activity != "" {
+		os.Remove(activity)
+	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	finished := make(chan struct{})
 	var stopping sync.WaitGroup
@@ -370,6 +376,9 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	if result.Error != "" && result.Diagnostics != "" {
 		result.Error += "\n" + result.Diagnostics
 	}
+	if result.Error != "" {
+		result.Activity, result.RepeatedFailures = readActivity(p.Env[ActivityEnv], secrets)
+	}
 	for _, secret := range secrets {
 		result.Output = strings.ReplaceAll(result.Output, secret, "[credential]")
 		result.Diagnostics = strings.ReplaceAll(result.Diagnostics, secret, "[credential]")
@@ -378,6 +387,147 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	}
 	result.FinishedAt = time.Now().UTC()
 	return result
+}
+
+// selectionFailure begins the error of a launch for which no current model
+// could be selected; nothing was started for it.
+const selectionFailure = "Selecting a current model: "
+
+// ActivityEnv names the file a role's harness may keep rewriting with what it
+// is running: the command it started last, whether that had returned, and
+// the background processes it had started. The runtime only reads it, after
+// a launch that did not end cleanly; a harness that writes nothing is fine.
+const ActivityEnv = "TASK_ACTIVITY"
+
+// activityBytes bounds how much of the record is read: a harness writes a few
+// hundred bytes, and anything longer is not what it was asked to keep.
+const activityBytes = 4 << 10
+
+// LastActivity is what the role's processes last recorded they were running,
+// one sentence per process that kept a record, or empty when none did. It
+// is read for the note the runtime leaves after a restart cut a launch short.
+func (p Processes) LastActivity(role string) string {
+	var parts []string
+	processes := p.Roles[role].Processes
+	for _, process := range processes {
+		var secrets []string
+		for _, source := range process.Secrets {
+			if value := os.Getenv(source); value != "" {
+				secrets = append(secrets, value)
+			}
+		}
+		activity, _ := readActivity(process.Env[ActivityEnv], secrets)
+		if activity == "" {
+			continue
+		}
+		if len(processes) > 1 {
+			activity = "Process " + process.Name + ": " + activity
+		}
+		parts = append(parts, activity)
+	}
+	return strings.Join(parts, " ")
+}
+
+// readActivity turns the harness's record into plain sentences for the next
+// launch and the history: the last command and what ran in the background,
+// and the times in a row one tool call failed the same way when the harness
+// ended the role for that. A missing, oversized or unreadable record says
+// nothing; the caller says that the last command is unknown. Every credential
+// the runtime knows is replaced.
+func readActivity(path string, secrets []string) (string, int) {
+	if path == "" {
+		return "", 0
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", 0
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, activityBytes+1))
+	if err != nil || len(data) > activityBytes {
+		return "", 0
+	}
+	var record struct {
+		Last       string   `json:"last"`
+		Returned   *bool    `json:"returned"`
+		Background []string `json:"background"`
+		Halted     *struct {
+			Code  string `json:"code"`
+			Count int    `json:"count"`
+		} `json:"halted"`
+	}
+	if json.Unmarshal(data, &record) != nil || strings.TrimSpace(record.Last) == "" && record.Halted == nil {
+		return "", 0
+	}
+	clean := func(text string) string {
+		for _, secret := range secrets {
+			if secret != "" {
+				text = strings.ReplaceAll(text, secret, "[credential]")
+			}
+		}
+		return clipRunes(strings.Join(strings.Fields(text), " "), activityRunes)
+	}
+	var text strings.Builder
+	repeated := 0
+	if halt := record.Halted; halt != nil {
+		// The harness's own tool-call guardrail ended the role: a rule's
+		// name, not words, so only its plain letters are kept.
+		if code := strings.Map(guardrailCode, halt.Code); code == RepeatedFailureHalt && halt.Count > 0 {
+			repeated = halt.Count
+			fmt.Fprintf(&text, "The role stopped itself after one tool call failed the same way %d times in a row. ", halt.Count)
+		} else {
+			fmt.Fprintf(&text, "The role's tool-call guardrail ended it (%s). ", clipRunes(code, 60))
+		}
+	}
+	if last := clean(record.Last); last == "" {
+		text.WriteString("Its last command is unknown.")
+	} else {
+		fmt.Fprintf(&text, "Last command: %s", last)
+		if record.Returned != nil && *record.Returned {
+			text.WriteString(" (it had returned).")
+		} else if record.Returned != nil {
+			text.WriteString(" (it had not returned).")
+		} else {
+			text.WriteString(".")
+		}
+	}
+	var background []string
+	for _, command := range record.Background {
+		if command = clean(command); command != "" && len(background) < activityBackground {
+			background = append(background, command)
+		}
+	}
+	if len(background) == 0 {
+		text.WriteString(" Nothing was running in the background.")
+	} else {
+		fmt.Fprintf(&text, " Running in the background: %s.", strings.Join(background, "; "))
+	}
+	return text.String(), repeated
+}
+
+// RepeatedFailureHalt is the rule a harness names when it ended the role for
+// one tool call that kept failing the same way.
+const RepeatedFailureHalt = "repeated_identical_failure"
+
+func guardrailCode(r rune) rune {
+	if r == '_' || r == '-' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+		return r
+	}
+	return -1
+}
+
+// What one command and the background list keep in a sentence.
+const (
+	activityRunes      = 200
+	activityBackground = 5
+)
+
+func clipRunes(text string, limit int) string {
+	if utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[:limit-1]) + "…"
 }
 
 func processPrompt(role Role, process Process, assignment Assignment, state State) string {

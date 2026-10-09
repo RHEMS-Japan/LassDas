@@ -151,6 +151,89 @@ def failure_summary(text):
     return clip(text)
 
 
+# What the activity record keeps of one command, and how many background
+# processes it names. The record is rewritten at every command, so it stays a
+# few hundred bytes.
+ACTIVITY_CHARACTERS = 200
+ACTIVITY_BACKGROUND = 5
+# The arguments that say what a tool was asked to do, in the order they are
+# looked for; a tool without any of them is named alone.
+ACTIVITY_ARGUMENTS = ("command", "path", "file_path", "pattern", "query", "url", "action", "session_id")
+
+
+def command_summary(name, args):
+    """One line naming the tool and what it was asked to do, never the whole
+    argument record: a file tool's content stays out of it."""
+    summary = str(name or "unknown tool")
+    if isinstance(args, dict):
+        details = [str(args[key]) for key in ACTIVITY_ARGUMENTS if args.get(key) not in (None, "")]
+        if details:
+            summary += ": " + " ".join(details)
+        if args.get("background"):
+            summary += " (in the background)"
+    return clip(summary, ACTIVITY_CHARACTERS - 1)
+
+
+class Activity:
+    """Keeps TASK_ACTIVITY, the small file the runtime reads after a launch
+    that did not finish: the command the native agent started last, whether it
+    had returned, and the background processes it had running. A forced exit
+    of the whole runtime leaves no other trace of what the role was doing, so
+    the file is rewritten at every command start and end. Credentials are
+    taken out before it is written; a failure to write never stops the role."""
+
+    def __init__(self, path, registry):
+        self.path = Path(path) if path else None
+        self.registry = registry
+        self.lock = threading.Lock()
+        self.last, self.call, self.returned = "", None, True
+        self.halt = None
+        self.broken = False
+
+    def started(self, call_id, name, args, *_):
+        with self.lock:
+            self.last, self.call, self.returned = command_summary(name, args), call_id, False
+            self.write()
+
+    def completed(self, call_id, name, args, *_):
+        with self.lock:
+            if call_id == self.call:
+                self.returned = True
+            self.write()
+
+    def halted(self, code, count):
+        """The tool-call guardrail ended the role: which rule, and for a call
+        that kept failing the same way, how many times in a row."""
+        with self.lock:
+            self.halt = {"code": str(code or "unknown"), "count": count if isinstance(count, int) else 0}
+            self.write()
+
+    def background(self):
+        try:
+            sessions = self.registry.list_sessions()
+        except Exception:
+            return []
+        running = [clip(str(session.get("command", "")), ACTIVITY_CHARACTERS - 1) for session in sessions
+                   if isinstance(session, dict) and session.get("status") == "running" and session.get("command")]
+        return running[:ACTIVITY_BACKGROUND]
+
+    def write(self):
+        if self.path is None or self.broken:
+            return
+        record = {"last": self.last, "returned": self.returned, "background": self.background()}
+        if self.halt:
+            record["halted"] = self.halt
+        text = scrub(json.dumps(record, ensure_ascii=False), credentials())
+        try:
+            draft = self.path.with_name(self.path.name + ".tmp")
+            draft.write_text(text, encoding="utf-8")
+            os.replace(draft, self.path)
+        except Exception as error:
+            # Said once: a role whose record cannot be written still works.
+            self.broken = True
+            print(f"Activity record not written: {error}", file=sys.stderr)
+
+
 def save_transcript(result):
     """Keep the whole conversation the native agent had, for reading afterwards,
     and take the credentials out of what the native agent logged by itself.
@@ -208,6 +291,7 @@ def main():
 
     prompt = sys.stdin.read()
     reasoning = {"effort": os.environ.get("NATIVE_REASONING_EFFORT", "low")}
+    activity = Activity(os.environ.get("TASK_ACTIVITY"), process_registry)
     sys.stderr = WithoutKeyLines(sys.stderr)
     with contextlib.redirect_stdout(sys.stderr):
         agent = AIAgent(
@@ -231,6 +315,9 @@ def main():
             # operator may set one, and none is set otherwise.
             max_iterations=max(0, int(os.environ.get("NATIVE_MAX_TURNS", "0"))) or 1_000_000_000,
             skip_context_files=True, skip_memory=True, skip_background_review=True,
+            # The SDK's own hooks for a tool call's start and end; they only
+            # record what is running, for the runtime to read after a crash.
+            tool_start_callback=activity.started, tool_complete_callback=activity.completed,
         )
     repeated_failures = None
     if repeated_failure_limit:
@@ -282,10 +369,12 @@ def main():
         guardrail = result.get("guardrail")
         if repeated_failures is not None and repeated_failures.stopped:
             halted = repeated_failures.stopped
+            activity.halted("repeated_identical_failure", repeated_failures.count)
         elif guardrail or result.get("turn_exit_reason") == "guardrail_halt":
             details = guardrail if isinstance(guardrail, dict) else {}
             halted = scrub(f"Stopped by the native agent's tool-call guardrail ({details.get('code', 'unknown')}): "
                            f"{details.get('message', '')}", credentials())
+            activity.halted(details.get("code"), details.get("count"))
         if halted:
             try:
                 with contextlib.redirect_stdout(sys.stderr):

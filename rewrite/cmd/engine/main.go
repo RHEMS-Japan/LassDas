@@ -432,6 +432,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		Executor: questionAware, Store: store,
 		Workflow: cfg.Workflow,
 		Observe:  observe,
+		Activity: executor.LastActivity,
 	}
 	if questionMonitor != nil {
 		engine.QuestionPosted = questionMonitor.posted
