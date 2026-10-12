@@ -666,7 +666,11 @@ func sameFailures(history []chain.Result, role, event string, launch int) bool {
 // before it ended, when it did not end cleanly; which attempt this is when
 // it follows the stage's own failed or cut-off launch; how many more forced
 // exits pause the request, when the launch before was one; and the models
-// last. sameStage reports a rerun after the stage's own launch.
+// last. sameStage reports a rerun after the stage's own launch. The attempt
+// is counted as the pause at intake.max_stage_attempts counts it, so the two
+// never tell the requester different numbers: a launch the runtime stopped
+// itself is not counted, and the requester's words start the count over.
+// After launches that count nothing, no attempt is named.
 func rerunNoticeText(cfg config, directory, role string, before []chain.Result, models string) (string, bool) {
 	name := japaneseStage(role)
 	ending, ended := chain.State{History: before}.LastEnding()
@@ -679,8 +683,13 @@ func rerunNoticeText(cfg config, directory, role string, before []chain.Result, 
 	if !sameStage {
 		text.WriteString(name + "をやり直します。")
 	} else {
-		text.WriteString(kindsText(ending))
-		fmt.Fprintf(&text, "%sをやり直します（%d 回目）。", name, ending.Attempt+1)
+		counted, count := chain.State{History: before}.FailedInARow()
+		text.WriteString(kindsText(counted, count))
+		if count > 0 {
+			fmt.Fprintf(&text, "%sをやり直します（%d 回目）。", name, count+1)
+		} else {
+			text.WriteString(name + "をやり直します。")
+		}
 		if ending.Forced {
 			text.WriteString(forcedExitsLeft(directory, role))
 		}
@@ -712,23 +721,30 @@ func endingText(cfg config, ending chain.Ending) string {
 }
 
 // kindsText says, when several launches of the stage in a row did not end
-// cleanly, how many there were and how many ended each way: the sentence
-// before it describes the last one only.
-func kindsText(ending chain.Ending) string {
-	if ending.Attempt < 2 {
+// cleanly, how many there were and how many ended each way, from the count
+// and the ending FailedInARow reports: the sentence before it describes the
+// last one only.
+func kindsText(counted chain.Ending, count int) string {
+	if count < 2 {
 		return ""
 	}
+	return fmt.Sprintf("正常に終わらなかった回が %d 回続いています%s。", count, countedKinds(counted.Kinds))
+}
+
+// countedKinds names how the launches FailedInARow counts ended, in the words
+// of both the rerun and the pause notices. A launch the runtime stopped itself
+// is not counted, so it is not named either.
+func countedKinds(kinds chain.EndingKinds) string {
 	var parts []string
 	for _, kind := range []struct {
 		count int
 		words string
-	}{{ending.Kinds.Forced, "強制終了"}, {ending.Kinds.Stopped, "本体の停止"}, {ending.Kinds.TimedOut, "時間の上限"},
-		{ending.Kinds.NoModel, "モデルを選べず"}, {ending.Kinds.Errors, "エラー"}} {
+	}{{kinds.Forced, "強制終了"}, {kinds.TimedOut, "時間の上限"}, {kinds.NoModel, "モデルを選べず"}, {kinds.Errors, "エラー"}} {
 		if kind.count > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d 回", kind.words, kind.count))
 		}
 	}
-	return fmt.Sprintf("正常に終わらなかった回が %d 回続いています（%s）。", ending.Attempt, strings.Join(parts, "、"))
+	return "（" + strings.Join(parts, "、") + "）"
 }
 
 // forcedExitsLeft says how many more forced exits pause the request, as its
