@@ -1790,3 +1790,36 @@ func TestTheEnvironmentPauseNoticeQuotesTheLatestReportOnly(t *testing.T) {
 		})
 	}
 }
+
+// Only the runtime's own record of that decision holds a request. A request
+// picked up with any other history, after a restart, an answer or a resume,
+// is launched as before.
+func TestOnlyTheRecordOfThePauseHoldsARequest(t *testing.T) {
+	cfg := environmentStagesConfig(t, 2)
+	remote := &noticeTracker{}
+	remote.install(t, alwaysChoose("implement"))
+	a := &attemptRecords{}
+	issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
+	issue.Creator.ID = 55
+	for _, tc := range []struct {
+		name    string
+		history []chain.Result
+	}{
+		{"after the first stage", a.clean("elicit")},
+		{"after a routing failure", append(a.clean("elicit"), a.routing()...)},
+		{"after another note of the runtime", append(a.clean("elicit"), chain.Result{Role: "router", Speaker: "runtime", Output: "elicit reached the entrance rework limit after 2 repeats"})},
+		{"after the requester's words", append(a.clean("elicit"), a.words("")...)},
+		{"after a later stage", append(a.clean("elicit"), a.failed("implement")...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, directory := noticeJob(t, chain.State{Workflow: cfg.Workflow, Step: "elicit", History: tc.history})
+			held, err := holdPausedRequest(context.Background(), cfg, issue, directory, noticeRequest, time.Second, func(string) {})
+			if err != nil || held || len(loadWorkLimit(t, directory).Pauses) != 0 {
+				t.Fatalf("held=%t err=%v pauses=%+v", held, err, loadWorkLimit(t, directory).Pauses)
+			}
+		})
+	}
+	if posted := remote.withPrefix("この依頼の自動処理"); len(posted) != 0 {
+		t.Fatalf("a pause was said: %q", posted)
+	}
+}
