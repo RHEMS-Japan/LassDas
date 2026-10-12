@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -721,5 +722,231 @@ func TestStageRouterRefusesToRouteWithoutAnOrderedRun(t *testing.T) {
 	state := State{Request: "settled", Workflow: flow, History: []Result{{Role: "elicit", Output: "settled"}}}
 	if _, err := (StageRouter{}).Next(context.Background(), state); err == nil {
 		t.Fatal("the entrance question was taken without a configured decision router")
+	}
+}
+
+// environmentFlow is the ordered run above without a question role, whose
+// decision after the first stage may pause the request up to limit times.
+func environmentFlow(limit int) *Workflow {
+	flow := stagesWorkflow()
+	flow.EnvironmentPauseLimit = limit
+	return flow
+}
+
+// resumeAfterPause appends what the watch writes to the history when an
+// authorized 再開 releases the pause.
+func resumeAfterPause(state *State) {
+	state.History = append(state.History, Result{Speaker: "requester", Output: "再開\nメモリを 8 GiB にしました。", FinishedAt: time.Now().UTC()})
+}
+
+// Without a question role, the decision after the first stage can pause the
+// request before anything is implemented. Nothing more runs or is decided
+// until words that resume it join the history; then the decision is asked
+// again and the run goes on.
+func TestWithoutAQuestionRoleTheDecisionPausesBeforeAnyImplementation(t *testing.T) {
+	store := &memoryStore{state: State{Request: "Build the requested tool and verify it here."}}
+	var ran, instructions []string
+	decisions := 0
+	reply := EnvironmentPause
+	judge := testJudge(func(_ context.Context, _ State, _ string, choices map[string]string) (string, error) {
+		decisions++
+		if len(choices) != 2 || choices["work"] == "" {
+			t.Errorf("decision %d was offered %v", decisions, choices)
+		}
+		for _, words := range []string{"falls short", "only the demand is unknown", "再開"} {
+			if !strings.Contains(choices[EnvironmentPause], words) {
+				t.Errorf("the pause was offered without %q: %q", words, choices[EnvironmentPause])
+			}
+		}
+		return reply, nil
+	})
+	engine := Chain{Store: store, Workflow: environmentFlow(2), RetryDelay: time.Millisecond,
+		Router: StageRouter{Entrance: DecisionRouter{Judge: judge, Roles: stagePurposes()}},
+		Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+			ran, instructions = append(ran, a.Role), append(instructions, a.Instruction)
+			return []Result{{Role: a.Role, Speaker: "fixture", Output: "The build needs about 6 GiB; the memory limit is 2048 MiB. The operator has to raise it to 8 GiB."}}
+		})}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for attempt := 1; attempt <= 2; attempt++ {
+		// The second run meets the same pause: it decides nothing again.
+		if err := engine.Run(ctx); !errors.Is(err, ErrEnvironmentPause) {
+			t.Fatalf("run %d: %v", attempt, err)
+		}
+		if strings.Join(ran, ",") != "elicit" || decisions != 1 {
+			t.Fatalf("run %d: ran=%v decisions=%d", attempt, ran, decisions)
+		}
+	}
+	state := store.state
+	last := state.History[len(state.History)-1]
+	if last.Role != "router" || last.Speaker != "runtime" || last.Error != "" || !state.EnvironmentPaused() || state.EnvironmentPauses() != 1 ||
+		state.Done || state.Waiting || state.Pending != nil || state.Step != "elicit" {
+		t.Fatalf("the pause left %+v (last record %+v)", state, last)
+	}
+	if !strings.Contains(instructions[0], "chooses to pause this request") {
+		t.Fatalf("the first stage was not told its report is read for a pause: %q", instructions[0])
+	}
+	resumeAfterPause(&store.state)
+	reply = "work"
+	if err := engine.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if want := "elicit,work,verify,deliver,confirm"; strings.Join(ran, ",") != want || decisions != 2 || !store.state.Done || store.state.EnvironmentPauses() != 1 {
+		t.Fatalf("after the resume: ran=%v decisions=%d done=%t", ran, decisions, store.state.Done)
+	}
+}
+
+// A decision that chooses the pause every time, with a 再開 written after every
+// pause, is asked as many times as the limit allows; after that the run goes
+// on without a decision and finishes.
+func TestAPauseChosenEveryTimeStopsAtItsLimit(t *testing.T) {
+	for _, limit := range []int{1, 2} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			store := &memoryStore{state: State{Request: "Build the requested tool and verify it here."}}
+			var ran []string
+			decisions, pauses := 0, 0
+			engine := Chain{Store: store, Workflow: environmentFlow(limit), RetryDelay: time.Millisecond,
+				Router: StageRouter{Entrance: DecisionRouter{Roles: stagePurposes(), Judge: testJudge(func(_ context.Context, _ State, _ string, choices map[string]string) (string, error) {
+					decisions++
+					if _, offered := choices[EnvironmentPause]; !offered {
+						t.Errorf("decision %d was asked without the pause: %v", decisions, choices)
+					}
+					return EnvironmentPause, nil
+				})}},
+				Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+					ran = append(ran, a.Role)
+					return []Result{{Role: a.Role, Speaker: "fixture", Output: "The memory limit is too small for the build."}}
+				})}
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			var err error
+			for ctx.Err() == nil {
+				if err = engine.Run(ctx); !errors.Is(err, ErrEnvironmentPause) {
+					break
+				}
+				pauses++
+				resumeAfterPause(&store.state)
+			}
+			t.Logf("limit %d: %d decisions, %d pauses, launches %v, done=%t", limit, decisions, pauses, ran, store.state.Done)
+			if err != nil || decisions != limit || pauses != limit || !store.state.Done || store.state.EnvironmentPauses() != limit ||
+				strings.Join(ran[len(ran)-4:], ",") != "work,verify,deliver,confirm" {
+				t.Fatalf("err=%v decisions=%d pauses=%d ran=%v done=%t", err, decisions, pauses, ran, store.state.Done)
+			}
+		})
+	}
+}
+
+// When the environment fits, the decision chooses the next stage and the run
+// launches the same stages as a run without the setting.
+func TestAnEnvironmentThatFitsRunsTheSameStages(t *testing.T) {
+	launches := func(flow *Workflow) ([]string, int, State) {
+		store := &memoryStore{state: State{Request: "Build the requested tool and verify it here."}}
+		var ran []string
+		decisions := 0
+		engine := Chain{Store: store, Workflow: flow, RetryDelay: time.Millisecond,
+			Router: StageRouter{Entrance: DecisionRouter{Roles: stagePurposes(), Judge: testJudge(func(context.Context, State, string, map[string]string) (string, error) {
+				decisions++
+				return "work", nil
+			})}},
+			Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+				ran = append(ran, a.Role)
+				return []Result{{Role: a.Role, Speaker: "fixture", Output: "The build fits within the observed limits."}}
+			})}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := engine.Run(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return ran, decisions, store.state
+	}
+	before, none, _ := launches(stagesWorkflow())
+	after, one, state := launches(environmentFlow(2))
+	if !reflect.DeepEqual(before, after) || none != 0 || one != 1 || !state.Done || state.EnvironmentPauses() != 0 {
+		t.Fatalf("without the setting %v (%d decisions), with it %v (%d decisions)", before, none, after, one)
+	}
+	for _, result := range state.History {
+		if result.Role == "router" {
+			t.Fatalf("a run that fits left a routing note: %+v", result)
+		}
+	}
+}
+
+// The pause is offered only after the first stage, only before the work has
+// been handed to a later stage, and only below the limit. A run with a
+// question role keeps its own choices even when a saved workflow carries the
+// setting.
+func TestThePauseIsOfferedOnlyAtElicitationBeforeHandoff(t *testing.T) {
+	a := stageRecords{}
+	flow := environmentFlow(2)
+	flow.Stages[2].OnFailure = "elicit"
+	pause := Result{Role: "router", Speaker: "runtime", Output: environmentPauseNote}
+	words := Result{Speaker: "requester", Output: "再開"}
+	for _, tc := range []struct {
+		name    string
+		flow    *Workflow
+		history []Result
+		want    string
+	}{
+		{"after the first stage", flow, a.clean("elicit"), EnvironmentPause + ",work"},
+		{"after one pause and its resume", flow, append(a.clean("elicit"), pause, words), EnvironmentPause + ",work"},
+		{"after the first stage ran again", flow, append(append(a.clean("elicit"), pause, words), a.clean("elicit")...), EnvironmentPause + ",work"},
+		{"at the limit", flow, append(a.clean("elicit"), pause, words, pause, words), "work"},
+		{"after handoff", flow, append(append(append(a.clean("elicit"), a.clean("work")...), a.failed("verify")...), a.clean("elicit")...), "work"},
+		{"after a failed first stage", flow, a.failed("elicit"), "elicit"},
+		{"without the setting", stagesWorkflow(), a.clean("elicit"), "work"},
+		{"with a question role", func() *Workflow { f := environmentFlow(2); f.Question = "ask_requester"; return f }(), a.clean("elicit"), "elicit,ask_requester,work"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := State{Workflow: tc.flow, History: tc.history}
+			if got := strings.Join(state.stageActions(), ","); got != tc.want {
+				t.Fatalf("offered %s, want %s", got, tc.want)
+			}
+		})
+	}
+	if text := (State{Workflow: flow}).stageInstruction("elicit"); !strings.Contains(text, "chooses to pause this request") {
+		t.Fatalf("the first stage was not told about the pause: %q", text)
+	}
+	spent := State{Workflow: flow, History: append(a.clean("elicit"), pause, words, pause, words)}
+	if text := spent.stageInstruction("elicit"); strings.Contains(text, "pause") {
+		t.Fatalf("the first stage was told about a pause it can no longer lead to: %q", text)
+	}
+}
+
+// stageRecords writes one launch of a stage the way the runtime records it.
+type stageRecords struct{}
+
+func (stageRecords) clean(stage string) []Result {
+	return []Result{{Role: stage, Speaker: "fixture", Output: "report"}, {Role: stage, Speaker: "runtime", Output: "Runtime record"}}
+}
+
+func (stageRecords) failed(stage string) []Result {
+	return []Result{{Role: stage, Speaker: "fixture", Error: "exit status 1"}, {Role: stage, Speaker: "runtime", Output: "Runtime record"}}
+}
+
+func TestTheEnvironmentPauseSettingIsRefusedWhereItCannotApply(t *testing.T) {
+	if err := environmentFlow(2).Validate(stagePurposes()); err != nil {
+		t.Fatal(err)
+	}
+	for _, variant := range []string{"negative", "connected roles", "question role", "command first", "role of the same name"} {
+		t.Run(variant, func(t *testing.T) {
+			flow, roles := environmentFlow(2), stagePurposes()
+			switch variant {
+			case "negative":
+				flow.EnvironmentPauseLimit = -1
+			case "connected roles":
+				flow = &Workflow{Start: []string{"elicit"}, EnvironmentPauseLimit: 1,
+					After: map[string][]string{"elicit": {"done"}}, Recover: map[string][]string{"elicit": {"elicit"}}}
+			case "question role":
+				flow.Question = "ask_requester"
+			case "command first":
+				flow.Stages[0], flow.Stages[2] = Stage{Name: "verify", Kind: CommandStage, OnFailure: "work"}, Stage{Name: "elicit", Kind: ModelStage}
+			case "role of the same name":
+				roles[EnvironmentPause] = "a configured role"
+			}
+			err := flow.Validate(roles)
+			if err == nil || !strings.Contains(err.Error(), "environment_pause_limit") {
+				t.Fatalf("accepted or refused for another reason: %v", err)
+			}
+		})
 	}
 }

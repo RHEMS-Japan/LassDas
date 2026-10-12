@@ -19,6 +19,11 @@ const (
 	CommandStage = "command"
 )
 
+// EnvironmentPause is the action the decision after the first stage is offered
+// when workflow.environment_pause_limit allows it: pause the request before
+// any implementation for the operator to prepare the environment.
+const EnvironmentPause = "pause_for_environment"
+
 // Stage is one step of an ordered run. Name is a configured role. OnFailure
 // names the model stage that receives a failed command's output before the
 // command runs again; a model stage takes none, because a process error simply
@@ -250,8 +255,31 @@ func (s State) stageActions() []string {
 		// The change has been read: requirements again, the requester, or the
 		// next stage, as after the first stage.
 		return []string{stages[0].Name, s.Workflow.Question, next}
+	case index == 0 && next != "done" && s.environmentPauseOpen():
+		// Nobody can be asked: the request may pause for the operator before
+		// anything is implemented, or go on to the next stage.
+		return []string{EnvironmentPause, next}
 	}
 	return []string{next}
+}
+
+// environmentPauseOpen reports that the decision after the first stage may
+// still pause the request because the environment falls short: the operator
+// allows it, no question role is configured, the first stage is a model
+// stage, no later stage has run yet, and the request has paused that way
+// fewer times than allowed. Once the work has been handed to a later stage,
+// the pause is not offered again, even when a failure returns to the first.
+func (s State) environmentPauseOpen() bool {
+	w := s.Workflow
+	if w == nil || len(w.Stages) == 0 || w.EnvironmentPauseLimit <= 0 || w.Question != "" || w.Stages[0].Kind != ModelStage {
+		return false
+	}
+	for _, run := range s.stageRuns() {
+		if _, index := stageAt(w.Stages, run.role); index > 0 {
+			return false
+		}
+	}
+	return s.EnvironmentPauses() < w.EnvironmentPauseLimit
 }
 
 // stageInstruction is the runtime's own plain text saying which stage this is
@@ -272,6 +300,8 @@ func (s State) stageInstruction(name string) string {
 		text.WriteString("The runtime launches this stage's configured commands and records what they returned. Their exit status is the only thing that satisfies this stage.\n")
 	} else if index == 0 && s.Workflow.Question != "" {
 		text.WriteString("The configured decision model reads your requirements report and chooses another requirements pass, a question or the next stage. Use ordinary prose; the runtime does not grade its wording. A later command stage proves completed work.\n")
+	} else if index == 0 && s.environmentPauseOpen() {
+		text.WriteString(environmentPauseStageInstruction)
 	} else if stage.Confirm && s.Workflow.Question != "" {
 		fmt.Fprintf(&text, confirmationStageInstruction, stages[index+1].Name)
 	} else {
@@ -491,6 +521,17 @@ func (w *Workflow) validateStages(roles map[string]string) error {
 			return errors.New("the entrance stage must be a model stage for the requester to be asked at all")
 		}
 	}
+	if w.EnvironmentPauseLimit > 0 {
+		switch {
+		case w.Question != "":
+			return fmt.Errorf("workflow.environment_pause_limit is for an ordered run without a question role; with %q, elicitation asks the requester instead", w.Question)
+		case w.Stages[0].Kind != ModelStage:
+			return errors.New("workflow.environment_pause_limit needs a first stage that is a model stage, whose report the decision reads")
+		}
+		if _, named := roles[EnvironmentPause]; named {
+			return fmt.Errorf("workflow.environment_pause_limit offers the decision %q, which is also the name of a configured role", EnvironmentPause)
+		}
+	}
 	confirms := false
 	for index, stage := range w.Stages {
 		if !stage.Confirm {
@@ -562,3 +603,39 @@ func firstLine(text string) string {
 	line, _, _ := strings.Cut(text, "\n")
 	return line
 }
+
+// EnvironmentPauses is how many times the decision after the first stage
+// paused this request because the environment falls short, as the runtime's
+// own records of those pauses in the history say. A resume does not take any
+// away.
+func (s State) EnvironmentPauses() int {
+	count := 0
+	for _, record := range s.History {
+		if environmentPauseRecord(record) {
+			count++
+		}
+	}
+	return count
+}
+
+// EnvironmentPaused reports a request whose latest record is that pause: no
+// words have resumed it since.
+func (s State) EnvironmentPaused() bool {
+	return len(s.History) > 0 && environmentPauseRecord(s.History[len(s.History)-1])
+}
+
+func environmentPauseRecord(record Result) bool {
+	return record.Role == "router" && record.Speaker == "runtime" && record.Error == "" && record.Output == environmentPauseNote
+}
+
+// What the first stage is told while the decision after it can pause the
+// request, and what the decision is told that pause means. These are plain
+// words for a model, not a format to answer in.
+const environmentPauseStageInstruction = "The configured decision model reads your requirements report and chooses to pause this request before anything is implemented, for the operator to enlarge or prepare the execution environment, or the next stage. Use ordinary prose; the runtime does not grade its wording. A later command stage proves completed work.\n"
+
+const environmentPauseChoice = "Pause this request before anything is implemented, because a fact in the requirements report already shows the execution environment falls short of what the agreed verification will build and run. Nothing runs while it is paused; the requester is told what the report says is missing and what the operator would have to prepare, and after the operator enlarges or prepares the environment, 再開 continues this same request from this decision. Choose it only then: when only the demand is unknown, choose the next stage, where the heaviest part of the verification runs once first."
+
+// environmentPauseNote is the runtime's record that the decision after the
+// first stage paused the request. It is the runtime's own text, and the record
+// that holds the request until words that resume it follow.
+const environmentPauseNote = "The decision after the first stage paused this request before anything was implemented, because a fact shows the execution environment falls short of the agreed verification. Nothing runs until 再開 is written, after the operator has enlarged or prepared the environment."

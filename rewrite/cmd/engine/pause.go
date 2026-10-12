@@ -24,6 +24,7 @@ const (
 	activeLimitPause    = "active-limit"
 	hardExitPause       = "hard-exit-limit"
 	stageAttemptsPause  = "stage-attempt-limit"
+	environmentPause    = "environment-short"
 	workPauseNotice     = "work-paused"
 	workResumeNotice    = "work-resume-accepted"
 	workRecoveredNotice = "work-auto-resumed"
@@ -76,7 +77,7 @@ func readWorkLimit(directory string) (workLimitRecord, error) {
 		return workLimitRecord{}, errPauseRecord
 	}
 	for i, pause := range record.Pauses {
-		if (pause.Reason != activeLimitPause && pause.Reason != hardExitPause && pause.Reason != stageAttemptsPause) || pause.At.IsZero() || pause.NoticeID < 0 || pause.Elapsed < 0 {
+		if !knownPauseReason(pause.Reason) || pause.At.IsZero() || pause.NoticeID < 0 || pause.Elapsed < 0 {
 			return workLimitRecord{}, errPauseRecord
 		}
 		if i+1 < len(record.Pauses) && (pause.Resume == nil || !pause.Resume.Applied) {
@@ -108,7 +109,7 @@ func (r workLimitRecord) held() bool {
 // A pause is not a native stop. Its caller owns cancellation and waits for the
 // child before recording its measured end or recovering an unconfirmed interval.
 func recordWorkPause(directory, reason string, at time.Time) error {
-	if (reason != activeLimitPause && reason != hardExitPause && reason != stageAttemptsPause) || at.IsZero() {
+	if !knownPauseReason(reason) || at.IsZero() {
 		return errors.New("a work pause needs its controller reason and time")
 	}
 	record, err := readWorkLimit(directory)
@@ -119,12 +120,19 @@ func recordWorkPause(directory, reason string, at time.Time) error {
 	return saveWorkLimit(directory, record)
 }
 
+// knownPauseReason reports a reason this controller records itself.
+func knownPauseReason(reason string) bool {
+	return reason == activeLimitPause || reason == hardExitPause || reason == stageAttemptsPause || reason == environmentPause
+}
+
 func pauseReason(reason string) string {
 	switch reason {
 	case activeLimitPause:
 		return "今回任された区間の実稼働時間が、設定された上限に達したためです。"
 	case stageAttemptsPause:
 		return "同じ工程で正常に終わらなかった起動が、設定の回数上限に達したためです。"
+	case environmentPause:
+		return "要件確定の後の判断で、合意した検証がこの実行環境に収まらないと分かったためです。実装はまだ始めていません。"
 	}
 	return "強制終了が設定の回数上限に達したためです。"
 }
@@ -269,6 +277,9 @@ func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	if recoveryErr == nil {
 		recoveryErr = pauseStageAttempts(cfg, directory, time.Now().UTC())
 	}
+	if recoveryErr == nil {
+		recoveryErr = pauseEnvironment(directory, time.Now().UTC())
+	}
 	record, recordErr := readWorkLimit(directory)
 	if recoveryErr != nil {
 		recordErr = recoveryErr
@@ -316,11 +327,16 @@ func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 		applyStatus(ctx, cfg, issue, directory, awaitingStatus, observe)
 		assignTurn(ctx, cfg, issue, directory, "requester", observe)
 		words := pausedWorkText(*pause, record.Clock, record.StageExits)
-		if pause.Reason == stageAttemptsPause {
+		if pause.Reason == stageAttemptsPause || pause.Reason == environmentPause {
 			// Nothing has run since the pause, so the history still says what
-			// reached the limit.
+			// reached the limit, or what the decision read.
 			if state, err := savedHistory(directory); err == nil {
-				words = pausedText(stageAttemptsReason(state, cfg.Intake.stageAttempts()), *pause, record.Clock)
+				switch pause.Reason {
+				case stageAttemptsPause:
+					words = pausedText(stageAttemptsReason(state, cfg.Intake.stageAttempts()), *pause, record.Clock)
+				case environmentPause:
+					words = pausedText(environmentReason(cfg, state), *pause, record.Clock)
+				}
 			}
 		}
 		id, err := n.sayPauseEvent(ctx, workPauseNotice, event, words)
@@ -522,4 +538,66 @@ func stageAttemptsReason(state chain.State, limit int) string {
 		return fmt.Sprintf("%s正常に終わらなかった起動があり%s、上限の %d 回に達したためです。", where, kinds, limit)
 	}
 	return fmt.Sprintf("%s正常に終わらなかった起動が %d 回続き%s、上限の %d 回に達したためです。", where, count, kinds, limit)
+}
+
+// pauseEnvironment pauses a request whose latest record is the runtime's note
+// that the decision after the first stage paused it because the environment
+// falls short. The run that chose it stopped before launching anything, and
+// this runs while the request has no child. The words of a 再開 follow that
+// note in the history, so the same note never pauses the request twice.
+func pauseEnvironment(directory string, now time.Time) error {
+	record, err := readWorkLimit(directory)
+	if err != nil || record.held() {
+		return err
+	}
+	state, err := savedHistory(directory)
+	if err != nil || !state.EnvironmentPaused() {
+		return err
+	}
+	if record.Clock != nil {
+		// It did not resume by itself, so no recovery is said.
+		record.Clock.RecoveryNoticeAt = nil
+	}
+	record.addPause(environmentPause, now)
+	return saveWorkLimit(directory, record)
+}
+
+// environmentReason quotes the opening of the latest launch's requirements
+// report, where a run without a question role is told to name what is missing
+// and what the operator would have to prepare, and says how many such pauses
+// the request has had and may have. The report's wording is not read for any
+// shape: its opening is quoted the way a failure line is in other notices.
+func environmentReason(cfg config, state chain.State) string {
+	report, limit := "", 0
+	if flow := state.Workflow; flow != nil && len(flow.Stages) > 0 {
+		limit = flow.EnvironmentPauseLimit
+		first, ended := flow.Stages[0].Name, false
+		for i := len(state.History) - 1; i >= 0 && report == ""; i-- {
+			record := state.History[i]
+			if record.Role != first {
+				continue
+			}
+			if record.Speaker == "runtime" {
+				// The runtime's record ends each launch: a second one belongs
+				// to an earlier launch, whose report the decision did not read.
+				if ended {
+					break
+				}
+				ended = true
+				continue
+			}
+			report = noticeDetail(cfg, strings.Join(strings.Fields(record.Output), " "))
+		}
+	}
+	if report == "" {
+		report = "（報告は空でした）"
+	}
+	count := state.EnvironmentPauses()
+	text := pauseReason(environmentPause) + "要件確定の報告の冒頭: " + report + "\n" +
+		"運用者が環境を広げるか用意してから「再開」と書くと、同じ依頼を要件確定の後の判断から続けます。" +
+		fmt.Sprintf("環境が足りないことによる一時停止はこれが %d 回目で、上限は %d 回です。", count, limit)
+	if count >= limit {
+		text += "上限に達したため、次の「再開」の後は一時停止せず、検証の最も重い部分を先に 1 回試してから進みます。"
+	}
+	return text
 }

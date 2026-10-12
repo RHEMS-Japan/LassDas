@@ -1621,3 +1621,172 @@ func TestStageAttemptsStopAOneShotRunBeforeItLaunches(t *testing.T) {
 		t.Fatalf("the stopped run changed the history: %d records, pending %+v", len(state.History), state.Pending)
 	}
 }
+
+// shortReport is what the first stage of environmentStagesConfig reports: an
+// environment that falls short, opened with the missing fact.
+const shortReport = "検証のビルドは約 6 GiB を使うが、メモリの上限は 2048 MiB。運用者がメモリを 8 GiB 以上に広げる必要がある。"
+
+// environmentStagesConfig is an ordered run without a question role whose
+// decision after the first stage may pause the request up to limit times. Each
+// model stage writes one line per launch into the request's workspace.
+func environmentStagesConfig(t *testing.T, limit int) config {
+	t.Helper()
+	cfg := watchConfiguration(t)
+	cfg.Router.Mode = "stages"
+	cfg.ModelSelection = &selectionConfig{Fixed: "maker/configured"}
+	cfg.Roles = []chain.Role{
+		{Name: "elicit", Purpose: "settle the request", Processes: []chain.Process{{Name: "requirements", ModelEnv: "MODEL",
+			Command: []string{"/bin/sh", "-c", "echo elicit >> launches.txt; printf '%s\\n\\n%s\\n' '" + shortReport + "' 'The rest of the report.'"}}}},
+		{Name: "implement", Purpose: "implement", Processes: []chain.Process{{Name: "worker", ModelEnv: "MODEL",
+			Command: []string{"/bin/sh", "-c", "echo implement >> launches.txt"}}}},
+		{Name: "verify", Purpose: "check", Processes: []chain.Process{{Name: "build", Command: []string{"/bin/sh", "-c", "exit 0"}}}},
+	}
+	cfg.Workflow = &chain.Workflow{EnvironmentPauseLimit: limit, Stages: []chain.Stage{
+		{Name: "elicit", Kind: chain.ModelStage},
+		{Name: "implement", Kind: chain.ModelStage},
+		{Name: "verify", Kind: chain.CommandStage, OnFailure: "implement"},
+	}}
+	return cfg
+}
+
+// scriptedDecision answers each decision with the pause until resumed is set,
+// and with the next stage after that, and counts the decisions.
+type scriptedDecision struct {
+	mu        sync.Mutex
+	decisions int
+	resumed   bool
+}
+
+func (d *scriptedDecision) answer(r *http.Request) (*http.Response, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.decisions++
+	choice := chain.EnvironmentPause
+	if d.resumed {
+		choice = "implement"
+	}
+	return alwaysChoose(choice)(r)
+}
+
+func (d *scriptedDecision) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.decisions
+}
+
+func workspaceLaunches(directory string) string {
+	raw, _ := os.ReadFile(filepath.Join(directory, "workspace", "launches.txt"))
+	return strings.Join(strings.Fields(string(raw)), ",")
+}
+
+// Without a question role, a decision that the environment falls short holds
+// the request before the implementing stage is launched, with one notice that
+// quotes the opening of the requirements report and says how often it may
+// happen. 再開 resumes the same request from that decision.
+func TestAnEnvironmentPauseHoldsTheRequestBeforeImplementationAndResumes(t *testing.T) {
+	cfg := environmentStagesConfig(t, 2)
+	remote := &noticeTracker{}
+	decision := &scriptedDecision{}
+	remote.install(t, decision.answer)
+	root, directory := noticeJob(t, chain.State{})
+	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool {
+		return len(remote.withPrefix("この依頼の自動処理を一時停止しています。")) > 0
+	})
+	// More ticks pass: nothing is launched, decided or said again.
+	time.Sleep(300 * time.Millisecond)
+	finish()
+	if launches := workspaceLaunches(directory); launches != "elicit" || decision.count() != 1 {
+		t.Fatalf("launches %q and %d decisions, want only the first stage and one decision", launches, decision.count())
+	}
+	pauses := remote.withPrefix("この依頼の自動処理を一時停止しています。")
+	reason := "要件確定の後の判断で、合意した検証がこの実行環境に収まらないと分かったためです。実装はまだ始めていません。要件確定の報告の冒頭: " +
+		shortReport + " The rest of the report.\n運用者が環境を広げるか用意してから「再開」と書くと、同じ依頼を要件確定の後の判断から続けます。" +
+		"環境が足りないことによる一時停止はこれが 1 回目で、上限は 2 回です。"
+	if len(pauses) != 1 || !strings.Contains(pauses[0], reason) || !strings.Contains(pauses[0], "「停止」") || strings.Contains(pauses[0], "上限に達したため") {
+		t.Fatalf("pause notices: %q, want one with %q", pauses, reason)
+	}
+	for _, posted := range remote.all() {
+		if strings.HasPrefix(posted, "本体が再起動しました") || strings.Contains(posted, "やり直します") {
+			t.Fatalf("a rerun was said for a pause: %q", posted)
+		}
+	}
+	record := loadWorkLimit(t, directory)
+	if len(record.Pauses) != 1 || record.Pauses[0].Reason != environmentPause || !record.held() {
+		t.Fatalf("pause record: %+v", record.Pauses)
+	}
+	if state := loadJobState(t, directory); !state.EnvironmentPaused() || state.Done || state.Pending != nil {
+		t.Fatalf("history after the pause: %+v", state)
+	}
+	t.Logf("paused before implementation with %q", pauses[0])
+
+	decision.mu.Lock()
+	decision.resumed = true
+	decision.mu.Unlock()
+	remote.mu.Lock()
+	remote.rows = append(remote.rows, issueComment(int64(900+len(remote.rows)), 55, "再開\nメモリを 8 GiB にしました。"))
+	remote.mu.Unlock()
+	finish = startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool { return loadJobState(t, directory).Done })
+	finish()
+	if launches := workspaceLaunches(directory); launches != "elicit,implement" || decision.count() != 2 {
+		t.Fatalf("after 再開: launches %q, %d decisions", launches, decision.count())
+	}
+	if loadWorkLimit(t, directory).held() || remote.count(workResumeText) != 1 || len(remote.withPrefix("この依頼の自動処理を一時停止しています。")) != 1 {
+		t.Fatalf("the resume was not said once, or the pause was said again: %q", remote.all())
+	}
+}
+
+// At the limit, the notice says that the next 再開 goes on without pausing,
+// and it does: no decision is asked and the implementing stage runs.
+func TestAnEnvironmentPauseAtItsLimitSaysTheNextResumeGoesOn(t *testing.T) {
+	cfg := environmentStagesConfig(t, 1)
+	remote := &noticeTracker{}
+	decision := &scriptedDecision{}
+	remote.install(t, decision.answer)
+	root, directory := noticeJob(t, chain.State{})
+	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool {
+		return len(remote.withPrefix("この依頼の自動処理を一時停止しています。")) > 0
+	})
+	finish()
+	pauses := remote.withPrefix("この依頼の自動処理を一時停止しています。")
+	if want := "環境が足りないことによる一時停止はこれが 1 回目で、上限は 1 回です。上限に達したため、次の「再開」の後は一時停止せず、検証の最も重い部分を先に 1 回試してから進みます。"; len(pauses) != 1 || !strings.Contains(pauses[0], want) {
+		t.Fatalf("pause notices: %q, want one with %q", pauses, want)
+	}
+	remote.mu.Lock()
+	remote.rows = append(remote.rows, issueComment(int64(900+len(remote.rows)), 55, "再開"))
+	remote.mu.Unlock()
+	finish = startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool { return loadJobState(t, directory).Done })
+	finish()
+	if launches := workspaceLaunches(directory); launches != "elicit,implement" || decision.count() != 1 {
+		t.Fatalf("after 再開 at the limit: launches %q, %d decisions", launches, decision.count())
+	}
+}
+
+// The notice quotes the opening of the report the decision read: the latest
+// launch of the first stage only, without credentials and cut to the length
+// of other quoted lines.
+func TestTheEnvironmentPauseNoticeQuotesTheLatestReportOnly(t *testing.T) {
+	cfg := environmentStagesConfig(t, 2)
+	launch := func(output string) []chain.Result {
+		return []chain.Result{{Role: "elicit", Speaker: "requirements", Output: output}, {Role: "elicit", Speaker: "runtime", Output: "Runtime record"}}
+	}
+	for _, tc := range []struct {
+		name, latest, want string
+	}{
+		{"opening", "メモリの上限 2048 MiB では足りない。\n\n運用者は 8 GiB を用意する。", "要件確定の報告の冒頭: メモリの上限 2048 MiB では足りない。 運用者は 8 GiB を用意する。\n"},
+		{"empty latest report", "", "要件確定の報告の冒頭: （報告は空でした）\n"},
+		{"credential", "鍵 synthetic-watch-key を使う。", "要件確定の報告の冒頭: 鍵 [credential] を使う。\n"},
+		{"long", strings.Repeat("あ", 300), "要件確定の報告の冒頭: " + strings.Repeat("あ", 200) + "…\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			history := append(launch("an earlier report the decision did not read"), launch(tc.latest)...)
+			text := environmentReason(cfg, chain.State{Workflow: cfg.Workflow, History: history})
+			if !strings.Contains(text, tc.want) || strings.Contains(text, "earlier report") {
+				t.Fatalf("got %q, want it to contain %q", text, tc.want)
+			}
+		})
+	}
+}

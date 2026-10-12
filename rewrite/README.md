@@ -1158,7 +1158,11 @@ the first stage again, the question role, or the next stage. Returning to the
 first stage lets that role clarify its own report without inventing a question
 for the requester. It is never
 offered `done`, so the entrance still cannot end a request at a person, and the
-question role cannot be a stage, so it satisfies nothing. A question holds the
+question role cannot be a stage, so it satisfies nothing. Without a question
+role, the first stage is followed by a decision only while
+`workflow.environment_pause_limit` allows pausing the request because the
+environment falls short (see "Runtime resource observations"); that decision
+chooses between the pause and the next stage. A question holds the
 request and the reply resumes it exactly as described above; the reply returns
 the run to the stage that asked, here the first stage. Other stage transitions
 use the configured order.
@@ -2461,12 +2465,47 @@ handoff, investigate ordinary failures within current authority and keep the
 existing authority and change-confirmation question rules. No reply changes
 resource limits or grants permissions on its own.
 
-An installation without a question role has no way yet to stop at initial
-elicitation because the environment falls short. Its requirements report opens
+An installation without a question role has its requirements report open
 with the missing or insufficient fact and what the operator would have to
-prepare, and the heaviest part of the verification runs once first; the work
-still starts, and the request stops only at the existing pauses: the saved
-time cap, `intake.max_hard_exits` or `intake.max_stage_attempts`.
+prepare. By default the work still starts, the heaviest part of the
+verification runs once first, and the request stops only at the existing
+pauses: the saved time cap, `intake.max_hard_exits` or
+`intake.max_stage_attempts`.
+
+In an ordered run whose first stage is a model stage, a positive
+`workflow.environment_pause_limit` lets that installation pause such a request
+at initial elicitation instead. Each time the first stage finishes before any
+later stage has run, the configured decision service (the decision API when
+`router.decision` names a model, the chat API otherwise) chooses between
+pausing the request and the next stage. It is told to pause only when a fact
+already shows the environment falls short, and to choose the next stage when
+only the demand is unknown. Choosing the pause launches nothing: the engine
+writes its own note of it in the history, and the watch pauses the request
+with one notice. The notice quotes the opening of the requirements report, up
+to 200 characters with credentials removed, the way the stall notice quotes a
+failure, and says how many such pauses the request has had and the limit, for
+example:
+
+> この依頼の自動処理を一時停止しています。要件確定の後の判断で、合意した検証がこの実行環境に収まらないと分かったためです。実装はまだ始めていません。要件確定の報告の冒頭: 検証のビルドは約 6 GiB を使うが、メモリの上限は 2048 MiB。運用者がメモリを 8 GiB 以上に広げる必要がある。
+> 運用者が環境を広げるか用意してから「再開」と書くと、同じ依頼を要件確定の後の判断から続けます。環境が足りないことによる一時停止はこれが 1 回目で、上限は 2 回です。依頼は未完了です。
+
+The notice goes on with how to resume, wait or stop, as the other pause
+notices do. After the operator enlarges or prepares the environment, the same
+authorized `再開` continues the request from that decision, which reads the
+environment facts the new run observed. The limit counts the pauses of one
+request, and `再開` does not start it over. At the limit the notice also says
+that the next `再開` goes on without pausing, and it does: the next stage runs
+without a decision, as without the setting. A decision that chooses the pause
+every time is therefore asked as many times as the limit. The pause is not
+offered once the work has been handed to a later stage, even when a failure
+returns to the first stage. Absent or zero offers no pause, so an installation
+that does not set it is unchanged; like the rest of `workflow`, the value is
+saved with the request when its run begins. The setting is refused with
+`intake.question_role`, whose question already offers the operator's
+preparation, with a first stage that is a command stage, with connected roles,
+which have no first stage that marks elicitation, and when a configured role
+is named `pause_for_environment`, the name of the choice the decision is
+offered. The status page shows this pause with its own reason.
 
 ### Existing native-agent connection
 

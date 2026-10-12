@@ -92,6 +92,12 @@ var ErrWaiting = errors.New("the request is waiting for an answer to the questio
 // completion of the request; the caller decides who carries it on.
 var ErrAttemptLimit = errors.New("launches of one stage in a row did not end cleanly up to the configured limit")
 
+// ErrEnvironmentPause reports that the decision after the first stage paused
+// the request before anything was implemented, because a fact shows the
+// execution environment falls short of the agreed verification. It is not a
+// failure or a completion; the request waits for words that resume it.
+var ErrEnvironmentPause = errors.New("the decision after the first stage paused the request because the execution environment falls short; it waits for 再開")
+
 // Assignment is a dispatch instruction, not a certificate of output quality.
 type Assignment struct {
 	Role        string `json:"role"`
@@ -170,6 +176,11 @@ func (c Chain) Run(ctx context.Context) error {
 	}
 	if state.Waiting {
 		return ErrWaiting
+	}
+	// The decision after the first stage paused the request. Nothing is
+	// decided or launched again before words that resume it are recorded.
+	if state.EnvironmentPaused() {
+		return ErrEnvironmentPause
 	}
 	if state.Workflow == nil && c.Workflow != nil {
 		if len(state.History) != 0 || state.Pending != nil || state.Step != "" {
@@ -323,6 +334,17 @@ func (c Chain) Run(ctx context.Context) error {
 		if next.Role == "done" {
 			state.Done = true
 			return c.save(ctx, state)
+		}
+		if next.Role == EnvironmentPause && state.Workflow != nil && len(state.Workflow.Stages) > 0 {
+			// Nothing is launched. The runtime's record of the pause is what
+			// holds the request until words that resume it follow.
+			state.History = append(state.History, Result{Role: "router", Speaker: "runtime", Output: environmentPauseNote,
+				StartedAt: started, FinishedAt: time.Now().UTC()})
+			if err := c.save(ctx, state); err != nil {
+				return err
+			}
+			c.observe("paused before any implementation: the execution environment falls short")
+			return ErrEnvironmentPause
 		}
 		// Where the question was chosen is taken before the launch, so a
 		// launch that returns no result still waits as a confirmation.

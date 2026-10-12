@@ -41,6 +41,12 @@ type Workflow struct {
 	// all stay offered, because a cap changes what is offered and never ends
 	// a request.
 	LaunchLimit map[string]int `json:"launch_limit,omitempty"`
+	// EnvironmentPauseLimit lets the decision after the first stage of an
+	// ordered run without a question role pause the request, before any later
+	// stage has run, because a fact shows the execution environment falls
+	// short of the agreed verification. It is how many times one request may
+	// be paused that way; zero offers no such pause.
+	EnvironmentPauseLimit int `json:"environment_pause_limit,omitempty"`
 }
 
 func (w *Workflow) Validate(roles map[string]string) error {
@@ -52,6 +58,9 @@ func (w *Workflow) Validate(roles map[string]string) error {
 	}
 	if w.ConfirmationReworkLimit < 0 || w.ConfirmationReworkLimit != 0 && len(w.Stages) == 0 {
 		return errors.New("workflow.confirmation_rework_limit needs an ordered run with a stage marked confirm and must not be negative")
+	}
+	if w.EnvironmentPauseLimit < 0 || w.EnvironmentPauseLimit != 0 && len(w.Stages) == 0 {
+		return errors.New("workflow.environment_pause_limit needs an ordered run and must not be negative")
 	}
 	if len(w.Stages) > 0 {
 		if len(w.LaunchLimit) > 0 {
@@ -121,7 +130,7 @@ func (w *Workflow) Validate(roles map[string]string) error {
 func (w *Workflow) clone() *Workflow {
 	copy := &Workflow{Start: slices.Clone(w.Start), After: map[string][]string{}, Recover: map[string][]string{},
 		Stages: slices.Clone(w.Stages), Question: w.Question, EntranceReworkLimit: w.EntranceReworkLimit,
-		ConfirmationReworkLimit: w.ConfirmationReworkLimit}
+		ConfirmationReworkLimit: w.ConfirmationReworkLimit, EnvironmentPauseLimit: w.EnvironmentPauseLimit}
 	if w.LaunchLimit != nil {
 		copy.LaunchLimit = make(map[string]int, len(w.LaunchLimit))
 		for role, limit := range w.LaunchLimit {
@@ -301,6 +310,9 @@ func routingChoices(state State, roles map[string]string) (map[string]string, er
 	}
 	if state.permits("done") {
 		choices["done"] = "The requested result has been delivered and verified, with no original requirement outstanding."
+	}
+	if state.Workflow != nil && len(state.Workflow.Stages) > 0 && state.permits(EnvironmentPause) {
+		choices[EnvironmentPause] = environmentPauseChoice
 	}
 	if len(choices) == 0 {
 		return nil, fmt.Errorf("no configured next action after %q (recovering=%t)", state.Step, state.Recovering)
