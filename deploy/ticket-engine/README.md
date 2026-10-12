@@ -109,8 +109,12 @@ Proposed, or simply not measured. Check each one before trusting it:
   forced exit happens at another stage. The bound is saved at acceptance for
   a time-limited request and at the request's first launch for one without a
   time limit; a configuration change after that does not alter it. Neither
-  count bounds ordinary tool or verification failures, and without a time
-  limit nothing bounds the request's total active time. For a time-limited
+  count bounds ordinary tool failures. `intake.max_stage_attempts` (default
+  5) does, with or without a time limit: that many launches of one stage in a
+  row that did not end cleanly, forced exits among them, pause the request,
+  so a short outage of the model service pauses it too. Send-backs from a check or review
+  to another stage are not counted, and without a time limit nothing bounds
+  the request's total active time. For a time-limited
   request the status page shows confirmed time and restart counts separately
   from requests that need attention; it does not show the count in a row at
   one stage. See the runtime README's active-work limits.

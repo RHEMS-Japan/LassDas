@@ -1637,7 +1637,11 @@ by the runtime, the time limit, a model that could not be selected, a role its
 harness ended after one tool call failed the same way several times in a row,
 or a role's error. That sentence is about the last launch only; when several
 launches of the stage in a row did not end cleanly, the next one says how many
-and how many ended each way. The models come last, as in every declaration.
+and how many ended each way. It counts them as the pause at
+`intake.max_stage_attempts` does (see "Restart and operator action"), so the
+two never tell the requester different numbers: a launch the runtime stopped
+itself is neither counted nor named, and the requester's words, an answer or
+a `再開`, start the count over. The models come last, as in every declaration.
 
 A rerun after a later stage sent the work back is said only when its models
 differ from those the stage was last declared with: the same models again say
@@ -1645,8 +1649,11 @@ nothing. A rerun after the stage's own launch did not end cleanly is said every
 time, except right after a restart whose notice (below) went out: that notice
 already says which stage runs again, so a deploy leaves one comment, not two.
 A restart inside that notice's 30 minutes says nothing, and the rerun after it
-is said. A rerun is said with the attempt it is, and after a forced exit with
-how many more pause the request (`intake.max_hard_exits`: in a row at that
+is said. A rerun is said with the attempt it is in that count, so the launch
+that reaches the limit is the attempt the last rerun named; after launches
+that count nothing, such as one the runtime stopped or those before a `再開`,
+it names no attempt. After a forced exit it also says how many more pause the
+request (`intake.max_hard_exits`: in a row at that
 stage for a request without a time limit, all of them for one with it). While the stage keeps
 failing, with nothing else run and no word from the requester in between, each
 such rerun rewrites the comment of the one before it on Backlog (only a comment
@@ -1821,7 +1828,16 @@ pauses at that count first. It is read from the configuration at each launch,
 not saved with the request. A one-shot run whose configuration has an intake
 stops launching at the same count and exits saying so.
 
-Set both in a production installation. Without a positive
+Launches for which no model could be selected are counted, as are roles that
+end with an error because the model service did not answer, so a short outage
+of the model service is enough to pause a request. When every launch fails
+within seconds, the second follows the first at once and each later one waits
+10 seconds, so at the default of 5 the request pauses about 30 seconds after
+its first failure. It does not resume by itself when the service is back: an
+authorized `再開` is needed.
+
+Set `intake.max_active_minutes` and `intake.max_hard_exits` in a production
+installation. Without a positive
 `intake.max_active_minutes`, forced exits are counted only while they come one
 after another at one stage: when the controller is killed during a stage, for
 example because its container ran out of memory, each restart runs that stage
@@ -1899,6 +1915,11 @@ it. A review command stage that sends the work back is followed by its
 `on_failure` stage, so send-backs are not counted. The runtime separates
 launches by the record it writes for each launch of an ordered stage; outside
 an ordered run only its notes after a restart separate launches of one role.
+The question role of an ordered run is not a stage and gets no such record, so
+its failed launches in a row read as one launch. After it the stage that asked
+runs again, which starts the count over, so a question role that fails at every
+launch and is chosen again after each clean launch of that stage is not bounded
+by this count; a time limit bounds it.
 When the count reaches the limit during a run, the run stops before the stage
 is chosen again: no model is selected and nothing is launched for a further
 attempt. When a forced exit reaches it, the request is held after the restart

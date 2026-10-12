@@ -114,9 +114,17 @@ the same stage after every restart still pauses. Another stage running in
 between does not break the row; the count starts again from one in any of three
 cases: a process of that stage ends by itself (successfully or not), the
 requester's words arrive, or a forced exit happens at another stage. Ordinary
-tool or verification failures are not forced exits, so neither count bounds
-those retries, and without a positive active-work limit, total active time has
-no bound. The limit notice reports a pause, not completion; read the required
+tool failures are not forced exits, so neither count bounds those retries.
+`intake.max_stage_attempts` (default 5) does, with or without a time limit:
+that many launches of one stage in a row that did not end cleanly (a role's
+error, a forced exit, a process stopped at its `timeout_minutes` or no model
+selectable, in any order) pause the request; a launch the runtime stopped
+itself is not counted. A short outage of the model service is enough: when
+every launch fails within seconds, the request pauses about 30 seconds after
+the first failure and waits for an authorized `再開`. A check or review that
+sends the work back to another stage is not counted, so send-backs are not
+bounded, and without a positive active-work limit, total active time has no
+bound. The limit notice reports a pause, not completion; read the required
 permission change in the question and run record, fix the configuration, then
 have an authorized user post `再開` on its own first line. This sets the count to
 zero and, for a time-limited request, grants another interval with the same
