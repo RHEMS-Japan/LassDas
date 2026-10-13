@@ -1263,6 +1263,18 @@ func (a *attemptRecords) stopped(stage string) []chain.Result {
 	}
 }
 
+// stoppedAndRecorded is a launch the runtime stopped itself as a run leaves it:
+// its processes' records, the stage record the run appends when the launch
+// returns, then the note the next start writes for the action left pending.
+func (a *attemptRecords) stoppedAndRecorded(stage string) []chain.Result {
+	at := a.next()
+	return []chain.Result{
+		{Role: stage, Speaker: "worker-0", Interrupted: true, Error: "context canceled", StartedAt: at, FinishedAt: at.Add(10 * time.Second)},
+		{Role: stage, Speaker: "runtime", Output: "Runtime record.", StartedAt: at.Add(10 * time.Second), FinishedAt: at.Add(10 * time.Second)},
+		{Role: stage, Speaker: "runtime", Interrupted: true, Error: "The process stopped while this action was pending.", StartedAt: at, FinishedAt: at.Add(time.Minute)},
+	}
+}
+
 func (a *attemptRecords) words(role string) []chain.Result {
 	at := a.next()
 	return []chain.Result{{Role: role, Speaker: "requester", Output: "再開", FinishedAt: at}}
@@ -1467,6 +1479,161 @@ func TestStageAttemptsPauseARunOfFailedLaunchesWithOneNotice(t *testing.T) {
 			}
 			t.Logf("%s: 2 launches, then paused with %q", test.name, pauses[0])
 		})
+	}
+}
+
+// joinRecords puts the records of several launches in one history.
+func joinRecords(parts ...[]chain.Result) []chain.Result {
+	var all []chain.Result
+	for _, part := range parts {
+		all = append(all, part...)
+	}
+	return all
+}
+
+// A stage launched again after its own launch did not end cleanly is said
+// with the count the pause at intake.max_stage_attempts reads at that point,
+// and the attempt after it: a launch the runtime stopped itself is counted and
+// named by neither, and the requester's 再開 starts both over. The launch that
+// reaches the limit is the attempt the last rerun named, so the count the
+// requester reads goes up by one with each failure and never stays put.
+func TestRerunNoticesCountTheLaunchesThePauseCounts(t *testing.T) {
+	const (
+		failedBefore  = "前の回は実装の役がエラーで終わりました。"
+		stoppedBefore = "前の回は実装の途中で本体が止まりました。"
+		models        = "（モデル: maker/x）"
+	)
+	inRow := func(count int, kinds string) string {
+		return fmt.Sprintf("正常に終わらなかった回が %d 回続いています（%s）。実装をやり直します（%d 回目）。", count, kinds, count+1)
+	}
+	for _, shape := range []struct {
+		name    string
+		earlier func(a *attemptRecords) []chain.Result
+		reruns  []string
+		kinds   string
+	}{
+		{"a stop between errors", func(a *attemptRecords) []chain.Result {
+			return joinRecords(a.clean("elicit"), a.failed("implement"), a.stoppedAndRecorded("implement"), a.failed("implement"))
+		}, []string{
+			failedBefore + inRow(2, "エラー 2 回") + models,
+			failedBefore + inRow(3, "エラー 3 回") + models,
+			failedBefore + inRow(4, "エラー 4 回") + models,
+		}, "（エラー 5 回）"},
+		{"a stop right before the rerun", func(a *attemptRecords) []chain.Result {
+			return joinRecords(a.clean("elicit"), a.failed("implement"), a.failed("implement"), a.stoppedAndRecorded("implement"))
+		}, []string{
+			stoppedBefore + inRow(2, "エラー 2 回") + models,
+			failedBefore + inRow(3, "エラー 3 回") + models,
+			failedBefore + inRow(4, "エラー 4 回") + models,
+		}, "（エラー 5 回）"},
+		{"a forced exit and a stop", func(a *attemptRecords) []chain.Result {
+			return joinRecords(a.clean("elicit"), a.forced("implement"), a.stopped("implement"), a.failed("implement"))
+		}, []string{
+			failedBefore + inRow(2, "強制終了 1 回、エラー 1 回") + models,
+			failedBefore + inRow(3, "強制終了 1 回、エラー 2 回") + models,
+			failedBefore + inRow(4, "強制終了 1 回、エラー 3 回") + models,
+		}, "（強制終了 1 回、エラー 4 回）"},
+		// The stop is the only launch: nothing is counted yet, so no
+		// attempt is named for the launch after it.
+		{"only a stop", func(a *attemptRecords) []chain.Result {
+			return joinRecords(a.clean("elicit"), a.stoppedAndRecorded("implement"))
+		}, []string{
+			stoppedBefore + "実装をやり直します。" + models,
+			failedBefore + "実装をやり直します（2 回目）。" + models,
+			failedBefore + inRow(2, "エラー 2 回") + models,
+			failedBefore + inRow(3, "エラー 3 回") + models,
+			failedBefore + inRow(4, "エラー 4 回") + models,
+		}, "（エラー 5 回）"},
+		// After a pause, the 再開 starts the pause's count over, and the
+		// rerun's with it.
+		{"the requester's 再開 between", func(a *attemptRecords) []chain.Result {
+			return joinRecords(a.clean("elicit"), a.failed("implement"), a.failed("implement"), a.failed("implement"), a.words(""))
+		}, []string{
+			failedBefore + "実装をやり直します。" + models,
+			failedBefore + "実装をやり直します（2 回目）。" + models,
+			failedBefore + inRow(2, "エラー 2 回") + models,
+			failedBefore + inRow(3, "エラー 3 回") + models,
+			failedBefore + inRow(4, "エラー 4 回") + models,
+		}, "（エラー 5 回）"},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			cfg := failingStagesConfig(t)
+			limit := cfg.Intake.stageAttempts()
+			_, directory := noticeJob(t, chain.State{})
+			a := &attemptRecords{}
+			history := shape.earlier(a)
+			var said []string
+			for {
+				if _, count := (chain.State{History: history}).FailedInARow(); count >= limit || len(said) > limit {
+					break
+				}
+				text, sameStage := rerunNoticeText(cfg, directory, "implement", history, "maker/x")
+				if !sameStage {
+					t.Fatalf("not said as a rerun after the stage's own launch: %q", text)
+				}
+				said = append(said, text)
+				history = append(history, a.failed("implement")...)
+			}
+			reason := stageAttemptsReason(chain.State{History: history}, limit)
+			t.Logf("reruns: %q", said)
+			t.Logf("pause: %q", reason)
+			if !reflect.DeepEqual(said, shape.reruns) {
+				t.Fatalf("the reruns were said as\n%q\nwant\n%q", said, shape.reruns)
+			}
+			want := fmt.Sprintf("「実装」の工程で、正常に終わらなかった起動が %d 回続き%s、上限の %d 回に達したためです。", limit, shape.kinds, limit)
+			if reason != want {
+				t.Fatalf("the pause was said as %q, want %q", reason, want)
+			}
+			if last := said[len(said)-1]; !strings.Contains(last, fmt.Sprintf("（%d 回目）", limit)) {
+				t.Fatalf("the launch that reached the limit of %d was named otherwise: %q", limit, last)
+			}
+		})
+	}
+}
+
+// Through the queue, with declare_models: a stage that failed, was stopped
+// by the runtime once and failed twice more fails twice again and pauses.
+// The two reruns are said, the second over the first, with the count the
+// pause reads then, so the requester reads 3, then 4, then the pause at 5.
+func TestStageAttemptsRerunNoticesThroughTheQueueCountAsThePauseDoes(t *testing.T) {
+	cfg := failingStagesConfig(t)
+	cfg.Intake.DeclareModels = true
+	cfg.Roles[0].Processes[0].Command = []string{"/bin/sh", "-c", "echo launched >> launches.txt; sleep 0.2; exit 1"}
+	lookEvery(t, 5*time.Millisecond)
+	remote := &noticeTracker{}
+	remote.install(t, alwaysChoose("done"))
+	a := &attemptRecords{}
+	history := joinRecords(a.clean("elicit"), a.failed("implement"), a.stoppedAndRecorded("implement"), a.failed("implement"), a.failed("implement"))
+	root, directory := noticeJob(t, chain.State{Workflow: cfg.Workflow, Step: "implement", Recovering: true, History: history})
+	const (
+		first  = "前の回は実装の役がエラーで終わりました。正常に終わらなかった回が 3 回続いています（エラー 3 回）。実装をやり直します（4 回目）。（モデル: maker/configured）"
+		second = "前の回は実装の役がエラーで終わりました。正常に終わらなかった回が 4 回続いています（エラー 4 回）。実装をやり直します（5 回目）。（モデル: maker/configured）"
+		reason = "「実装」の工程で、正常に終わらなかった起動が 5 回続き（エラー 5 回）、上限の 5 回に達したためです。"
+	)
+	defer func() {
+		if t.Failed() {
+			t.Logf("posted: %q", remote.all())
+			t.Logf("rewritten: %q", remote.rewritten())
+		}
+	}()
+	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool {
+		edited := remote.rewritten()
+		return len(remote.withPrefix("この依頼の自動処理を一時停止しています。")) > 0 && len(edited) > 0 && edited[len(edited)-1] == second
+	})
+	time.Sleep(200 * time.Millisecond)
+	finish()
+	reruns := remote.withPrefix("前の回は")
+	edited := remote.rewritten()
+	pauses := remote.withPrefix("この依頼の自動処理を一時停止しています。")
+	if launches := launchesIn(directory); launches != 2 {
+		t.Fatalf("the stage was launched %d times, want 2", launches)
+	}
+	if len(reruns) != 1 || reruns[0] != first || len(edited) != 1 || edited[0] != second {
+		t.Fatalf("the reruns were said as %q, then rewritten as %q; want %q, then %q", reruns, edited, first, second)
+	}
+	if len(pauses) != 1 || !strings.Contains(pauses[0], reason) {
+		t.Fatalf("pause notices: %q, want one with %q", pauses, reason)
 	}
 }
 
