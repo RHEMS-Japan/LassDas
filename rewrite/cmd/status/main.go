@@ -434,7 +434,7 @@ func pauseState(dir string, state *chain.State) (reason, status string, broken b
 		return "", "", true
 	}
 	for i, pause := range record.Pauses {
-		if pause.At.IsZero() || pause.NoticeID < 0 || pause.Elapsed < 0 || (pause.Reason != "active-limit" && pause.Reason != "hard-exit-limit" && pause.Reason != "stage-attempt-limit") ||
+		if pause.At.IsZero() || pause.NoticeID < 0 || pause.Elapsed < 0 || (pause.Reason != "active-limit" && pause.Reason != "hard-exit-limit" && pause.Reason != "stage-attempt-limit" && pause.Reason != "environment-short") ||
 			(i+1 < len(record.Pauses) && (pause.Resume == nil || !pause.Resume.Applied)) {
 			return "", "", true
 		}
@@ -500,6 +500,8 @@ func pauseState(dir string, state *chain.State) (reason, status string, broken b
 		reason = "The configured forced-exit limit was reached. " + pauseResumeHelp
 	case "stage-attempt-limit":
 		reason = "One stage reached the configured limit of launches in a row that did not end cleanly. " + pauseResumeHelp
+	case "environment-short":
+		reason = "Paused before implementation: the execution environment falls short of the agreed verification. " + pauseResumeHelp
 	}
 	return reason, "paused; waiting for an authorized resume instruction", false
 }
@@ -1859,6 +1861,7 @@ var japanese = map[string]string{
 	"The configured active-work limit was reached. " + pauseResumeHelp:                                                                   "設定された実稼働時間の上限に達しました。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
 	"The configured forced-exit limit was reached. " + pauseResumeHelp:                                                                   "強制終了が設定の回数上限に達しました。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
 	"One stage reached the configured limit of launches in a row that did not end cleanly. " + pauseResumeHelp:                           "同じ工程で正常に終わらなかった起動が、設定の回数上限に達しました。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
+	"Paused before implementation: the execution environment falls short of the agreed verification. " + pauseResumeHelp:                 "要件確定の後の判断で、合意した検証がこの実行環境に収まらないと分かったため、実装の前に一時停止しました。依頼者または運用者が設定した代理人は、最初の空でない行を「再開」としてコメントすると続けられます。このまま待つか、「停止」と書いて取りやめることもできます。",
 	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
 	"Decision and models": "判断とモデル", "Runtime log (tail)": "本体のログ (末尾)", "(nothing yet)": "(まだ何もない)", "the whole log": "ログ全文",
 	"Rendered": "表示時刻", "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.": "この画面は自動で更新され (工程の実行中は 10 秒ごと、それ以外は 30 秒ごと)、ディスク上の queue をそのまま表示します。読み取り専用。",

@@ -100,11 +100,83 @@ case with one source for the count, leaves a stage that a later stage sends
 back uncounted, since another stage runs in between, and hands the request to
 a person with the same pause, notice and resume, without marking it complete.
 
+## Addendum: a pause at elicitation without a question role
+
+### Decision
+
+In an ordered run without a question role whose first stage is a model stage,
+a positive `workflow.environment_pause_limit` puts a decision after the first
+stage, as long as no later stage has run. The decision service chooses between
+pausing the request and the next stage, and is told to pause only when a fact
+already shows the execution environment falls short of the agreed
+verification. Choosing the pause launches nothing: the runtime writes its own
+note in the history, the run returns, and the watch pauses the request with
+the same pause, notice and authorized `再開` as above. The notice quotes the
+requirements report from its first paragraph that names a shortfall, in words
+such as 不足, 足りない or insufficient, or from its opening when none does; the
+first stage is told that the requester is shown the report from there, and to
+put the missing fact and what the operator would have to prepare there before
+anything else. `再開` continues the request from that decision. The limit counts the pauses of one request, and
+`再開` does not start it over; at the limit the next stage runs without a
+decision, as without the setting, and the last pause notice says so. Absent or
+zero offers no pause, and a stage that happens to have the pause's name is then
+an ordinary stage. The setting is refused with a question role, with a first
+stage that is a command stage and with connected roles.
+
+### Alternatives compared
+
+Offering the pause to every run without a question role. Such a run never
+asked the decision service anything, so an installation may have none
+configured; the first stage would then be followed by a decision that cannot be
+made and is retried without end, and the work would never start. Every request
+would also pay for one more decision.
+
+Counting the pauses since the requester's latest words, as the rework limits
+after the first stage do. A request goes on from each pause only after a
+`再開`, which joins the history as the requester's words, so that count would
+never pass one and would bound nothing.
+
+Keeping the request paused at the limit. A decision that keeps choosing the
+pause would then leave the requester no comment that continues the request;
+only a change of the operator's configuration would.
+
+Offering the pause after the work has been handed to a later stage, or after a
+failure returns to the first stage. After handoff the roles investigate
+failures within the existing authority and nobody is asked; a pause there
+would wait for a person in the middle of the work.
+
+A fixed phrase in the requirements report that the runtime reads as the pause.
+That would hold the report to a format
+([0004](0004-answers-not-held-to-a-format.md)); the decision service reads the
+report as it reads it after the first stage of a run with a question role.
+
+Quoting the report's opening only. The shipped instructions for elicitation
+open the report by restating the requester's goal, so the quote could end
+before what is missing and what the operator has to prepare. The words that
+start the quote at a shortfall choose only where the quote starts: nothing
+waits on them, a report without them is quoted from its opening, and the
+pause itself is still the decision service's choice.
+
+Offering it to connected roles. They have no first stage that marks
+elicitation, so "before any later stage has run" has nothing to be read from.
+
+### Reason
+
+A run without a question role is one where the operator chose that nobody is
+asked, and its work started even when its own report said the environment
+could not run the verification. The pause asks nobody: it holds the request
+before anything is implemented, says what the report found missing, and
+continues on the same `再開` as the other pauses, so no new way to continue a
+request is added. Whether it may happen at all is the operator's setting, and
+how often is bounded by the same setting, as other limits are
+([0002](0002-failure-never-ends-a-request.md)).
+
 ## Status
 
 Accepted. Extends [0009](0009-forced-exits-resume-up-to-a-set-count.md) to
 requests without a time limit. The addendum bounds launches that did not end
-cleanly, with or without a time limit.
+cleanly, with or without a time limit. The second addendum lets a run without
+a question role pause at elicitation when the environment falls short.
 
 ## Source
 
@@ -121,3 +193,8 @@ The addendum's line numbers refer to commit fbc4cc8.
 - [`rewrite/README.md`](../../README.md), "Active-work limits and recovery":
   "Select the limit", lines 1797-1809; "Restart and operator action", lines
   1877-1903.
+
+The second addendum's line numbers refer to commit b3a7fa5.
+
+- [`rewrite/README.md`](../../README.md), "Runtime resource observations",
+  lines 2468-2515; "Stages instead of roles", lines 1161-1165.
