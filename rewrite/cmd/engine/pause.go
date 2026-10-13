@@ -562,13 +562,13 @@ func pauseEnvironment(directory string, now time.Time) error {
 	return saveWorkLimit(directory, record)
 }
 
-// environmentReason quotes the opening of the latest launch's requirements
-// report, where a run without a question role is told to name what is missing
-// and what the operator would have to prepare, and says how many such pauses
-// the request has had and may have. The report's wording is not read for any
-// shape: its opening is quoted the way a failure line is in other notices.
+// environmentReason quotes the latest launch's requirements report, where a
+// run without a question role is told to name what is missing and what the
+// operator would have to prepare, and says how many such pauses the request
+// has had and may have. The quote is cut and scrubbed the way a failure line
+// is in other notices; reportFromShortfall only chooses where it starts.
 func environmentReason(cfg config, state chain.State) string {
-	report, limit := "", 0
+	report, label, limit := "", "要件確定の報告の冒頭: ", 0
 	if flow := state.Workflow; flow != nil && len(flow.Stages) > 0 {
 		limit = flow.EnvironmentPauseLimit
 		first, ended := flow.Stages[0].Name, false
@@ -586,18 +586,56 @@ func environmentReason(cfg config, state chain.State) string {
 				ended = true
 				continue
 			}
-			report = noticeDetail(cfg, strings.Join(strings.Fields(record.Output), " "))
+			text, later := reportFromShortfall(record.Output)
+			if later {
+				label = "要件確定の報告のうち、足りないことを書いた段落から: "
+			}
+			report = noticeDetail(cfg, strings.Join(strings.Fields(text), " "))
 		}
 	}
 	if report == "" {
 		report = "（報告は空でした）"
 	}
 	count := state.EnvironmentPauses()
-	text := pauseReason(environmentPause) + "要件確定の報告の冒頭: " + report + "\n" +
+	text := pauseReason(environmentPause) + label + report + "\n" +
 		"運用者が環境を広げるか用意してから「再開」と書くと、同じ依頼を要件確定の後の判断から続けます。" +
 		fmt.Sprintf("環境が足りないことによる一時停止はこれが %d 回目で、上限は %d 回です。", count, limit)
 	if count >= limit {
 		text += "上限に達したため、次の「再開」の後は一時停止せず、検証の最も重い部分を先に 1 回試してから進みます。"
 	}
 	return text
+}
+
+// shortfallWords mark a paragraph of a requirements report that names what
+// falls short. They choose only where the notice's quote starts, so that a
+// report that opens by restating the requester's goal, as the shipped
+// instructions ask, is quoted from what is missing; they decide nothing, and a
+// report without any of them is quoted from its opening.
+var shortfallWords = []string{"不足", "足りな", "足りず", "収まらな", "falls short", "fall short", "insufficient", "not enough", "too small", "missing"}
+
+// reportFromShortfall is the report from its first paragraph that names a
+// shortfall on, and whether that paragraph comes after the opening one. A
+// paragraph ends at a blank line.
+func reportFromShortfall(report string) (string, bool) {
+	var paragraphs []string
+	var current []string
+	for _, line := range append(strings.Split(report, "\n"), "") {
+		if strings.TrimSpace(line) != "" {
+			current = append(current, line)
+			continue
+		}
+		if len(current) > 0 {
+			paragraphs = append(paragraphs, strings.Join(current, "\n"))
+			current = nil
+		}
+	}
+	for i, paragraph := range paragraphs {
+		lower := strings.ToLower(paragraph)
+		for _, word := range shortfallWords {
+			if strings.Contains(lower, word) {
+				return strings.Join(paragraphs[i:], "\n\n"), i > 0
+			}
+		}
+	}
+	return report, false
 }

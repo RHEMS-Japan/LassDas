@@ -903,8 +903,9 @@ func TestThePauseIsOfferedOnlyAtElicitationBeforeHandoff(t *testing.T) {
 			}
 		})
 	}
-	if text := (State{Workflow: flow}).stageInstruction("elicit"); !strings.Contains(text, "chooses to pause this request") {
-		t.Fatalf("the first stage was not told about the pause: %q", text)
+	if text := (State{Workflow: flow}).stageInstruction("elicit"); !strings.Contains(text, "chooses to pause this request") ||
+		!strings.Contains(text, "in a paragraph of their own before anything else") || !strings.Contains(text, "the requester is shown the report from that paragraph on") {
+		t.Fatalf("the first stage was not told about the pause and what the requester is shown: %q", text)
 	}
 	spent := State{Workflow: flow, History: append(a.clean("elicit"), pause, words, pause, words)}
 	if text := spent.stageInstruction("elicit"); strings.Contains(text, "pause") {
@@ -946,6 +947,53 @@ func TestTheEnvironmentPauseSettingIsRefusedWhereItCannotApply(t *testing.T) {
 			err := flow.Validate(roles)
 			if err == nil || !strings.Contains(err.Error(), "environment_pause_limit") {
 				t.Fatalf("accepted or refused for another reason: %v", err)
+			}
+		})
+	}
+}
+
+// Without the setting, a stage that happens to have the pause's name is an
+// ordinary stage: it is launched, and a decision offered it reads the role's
+// own responsibility.
+func TestAStageWithThePausesNameRunsWithoutTheSetting(t *testing.T) {
+	renamed := func(question string) (*Workflow, map[string]string) {
+		flow := stagesWorkflow()
+		flow.Question = question
+		flow.Stages[1].Name = EnvironmentPause
+		for i := range flow.Stages {
+			if flow.Stages[i].OnFailure == "work" {
+				flow.Stages[i].OnFailure = EnvironmentPause
+			}
+		}
+		roles := stagePurposes()
+		delete(roles, "work")
+		roles[EnvironmentPause] = "Configured responsibility of a stage the operator named this way"
+		return flow, roles
+	}
+	for _, question := range []string{"", "ask_requester"} {
+		t.Run("question role "+question, func(t *testing.T) {
+			flow, roles := renamed(question)
+			if err := flow.Validate(roles); err != nil {
+				t.Fatal(err)
+			}
+			store := &memoryStore{state: State{Request: "Build the requested tool and verify it here."}}
+			var ran []string
+			engine := Chain{Store: store, Workflow: flow, RetryDelay: time.Millisecond,
+				Router: StageRouter{Entrance: DecisionRouter{Roles: roles, Judge: testJudge(func(_ context.Context, _ State, _ string, choices map[string]string) (string, error) {
+					if choices[EnvironmentPause] != roles[EnvironmentPause] {
+						t.Errorf("the stage was offered as %q", choices[EnvironmentPause])
+					}
+					return EnvironmentPause, nil
+				})}},
+				Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+					ran = append(ran, a.Role)
+					return []Result{{Role: a.Role, Speaker: "fixture", Output: "ordinary report"}}
+				})}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := engine.Run(ctx); err != nil || !store.state.Done || store.state.EnvironmentPauses() != 0 ||
+				strings.Join(ran, ",") != "elicit,"+EnvironmentPause+",verify,deliver,confirm" {
+				t.Fatalf("err=%v done=%t ran=%v", err, store.state.Done, ran)
 			}
 		})
 	}

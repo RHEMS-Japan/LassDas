@@ -1780,6 +1780,11 @@ func TestTheEnvironmentPauseNoticeQuotesTheLatestReportOnly(t *testing.T) {
 		{"empty latest report", "", "要件確定の報告の冒頭: （報告は空でした）\n"},
 		{"credential", "鍵 synthetic-watch-key を使う。", "要件確定の報告の冒頭: 鍵 [credential] を使う。\n"},
 		{"long", strings.Repeat("あ", 300), "要件確定の報告の冒頭: " + strings.Repeat("あ", 200) + "…\n"},
+		// The report opens with the requester's goal, as the shipped
+		// instructions ask; the quote starts at the paragraph naming what
+		// falls short and goes on from there.
+		{"goal first", goalFirstReport, "要件確定の報告のうち、足りないことを書いた段落から: 不足している事実: 検証では 1 か月分 (約 4,000 万行) の出力を実際に流すため、約 6 GiB のメモリを使う見込みだが、この実行環境のメモリ上限は 2048 MiB。 運用者はメモリ上限を 8 GiB 以上に広げる必要がある。\n"},
+		{"in English", "The goal is a monthly export.\n\nThe memory limit of 2048 MiB is insufficient for the build.\nThe operator has to raise it to 8 GiB.", "要件確定の報告のうち、足りないことを書いた段落から: The memory limit of 2048 MiB is insufficient for the build. The operator has to raise it to 8 GiB.\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			history := append(launch("an earlier report the decision did not read"), launch(tc.latest)...)
@@ -1790,6 +1795,11 @@ func TestTheEnvironmentPauseNoticeQuotesTheLatestReportOnly(t *testing.T) {
 		})
 	}
 }
+
+// goalFirstReport opens with the requester's goal, as the shipped
+// instructions for elicitation ask, and names what falls short after it.
+const goalFirstReport = "依頼者の目的は、注文履歴の CSV 出力を月次の集計でも使えるようにすることです。現状は 1 か月分を出すと処理が途中で止まり、集計担当が手作業で分割しています。提案は出力をストリーム化することですが、これは候補の一つであり、要件は既存の列と順序を変えずに 1 か月分を一度で出せることです。\n\n" +
+	"不足している事実: 検証では 1 か月分 (約 4,000 万行) の出力を実際に流すため、約 6 GiB のメモリを使う見込みだが、この実行環境のメモリ上限は 2048 MiB。\n運用者はメモリ上限を 8 GiB 以上に広げる必要がある。"
 
 // Only the runtime's own record of that decision holds a request. A request
 // picked up with any other history, after a restart, an answer or a resume,

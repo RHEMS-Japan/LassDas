@@ -311,7 +311,7 @@ func routingChoices(state State, roles map[string]string) (map[string]string, er
 	if state.permits("done") {
 		choices["done"] = "The requested result has been delivered and verified, with no original requirement outstanding."
 	}
-	if state.Workflow != nil && len(state.Workflow.Stages) > 0 && state.permits(EnvironmentPause) {
+	if state.environmentPauseOpen() && state.permits(EnvironmentPause) {
 		choices[EnvironmentPause] = environmentPauseChoice
 	}
 	if len(choices) == 0 {

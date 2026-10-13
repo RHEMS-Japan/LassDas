@@ -2481,10 +2481,17 @@ pausing the request and the next stage. It is told to pause only when a fact
 already shows the environment falls short, and to choose the next stage when
 only the demand is unknown. Choosing the pause launches nothing: the engine
 writes its own note of it in the history, and the watch pauses the request
-with one notice. The notice quotes the opening of the requirements report, up
-to 200 characters with credentials removed, the way the stall notice quotes a
-failure, and says how many such pauses the request has had and the limit, for
-example:
+with one notice. The notice quotes the requirements report, up to 200
+characters with credentials removed, the way the stall notice quotes a
+failure, and says how many such pauses the request has had and the limit.
+The quote starts at the report's first paragraph that names a shortfall, in
+words such as 不足, 足りない or insufficient, so that a report that opens by
+restating the requester's goal, as the shipped instructions ask, is quoted
+from what is missing; a report without such a paragraph is quoted from its
+opening. Those words choose only where the quote starts and decide nothing.
+The first stage is told that the requester is shown the report from that
+paragraph on, and to write the missing fact and what the operator would have
+to prepare in a paragraph of their own before anything else. For example:
 
 > この依頼の自動処理を一時停止しています。要件確定の後の判断で、合意した検証がこの実行環境に収まらないと分かったためです。実装はまだ始めていません。要件確定の報告の冒頭: 検証のビルドは約 6 GiB を使うが、メモリの上限は 2048 MiB。運用者がメモリを 8 GiB 以上に広げる必要がある。
 > 運用者が環境を広げるか用意してから「再開」と書くと、同じ依頼を要件確定の後の判断から続けます。環境が足りないことによる一時停止はこれが 1 回目で、上限は 2 回です。依頼は未完了です。

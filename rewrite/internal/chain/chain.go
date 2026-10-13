@@ -335,9 +335,10 @@ func (c Chain) Run(ctx context.Context) error {
 			state.Done = true
 			return c.save(ctx, state)
 		}
-		if next.Role == EnvironmentPause && state.Workflow != nil && len(state.Workflow.Stages) > 0 {
+		if next.Role == EnvironmentPause && state.environmentPauseOpen() {
 			// Nothing is launched. The runtime's record of the pause is what
-			// holds the request until words that resume it follow.
+			// holds the request until words that resume it follow. Without
+			// the setting, a stage of that name is an ordinary stage.
 			state.History = append(state.History, Result{Role: "router", Speaker: "runtime", Output: environmentPauseNote,
 				StartedAt: started, FinishedAt: time.Now().UTC()})
 			if err := c.save(ctx, state); err != nil {
