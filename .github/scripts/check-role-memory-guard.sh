@@ -10,7 +10,10 @@
 #    shell goes on to its next command, the launcher ends 0 and the kernel
 #    stopped nothing (memory.events oom_kill 0). Then two processes of one
 #    role grow side by side, as a build tool's two compilers do: both are
-#    stopped in turn, and the kernel still stopped nothing.
+#    stopped in turn, and the kernel still stopped nothing. Each time the
+#    launcher's last line in the record gives the highest memory in use it
+#    saw, between the line it stops a process at and the limit, and says how
+#    many of the role's processes it stopped and which.
 # 2. Two roles run at once, ten times over: one grows, the other holds 600 MiB
 #    and does not grow. Only the growing one is stopped; the steady one holds
 #    to its end every time. (The other role's launcher once took the steady
@@ -64,7 +67,7 @@ python3 -B allocate.py 0.05 & second=$!
 wait $first; a=$?; wait $second; b=$?
 echo "the two allocators ended with $a and $b"
 ROLE
-python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py --network none -- /bin/bash role.sh </dev/null
+python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py --network none -- /bin/bash role.sh </dev/null 2>&1
 echo "launcher exit status $?"
 echo "kernel out-of-memory kills in this container: $(sed -n 's/^oom_kill //p' /sys/fs/cgroup/memory.events)"
 python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py --network none -- /bin/bash two.sh </dev/null 2>&1 |
@@ -98,7 +101,22 @@ if [ "$stops" -ne 2 ]; then
   echo "::error::the two growing processes were stopped $stops times, not once each"
   exit 1
 fi
-echo "the launcher stopped the role's allocating processes, said why, and the kernel stopped nothing"
+# $1: the launcher's last line, $2: what it should say it stopped, $3: what the line starts with before it.
+closing_line() {
+  if ! grep -qE "^${3:-}\(launcher\) While this role ran, this container's memory in use, file and reclaimable kernel caches left out, was at most [0-9]+ of 1024 MiB \([0-9]+ MiB at the guard's first look\), as the memory guard sampled it, at least ten times a second; it includes the controller and any role running at the same time\. The guard stops a role's largest process at 512 MiB; it stopped $2\.$" <<<"$1"; then
+    echo "::error::the launcher's last line does not say it stopped ${2//\\/}: $1"
+    return 1
+  fi
+  local highest
+  highest="$(sed -E 's/.* was at most ([0-9]+) of 1024 MiB .*/\1/' <<<"$1")"
+  if [ "$highest" -lt 512 ] || [ "$highest" -gt 1024 ]; then
+    echo "::error::the launcher's last line gives $highest MiB at most, though it stopped a process at 512 MiB and the limit is 1024 MiB"
+    return 1
+  fi
+}
+closing_line "$(grep -B1 -E '^launcher exit status 0$' <<<"$output" | head -n 1)" "1 of this role's processes \(python3\)" || exit 1
+closing_line "$(grep -E '^two\| ' <<<"$output" | tail -n 1)" "2 of this role's processes \(python3, python3\)" 'two\| ' || exit 1
+echo "the launcher stopped the role's allocating processes, said why and how high the use went, and the kernel stopped nothing"
 
 status=0
 output="$(docker run -i "${container[@]}" --memory 2g --memory-swap 2g --entrypoint /usr/bin/env "$1" -i \
