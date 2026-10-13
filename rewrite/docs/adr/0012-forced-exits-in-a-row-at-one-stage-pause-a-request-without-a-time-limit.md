@@ -112,13 +112,16 @@ already shows the execution environment falls short of the agreed
 verification. Choosing the pause launches nothing: the runtime writes its own
 note in the history, the run returns, and the watch pauses the request with
 the same pause, notice and authorized `再開` as above. The notice quotes the
-opening of the requirements report, which such a run is told to open with the
-missing fact and what the operator would have to prepare. `再開` continues the
-request from that decision. The limit counts the pauses of one request, and
+requirements report from its first paragraph that names a shortfall, in words
+such as 不足, 足りない or insufficient, or from its opening when none does; the
+first stage is told that the requester is shown the report from there, and to
+put the missing fact and what the operator would have to prepare there before
+anything else. `再開` continues the request from that decision. The limit counts the pauses of one request, and
 `再開` does not start it over; at the limit the next stage runs without a
 decision, as without the setting, and the last pause notice says so. Absent or
-zero offers no pause. The setting is refused with a question role, with a
-first stage that is a command stage and with connected roles.
+zero offers no pause, and a stage that happens to have the pause's name is then
+an ordinary stage. The setting is refused with a question role, with a first
+stage that is a command stage and with connected roles.
 
 ### Alternatives compared
 
@@ -146,6 +149,13 @@ A fixed phrase in the requirements report that the runtime reads as the pause.
 That would hold the report to a format
 ([0004](0004-answers-not-held-to-a-format.md)); the decision service reads the
 report as it reads it after the first stage of a run with a question role.
+
+Quoting the report's opening only. The shipped instructions for elicitation
+open the report by restating the requester's goal, so the quote could end
+before what is missing and what the operator has to prepare. The words that
+start the quote at a shortfall choose only where the quote starts: nothing
+waits on them, a report without them is quoted from its opening, and the
+pause itself is still the decision service's choice.
 
 Offering it to connected roles. They have no first stage that marks
 elicitation, so "before any later stage has run" has nothing to be read from.
@@ -184,7 +194,7 @@ The addendum's line numbers refer to commit fbc4cc8.
   "Select the limit", lines 1797-1809; "Restart and operator action", lines
   1877-1903.
 
-The second addendum's line numbers refer to commit 5640b38.
+The second addendum's line numbers refer to commit b3a7fa5.
 
 - [`rewrite/README.md`](../../README.md), "Runtime resource observations",
-  lines 2468-2508; "Stages instead of roles", lines 1161-1165.
+  lines 2468-2515; "Stages instead of roles", lines 1161-1165.
