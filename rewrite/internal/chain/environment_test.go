@@ -151,7 +151,7 @@ func TestATrialIsJudgedByTheLaunchersLastLine(t *testing.T) {
 			"role": processPrompt(Role{Name: "elicit"}, Process{}, Assignment{}, state)} {
 			for _, phrase := range []string{"private copy of the checkout under your home directory",
 				"/tmp is held in memory and counts against the same limit", "Remove the copy afterwards",
-				"The launcher's last line in each launch's record gives the container's highest memory in use during that launch, the limit",
+				"The launcher's last line in the record of each launch that ended with exit status 0 gives the container's highest memory in use during that launch, the limit",
 				"the controller and any role running at the same time included, and nothing outside that launch",
 				"A trial fits when it ran to its end and the launcher stopped none of its processes",
 				"put the peak and the limit in the question or the final report",

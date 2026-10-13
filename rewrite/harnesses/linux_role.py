@@ -492,8 +492,9 @@ def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=
 
 
 def closing_line(limits, observed):
-    """The line that ends the role's record when the guard looked at least
-    once: what guard() returned, the limit and the line it acts at."""
+    """The line that ends the record of a role that ended 0 when the guard
+    looked at least once: what guard() returned, the limit and the line it
+    acts at."""
     first, highest, names = observed
     if highest is None:
         return None
@@ -581,10 +582,13 @@ def supervise(argv, environment, descriptors, limits, kill_together):
         except InterruptedError:
             continue
     collect_children(2)
-    # The last line of the role's record, after everything the role wrote: a
-    # later role's prompt carries the record's end.
+    # The last line of the record of a role that ended 0, after everything it
+    # wrote: a later role's prompt carries the record's end. A failure's record
+    # gets none: the engine quotes a failure's last line as its reason and
+    # collapses failures whose text is the same, and this line's numbers
+    # change from launch to launch.
     line = closing_line(limits, observed)
-    if line is not None:
+    if line is not None and os.WIFEXITED(ended[0]) and os.WEXITSTATUS(ended[0]) == 0:
         print(line, file=sys.stderr, flush=True)
     if os.WIFSIGNALED(ended[0]):
         number = os.WTERMSIG(ended[0])

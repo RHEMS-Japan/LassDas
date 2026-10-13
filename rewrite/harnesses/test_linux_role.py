@@ -899,7 +899,8 @@ class SupervisedLaunchTests(unittest.TestCase):
     def test_the_exit_status_passes_through_and_nothing_is_left_behind(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output, errors = self.launch(Path(temporary), ["/bin/sh", "-c", "sleep 0.3; exit 7"])
-        self.assertEqual(errors, closing(1024) + "\nlauncher status 7, processes left behind 0\n", output)
+        # A role that did not end 0 gets no last line: a failure's record ends with what the role wrote.
+        self.assertEqual(errors, "launcher status 7, processes left behind 0\n", output)
 
     def test_the_record_ends_with_the_peak_the_limit_and_what_was_stopped(self):
         # The use rises from 1,024 to 1,400 MiB once the role has started, under the line at 1,536 MiB: the
@@ -945,6 +946,20 @@ class SupervisedLaunchTests(unittest.TestCase):
                 self.assertEqual(lines[-2], closing(1948, "1 of this role's processes (python3)"))
                 self.assertEqual(lines[-1], "launcher status 0, processes left behind 0")
 
+    def test_a_role_that_does_not_end_0_after_a_stop_keeps_the_stop_as_its_last_launcher_line(self):
+        # The stop is named; no last line follows, so the failure's text is the same from launch to launch.
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            (root / "workspace").mkdir()
+            (root / "workspace" / "hold.py").write_text(HOLDER)
+            output, errors = self.launch(root, ["/bin/bash", "-c", "python3 -B hold.py; exit 3"], over_after="holding\n")
+        self.assertIsNotNone(output, errors)
+        lines = errors.splitlines()
+        self.assertEqual(len([line for line in lines if "(launcher)" in line]), 1, errors)
+        self.assertRegex(lines[0], "^" + REASON)
+        self.assertNotIn("While this role ran", errors)
+        self.assertEqual(lines[-1], "launcher status 3, processes left behind 0")
+
     def test_a_fault_of_the_guard_leaves_the_role_running_unguarded_to_its_own_end(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output, errors = self.launch(Path(temporary), ["/bin/sh", "-c", "sleep 0.3; exit 7"], mode="check-faulty")
@@ -955,7 +970,7 @@ class SupervisedLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output, errors = self.launch(Path(temporary), ["/bin/sh", "-c", "echo started; sleep 30"], mode="cancel")
         self.assertEqual(output, "started\n")
-        self.assertEqual(errors, closing(1024) + "\nlauncher status %d, processes left behind 0\n" % -signal.SIGTERM)
+        self.assertEqual(errors, "launcher status %d, processes left behind 0\n" % -signal.SIGTERM)
 
     def test_bubblewrap_ending_by_a_signal_ends_the_launcher_by_it(self):
         def children(parent):
