@@ -2461,6 +2461,24 @@ handoff, investigate ordinary failures within current authority and keep the
 existing authority and change-confirmation question rules. No reply changes
 resource limits or grants permissions on its own.
 
+A trial runs in a private copy of the checkout under the role's home
+directory, removed afterwards: the checkout may be read-only for the role, and
+the role's `/tmp` is held in memory, so a copy there counts against the same
+limit and raises what is measured. Where the launcher's memory guard runs, the
+launcher's last line in each launch's record gives the container's highest
+memory in use during that launch, the limit, the point at which it stops a
+role's largest process and how many of the role's processes it stopped
+([RUNTIME.md](RUNTIME.md#memory)). A trial fits when it ran to its end
+and the launcher stopped none of its processes: the request continues, and the
+question or the final report gives the peak and the limit. A trial the
+launcher stopped does not fit, as when a fact already shows the environment
+falls short. The line covers the whole container for the whole launch, the
+controller and any role running at the same time included, so it is not the
+trial's own figure; without the line, the trial's memory is unknown. A trial
+checks the verification as it exists before the work: code written
+afterwards, such as a new test, can still need more, and a later stop is
+investigated like any other failure.
+
 An installation without a question role has no way yet to stop at initial
 elicitation because the environment falls short. Its requirements report opens
 with the missing or insufficient fact and what the operator would have to

@@ -147,7 +147,27 @@ of its own), it stays as bubblewrap's parent and guards the role:
   tool sees only the stop, and the record has the line. The next role's
   prompt carries only the last 4,000 characters of a record's diagnostics, so
   a role that writes much after the stop can push the line out of that prompt;
-  the record keeps it.
+  the record keeps it, and the launcher's last line (next) still names the
+  stopped process.
+- When the role has ended, the launcher writes one more line on its standard
+  error, its last in the role's record. In the check of this guard in a 1 GiB
+  container:
+
+  > (launcher) While this role ran, this container's memory in use, file and reclaimable kernel caches left out, was at most 524 of 1024 MiB (9 MiB at the guard's first look), as the memory guard sampled it, at least ten times a second; it includes the controller and any role running at the same time. The guard stops a role's largest process at 512 MiB; it stopped 1 of this role's processes (python3).
+
+  The highest is the largest use the guard saw at its looks, the same use,
+  caches left out, that it acts on, in whole MiB. It is the container's, not
+  one command's: the controller and any role running at the same time are in
+  it, and so is everything the role did during the launch. A rise that comes
+  and goes between two looks can be missed, as it is by the guard itself. The
+  stopped processes are the ones this launcher stopped, the first three by
+  name. The line follows a cancel too; it is not written when the guard is
+  off, has no limit to keep under, stopped with a fault or never looked.
+  memory.current is read at every look anyway; memory.stat is read for the
+  highest only when memory.current is over it, which with much file cache can
+  be every look. `memory.peak` is not used: it holds the highest since the
+  container started, and resetting it for one launch was refused inside a
+  container (`Permission denied`, Docker Desktop's kernel 6.12.76).
 - When the anonymous memory outside every role's processes (the controller's,
   for example) is over the threshold by itself, stopping role processes would
   not bring the use back under the threshold: it says so once and stops none

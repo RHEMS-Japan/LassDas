@@ -139,3 +139,28 @@ func TestOnlyAConfirmingRunWidensTheAlternativesAfterHandoff(t *testing.T) {
 		}
 	}
 }
+
+// A trial at initial elicitation is read from the launcher's last line, and
+// where it runs is said. This checks that the words reach both the decision
+// model (what DecisionRouter.Next hands the judge) and every role, in a run
+// with and without a stage that confirms the change; it does not show that an
+// actual model judges by them.
+func TestATrialIsJudgedByTheLaunchersLastLine(t *testing.T) {
+	for _, state := range []State{{Request: "r", Workflow: stagesWorkflow()}, {Request: "r", Workflow: confirmFlow(t)}} {
+		for what, text := range map[string]string{"decision": decisionInstructions(state),
+			"role": processPrompt(Role{Name: "elicit"}, Process{}, Assignment{}, state)} {
+			for _, phrase := range []string{"private copy of the checkout under your home directory",
+				"/tmp is held in memory and counts against the same limit", "Remove the copy afterwards",
+				"The launcher's last line in each launch's record gives the container's highest memory in use during that launch, the limit",
+				"the controller and any role running at the same time included, and nothing outside that launch",
+				"A trial fits when it ran to its end and the launcher stopped none of its processes",
+				"put the peak and the limit in the question or the final report",
+				"A trial the launcher stopped does not fit", "with no such line after it, its memory is unknown",
+				"a later stop is investigated like any other failure"} {
+				if strings.Count(text, phrase) != 1 {
+					t.Errorf("the %s text (confirming %t) does not say %q once", what, state.confirms(), phrase)
+				}
+			}
+		}
+	}
+}

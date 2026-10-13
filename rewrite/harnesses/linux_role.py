@@ -394,7 +394,12 @@ def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=
     the costly part, is read only when the use is over the threshold; while
     the memory over it is outside every role (nothing to stop yet, the line is
     then the last resort), once every recheck: until then a role process is
-    stopped only at the last resort."""
+    stopped only at the last resort.
+
+    It returns the use, caches left out, at its first look and at its
+    highest, and the names of the processes it stopped, in order. Since
+    memory.current bounds the use from above, memory.stat is read for the
+    highest only when memory.current is over it."""
     uid = os.getuid()
     last_resort = limits.limit - (limits.limit - limits.threshold) // 2
     stopped = set()  # (pid, start) of the processes this launcher stopped
@@ -403,10 +408,13 @@ def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=
     waiting_since = None  # when the table last showed only memory outside the roles over the threshold
     current = os.open(limits.directory / "memory.current", os.O_RDONLY | os.O_CLOEXEC)
     statistics = os.open(limits.directory / "memory.stat", os.O_RDONLY | os.O_CLOEXEC)
+    first = highest = None
+    names = []
     try:
         while alive():
             reading = int(os.pread(current, 64, 0))
             in_use = reading
+            exact_in_use = None
             waiting = waiting_since is not None and time.monotonic() - waiting_since < recheck
             if waiting:
                 # As at the last reading of the table, a moment ago, unless the use may be at the last resort.
@@ -415,7 +423,7 @@ def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=
                 exact = reading >= limits.threshold - FILL_RATE * interval
             if exact:
                 in_use, anon = parse_reading(reading, os.pread(statistics, 1 << 16, 0).decode())
-                used = in_use
+                exact_in_use = used = in_use
                 if used >= (last_resort if waiting else limits.threshold):
                     waiting_since = None
                     table = processes(proc)
@@ -462,8 +470,16 @@ def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=
                                 pass
                             else:
                                 stopped.add((pid, table[pid].start))
+                                names.append(printable(table[pid].name))
                                 report.write(line)
                                 report.flush()
+            if highest is None or reading > highest:
+                if exact_in_use is None:
+                    exact_in_use = parse_reading(reading, os.pread(statistics, 1 << 16, 0).decode())[0]
+                if highest is None:
+                    first = highest = exact_in_use
+                else:
+                    highest = max(highest, exact_in_use)
             if in_use < limits.threshold:
                 settling_since = None
             # The pace follows the memory still held, a stopped process's included until it is gone.
@@ -472,6 +488,24 @@ def guard(root, limits, report, alive, *, pause=time.sleep, proc=None, interval=
     finally:
         os.close(current)
         os.close(statistics)
+    return first, highest, names
+
+
+def closing_line(limits, observed):
+    """The line that ends the role's record when the guard looked at least
+    once: what guard() returned, the limit and the line it acts at."""
+    first, highest, names = observed
+    if highest is None:
+        return None
+    stopped = "none of this role's processes"
+    if names:
+        shown = names[:3] + (["..."] if len(names) > 3 else [])
+        stopped = "%d of this role's processes (%s)" % (len(names), ", ".join(shown))
+    return ("(launcher) While this role ran, this container's memory in use, file and reclaimable kernel caches left "
+            "out, was at most %d of %d MiB (%d MiB at the guard's first look), as the memory guard sampled it, at least "
+            "ten times a second; it includes the controller and any role running at the same time. The guard stops a "
+            "role's largest process at %d MiB; it stopped %s."
+            % (highest // MIB, limits.limit // MIB, first // MIB, limits.threshold // MIB, stopped))
 
 
 def collect_children(seconds):
@@ -534,8 +568,10 @@ def supervise(argv, environment, descriptors, limits, kill_together):
                 ended.append(status)
         return not ended
 
+    observed = (None, None, [])
     try:
-        guard(child, limits, sys.stderr, alive, pause=lambda seconds: signal.sigtimedwait({signal.SIGCHLD}, seconds))
+        observed = guard(child, limits, sys.stderr, alive,
+                         pause=lambda seconds: signal.sigtimedwait({signal.SIGCHLD}, seconds))
     except Exception as error:
         # A fault of the guard is not a reason to end the role: it runs on unguarded.
         print("(launcher) The memory guard stopped: %s" % error, file=sys.stderr, flush=True)
@@ -545,6 +581,11 @@ def supervise(argv, environment, descriptors, limits, kill_together):
         except InterruptedError:
             continue
     collect_children(2)
+    # The last line of the role's record, after everything the role wrote: a
+    # later role's prompt carries the record's end.
+    line = closing_line(limits, observed)
+    if line is not None:
+        print(line, file=sys.stderr, flush=True)
     if os.WIFSIGNALED(ended[0]):
         number = os.WTERMSIG(ended[0])
         signal.pthread_sigmask(signal.SIG_BLOCK, set(PASSED_ON))

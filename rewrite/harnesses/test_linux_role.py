@@ -416,15 +416,16 @@ class MemoryAccountingTests(unittest.TestCase):
             self.assertEqual(report.getvalue(), "")
 
     def run_guard(self, cgroup, table, looks=3, limit=2 << 30, headroom=512 << 20):
-        """guard() over a fixed process table: what it stopped, what it wrote, and how long it paused each time.
-        The stand-ins are never really stopped, so a stopped one stays in the table as it is."""
+        """guard() over a fixed process table: what it stopped, what it wrote, and how long it paused each time;
+        what it returned is kept in self.observed. The stand-ins are never really stopped, so a stopped one
+        stays in the table as it is."""
         remaining = iter(range(looks))
         report, killed, pauses = io.StringIO(), [], []
         with patch.object(launcher, "processes", return_value=table) as reads, patch.object(launcher, "tell"), \
                 patch.object(os, "getuid", return_value=1000), \
                 patch.object(os, "kill", side_effect=lambda pid, number: killed.append(pid)):
-            launcher.guard(10, launcher.Limits(cgroup, limit, limit - headroom), report,
-                           lambda: next(remaining, None) is not None, pause=pauses.append)
+            self.observed = launcher.guard(10, launcher.Limits(cgroup, limit, limit - headroom), report,
+                                           lambda: next(remaining, None) is not None, pause=pauses.append)
         self.table_reads = reads.call_count
         return killed, report.getvalue().splitlines(), pauses
 
@@ -471,6 +472,8 @@ class MemoryAccountingTests(unittest.TestCase):
                     self.assertEqual(len(lines), len(expected), lines)
                     # No pause longer than the near look after a stop: a growing neighbour is not left alone for a second.
                     self.assertEqual(pauses, [0.01, 0.01, 0.01])
+                    # It names what it stopped, in order, for the line that ends the role's record.
+                    self.assertEqual(self.observed[2], ["rustc"] * len(expected))
             # A process that is already ending (it exited, or another launcher stopped it) is not chosen,
             # and its memory counts as given back.
             table[12] = table[12]._replace(leaving=True)
@@ -610,6 +613,61 @@ class MemoryAccountingTests(unittest.TestCase):
             self.assertEqual([pid for pid, _ in killed], [11])
             self.assertLess(killed[0][1], 100.22)
 
+    def test_the_guard_returns_the_highest_use_it_saw_with_caches_left_out(self):
+        # memory.current is 1,024, then 1,800, then 1,200 MiB at the three looks, 300 MiB of it file cache each
+        # time. What the guard returns leaves the cache out, as the use it acts on does: 724 MiB at its first
+        # look and 1,500 MiB at its highest; not the last look's 900 MiB, and no memory.current as it was read.
+        # Far from the line it acts at (8 GiB), memory.stat is read for the highest alone; near it (2 GiB, the
+        # line at 1,536 MiB), it is read for the decision anyway.
+        for limit in (8 << 30, 2 << 30):
+            with self.subTest(limit=limit >> 20), tempfile.TemporaryDirectory() as temporary:
+                cgroup = Path(temporary) / "cgroup"
+                readings = iter([1800 << 20, 1200 << 20])
+                write_cgroup(cgroup, limit, 1024 << 20, inactive_file=300 << 20)
+                looks = iter(range(3))
+
+                def pause(_):
+                    reading = next(readings, None)
+                    if reading is not None:
+                        write_cgroup(cgroup, limit, reading, inactive_file=300 << 20)
+
+                with patch.object(launcher, "processes", side_effect=AssertionError("no process should be looked at")), \
+                        patch.object(os, "kill", side_effect=AssertionError("nothing should be stopped")):
+                    observed = launcher.guard(10, launcher.Limits(cgroup, limit, limit - (512 << 20)), io.StringIO(),
+                                              lambda: next(looks, None) is not None, pause=pause)
+                self.assertEqual(observed, (724 << 20, 1500 << 20, []))
+
+    def test_the_guard_names_the_processes_it_stopped(self):
+        P = launcher.Process
+        with tempfile.TemporaryDirectory() as temporary:
+            cgroup = Path(temporary) / "cgroup"
+            # 2 GiB, 512 MiB headroom: the line is at 1,536 MiB. A role process of 1,300 MiB beside the
+            # controller's 300 takes the use over it and is stopped; one of 100 MiB is not.
+            for role, names in ((1300 << 20, ["python3"]), (100 << 20, [])):
+                write_cgroup(cgroup, 2 << 30, (300 << 20) + role, anon=300 << 20)
+                table = {1: P(0, "ticket-engine", 300 << 20, 1000, False), 10: P(1, "bwrap", 1 << 20, 1000, False),
+                         11: P(10, "python3", role, 1000, True)}
+                with self.subTest(role=role >> 20):
+                    killed, _, _ = self.run_guard(cgroup, table)
+                    self.assertEqual(killed, [11] if names else [])
+                    self.assertEqual(self.observed, ((300 << 20) + role, (300 << 20) + role, names))
+
+    def test_the_closing_line_says_the_highest_use_the_limit_the_line_and_what_was_stopped(self):
+        limits = launcher.Limits(Path("/sys/fs/cgroup"), 6 << 30, (6 << 30) - (768 << 20))
+        opening = ("(launcher) While this role ran, this container's memory in use, file and reclaimable kernel caches "
+                   "left out, was at most 5100 of 6144 MiB (900 MiB at the guard's first look), as the memory guard "
+                   "sampled it, at least ten times a second; it includes the controller and any role running at the "
+                   "same time. The guard stops a role's largest process at 5376 MiB; it stopped ")
+        for names, stopped in (([], "none of this role's processes."),
+                               (["python3"], "1 of this role's processes (python3)."),
+                               (["python3", "sh", "python3", "sort"], "4 of this role's processes (python3, sh, python3, ...).")):
+            with self.subTest(names=names):
+                # Whole MiB, as the line that names a stopped process gives them: the part of a MiB is left out.
+                self.assertEqual(launcher.closing_line(limits, (900 << 20, (5100 << 20) + (1023 << 10), names)),
+                                 opening + stopped)
+        # A guard that never looked has nothing to say.
+        self.assertIsNone(launcher.closing_line(limits, (None, None, [])))
+
     def test_the_reason_reaches_a_pipe_or_terminal_but_never_a_file_and_never_waits(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -698,6 +756,14 @@ class ProcessTableTests(unittest.TestCase):
 
 REASON = (r"\(launcher\) Stopped python3 \(pid \d+, \d+ MiB resident; this role's processes \d+ MiB in all\) because "
           r"this container's memory in use, file and reclaimable kernel caches left out, reached 1948 of 2048 MiB\.")
+
+def closing(highest, stopped="none of this role's processes", first=1024):
+    """The line that ends a supervised role's record in a 2 GiB container whose use read 1,024 MiB at first."""
+    return ("(launcher) While this role ran, this container's memory in use, file and reclaimable kernel caches left "
+            "out, was at most %d of 2048 MiB (%d MiB at the guard's first look), as the memory guard sampled it, at "
+            "least ten times a second; it includes the controller and any role running at the same time. The guard "
+            "stops a role's largest process at 1536 MiB; it stopped %s." % (highest, first, stopped))
+
 
 HOLDER = ("import time\n"
           "held = bytearray(64 << 20)\n"
@@ -806,7 +872,8 @@ print("launcher status %d, processes left behind %d" % (status, left), file=sys.
 class SupervisedLaunchTests(unittest.TestCase):
     """main() with a container memory limit: bubblewrap runs under the guard."""
 
-    def launch(self, root, program, usage=1 << 30, over_after=None, mode="check", oom_group=0):
+    def launch(self, root, program, usage=1 << 30, over_after=None, mode="check", oom_group=0,
+               later=(2 << 30) - (100 << 20)):
         work, home, cgroup = root / "workspace", root / "home", root / "cgroup"
         work.mkdir(exist_ok=True)
         home.mkdir(exist_ok=True)
@@ -818,7 +885,7 @@ class SupervisedLaunchTests(unittest.TestCase):
         try:
             if over_after is not None:
                 self.assertEqual(role.stdout.readline(), over_after, "the role did not start")
-                write_cgroup(cgroup, 2 << 30, (2 << 30) - (100 << 20), oom_group=oom_group)
+                write_cgroup(cgroup, 2 << 30, later, oom_group=oom_group)
             try:
                 output, errors = role.communicate(timeout=30)
             except subprocess.TimeoutExpired:
@@ -832,7 +899,15 @@ class SupervisedLaunchTests(unittest.TestCase):
     def test_the_exit_status_passes_through_and_nothing_is_left_behind(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output, errors = self.launch(Path(temporary), ["/bin/sh", "-c", "sleep 0.3; exit 7"])
-        self.assertEqual(errors, "launcher status 7, processes left behind 0\n", output)
+        self.assertEqual(errors, closing(1024) + "\nlauncher status 7, processes left behind 0\n", output)
+
+    def test_the_record_ends_with_the_peak_the_limit_and_what_was_stopped(self):
+        # The use rises from 1,024 to 1,400 MiB once the role has started, under the line at 1,536 MiB: the
+        # last line gives the highest use, not the first look's, and says nothing was stopped.
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output, errors = self.launch(Path(temporary), ["/bin/sh", "-c", "echo started; sleep 0.5"],
+                                         over_after="started\n", later=1400 << 20)
+        self.assertEqual(errors, closing(1400) + "\nlauncher status 0, processes left behind 0\n", output)
 
     def test_role_processes_come_first_unless_the_kernel_stops_the_container_together_and_no_limit_is_set(self):
         program = ["/bin/sh", "-c", "cat /proc/self/oom_score_adj; ulimit -d; grep SigBlk /proc/self/status"]
@@ -863,9 +938,11 @@ class SupervisedLaunchTests(unittest.TestCase):
                     self.assertNotIn("(launcher)", output)
                 self.assertTrue(output.endswith("the holder ended with 137\n"), output)
                 lines = errors.splitlines()
-                # The shell's own "Killed" may stand between the two; only one process was stopped.
-                self.assertEqual(len([line for line in lines if "(launcher)" in line]), 1, errors)
+                # The shell's own "Killed" may stand between the two; only one process was stopped, and the
+                # record ends with the line that says so and how high the use went.
+                self.assertEqual(len([line for line in lines if "(launcher)" in line]), 2, errors)
                 self.assertRegex(lines[0], "^" + REASON)
+                self.assertEqual(lines[-2], closing(1948, "1 of this role's processes (python3)"))
                 self.assertEqual(lines[-1], "launcher status 0, processes left behind 0")
 
     def test_a_fault_of_the_guard_leaves_the_role_running_unguarded_to_its_own_end(self):
@@ -878,7 +955,7 @@ class SupervisedLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output, errors = self.launch(Path(temporary), ["/bin/sh", "-c", "echo started; sleep 30"], mode="cancel")
         self.assertEqual(output, "started\n")
-        self.assertEqual(errors, "launcher status %d, processes left behind 0\n" % -signal.SIGTERM)
+        self.assertEqual(errors, closing(1024) + "\nlauncher status %d, processes left behind 0\n" % -signal.SIGTERM)
 
     def test_bubblewrap_ending_by_a_signal_ends_the_launcher_by_it(self):
         def children(parent):
