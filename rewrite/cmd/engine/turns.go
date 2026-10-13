@@ -463,7 +463,9 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 // own line when it does not. A later launch after another stage sent the work
 // back is said only when its models differ from the ones last said: the same
 // models again are no news. A launch after the stage's own launch did not end
-// cleanly is always said, with how that one ended, the attempt it is and how
+// cleanly is always said, with how that one ended, the attempt it is as the
+// pause at intake.max_stage_attempts counts it (none after launches the
+// runtime stopped itself and nothing else, or right after a 再開) and how
 // many more forced exits pause the request; while the stage keeps failing,
 // each such launch rewrites the comment of the one before it.
 const (
