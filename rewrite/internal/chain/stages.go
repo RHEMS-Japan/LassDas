@@ -330,7 +330,8 @@ type Ending struct {
 	// Role is the role the launch ran.
 	Role string
 	// Attempt counts the launches of Role in a row, this one included, that
-	// did not end cleanly, since another role ran or the requester replied.
+	// did not end cleanly, since another role ran, as an answer kept under the
+	// question role's name does; a 再開, kept without a role, does not end it.
 	Attempt int
 	// Interrupted is a launch a restart of the runtime cut short. Forced is
 	// one of those that saved nothing, so the runtime itself was killed.

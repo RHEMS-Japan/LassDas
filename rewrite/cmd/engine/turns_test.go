@@ -1177,9 +1177,12 @@ func TestTheRerunWordsSayHowTheLaunchBeforeEnded(t *testing.T) {
 			"前の回は要件確定の役が同じ操作に 5 回続けて失敗し、自分で止まりました。要件確定をやり直します（2 回目）。（モデル: maker/x）"},
 		{"its time limit", failed(chain.Result{Speaker: "requirements", Error: "context deadline exceeded"}), nil,
 			"前の回は要件確定が時間の上限に達して止まりました。要件確定をやり直します（2 回目）。（モデル: maker/x）"},
+		// A launch the runtime stopped itself is not counted, as the pause
+		// at intake.max_stage_attempts does not count it, so no attempt is
+		// named after it alone.
 		{"stopped by the runtime", append(failed(chain.Result{Speaker: "requirements", Error: "context canceled", Interrupted: true}),
 			chain.Result{Role: "elicit", Speaker: "runtime", Interrupted: true, StartedAt: at, FinishedAt: at}), nil,
-			"前の回は要件確定の途中で本体が止まりました。要件確定をやり直します（2 回目）。（モデル: maker/x）"},
+			"前の回は要件確定の途中で本体が止まりました。要件確定をやり直します。（モデル: maker/x）"},
 		{"killed under a time limit", []chain.Result{forcedNote("elicit", at)}, &workLimitRecord{Version: 1, Clock: &workClock{MaxMinutes: 60, MaxHardExits: 3, HardExits: 1}},
 			"前の回は要件確定の途中で処理が強制終了しました（メモリ不足の可能性があります）。要件確定をやり直します（2 回目）。強制終了があと 2 回起きたら一時停止して相談します。（モデル: maker/x）"},
 		{"killed without a readable limit", []chain.Result{forcedNote("elicit", at)}, nil,

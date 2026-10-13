@@ -516,23 +516,14 @@ func pauseStageAttempts(cfg config, directory string, now time.Time) error {
 }
 
 // stageAttemptsReason names the stage, the count and how the launches ended,
-// with the words of the notice of a stage that runs again. A launch the
-// runtime stopped itself is not counted, so it is not named either.
+// with the words and the count of the notice of a stage that runs again. A
+// launch the runtime stopped itself is not counted, so it is not named either.
 func stageAttemptsReason(state chain.State, limit int) string {
 	ending, count := state.FailedInARow()
 	if count == 0 {
 		return pauseReason(stageAttemptsPause)
 	}
-	var parts []string
-	for _, kind := range []struct {
-		count int
-		words string
-	}{{ending.Kinds.Forced, "強制終了"}, {ending.Kinds.TimedOut, "時間の上限"}, {ending.Kinds.NoModel, "モデルを選べず"}, {ending.Kinds.Errors, "エラー"}} {
-		if kind.count > 0 {
-			parts = append(parts, fmt.Sprintf("%s %d 回", kind.words, kind.count))
-		}
-	}
-	kinds := "（" + strings.Join(parts, "、") + "）"
+	kinds := countedKinds(ending.Kinds)
 	where := "「" + japaneseStage(ending.Role) + "」の工程で、"
 	if count == 1 {
 		return fmt.Sprintf("%s正常に終わらなかった起動があり%s、上限の %d 回に達したためです。", where, kinds, limit)
