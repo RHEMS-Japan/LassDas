@@ -214,8 +214,10 @@ exit 0 or was cut off. With `declare_models`, the engine declares a rerun
 after a send-back only when its model differs from the one last declared for
 that stage, and a rerun after the stage's own launch every time, except
 right after a restart notice that already named it, with how that launch
-ended and which attempt this is, in words such as
-要件確定をやり直します（2 回目）. While the stage keeps failing, each such
+ended and which attempt this is as the pause at `intake.max_stage_attempts`
+counts it, in words such as 要件確定をやり直します（2 回目）; after launches
+the runtime stopped itself and nothing else, or right after a `再開`, it names
+no attempt. While the stage keeps failing, each such
 declaration rewrites the one before it where the tracker can edit comments.
 
 - Used in: README.md:690, README.md:1355
