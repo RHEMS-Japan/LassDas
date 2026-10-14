@@ -137,7 +137,7 @@ def read_settings(environment, command):
     ca_file = required(environment, "PREVIEW_K8S_CA_FILE")
     if not os.path.isabs(ca_file) or not os.path.isfile(ca_file):
         raise Failure("PREVIEW_K8S_CA_FILE must name an existing file by its absolute path")
-    wait_seconds = number(environment, "PREVIEW_WAIT_SECONDS", 1, 3600, default=540 if command == "up" else 60)
+    wait_seconds = number(environment, "PREVIEW_WAIT_SECONDS", 1, 3600, default=420 if command == "up" else 60)
     if command == "down":
         return Settings(workspace, None, issue, site, None, None, None, None, None, None, None, None, None,
                         None, namespace, server, ca_file, None, wait_seconds)
@@ -322,9 +322,9 @@ def stamp(moment):
 
 
 def manifests(settings, names, entries, expires):
-    """The Deployment and the Service of a request's preview. The admission
-    policy (admission-policy.yaml.example) accepts this shape and refuses
-    most others."""
+    """The Deployment and the Service of a request's preview: the shape the
+    admission policy of README.md, "The shape the cluster accepts", lets
+    through."""
     labels = {LABEL: names.name, SITE_LABEL: settings.site}
     values = {"HOME": "/tmp"}
     values.update(entries)
