@@ -551,6 +551,37 @@ func (w *Workflow) validateStages(roles map[string]string) error {
 	if w.ConfirmationReworkLimit != 0 && !confirms {
 		return errors.New("workflow.confirmation_rework_limit needs a stage marked confirm")
 	}
+	if w.Preview != nil {
+		return w.validatePreview(roles, kinds, confirms)
+	}
+	return nil
+}
+
+// validatePreview checks the operator's preview roles: two different
+// configured roles, neither a stage nor the question role, in a run whose
+// stage that confirms the change is what comes before the question they put
+// the page up for.
+func (w *Workflow) validatePreview(roles map[string]string, stages map[string]string, confirms bool) error {
+	if !confirms {
+		return errors.New("workflow.preview needs a stage marked confirm: the page is put up only before the question chosen after that stage")
+	}
+	for _, role := range []struct{ setting, name string }{{"workflow.preview.up", w.Preview.Up}, {"workflow.preview.down", w.Preview.Down}} {
+		if role.name == "" {
+			return fmt.Errorf("%s needs a configured role", role.setting)
+		}
+		if _, configured := roles[role.name]; !configured || role.name == "done" || role.name == "router" {
+			return fmt.Errorf("%s names no configured role: %q", role.setting, role.name)
+		}
+		if _, staged := stages[role.name]; staged {
+			return fmt.Errorf("%s names %q, which is a stage of the ordered run; the preview roles run outside it", role.setting, role.name)
+		}
+		if role.name == w.Question {
+			return fmt.Errorf("%s names %q, which is the question role", role.setting, role.name)
+		}
+	}
+	if w.Preview.Up == w.Preview.Down {
+		return fmt.Errorf("workflow.preview.up and workflow.preview.down must name different roles, not both %q", w.Preview.Up)
+	}
 	return nil
 }
 

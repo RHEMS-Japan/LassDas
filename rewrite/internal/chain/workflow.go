@@ -47,6 +47,21 @@ type Workflow struct {
 	// short of the agreed verification. It is how many times one request may
 	// be paused that way; zero offers no such pause.
 	EnvironmentPauseLimit int `json:"environment_pause_limit,omitempty"`
+	// Preview names the operator's two roles that put the change up for the
+	// requester to see and take it down again. Absent, nothing is put up.
+	Preview *Preview `json:"preview,omitempty"`
+}
+
+// Preview is the operator's pair of roles for a page where the requester
+// sees the change before the question that confirms it. Neither is a stage
+// or the question role: what they return satisfies, fails or repeats no
+// stage, and the runtime only records it.
+type Preview struct {
+	// Up is launched once each time the decision after a stage that confirms
+	// the change chooses the question, right before the question.
+	Up string `json:"up"`
+	// Down is launched once the request is delivered or stopped.
+	Down string `json:"down"`
 }
 
 func (w *Workflow) Validate(roles map[string]string) error {
@@ -61,6 +76,9 @@ func (w *Workflow) Validate(roles map[string]string) error {
 	}
 	if w.EnvironmentPauseLimit < 0 || w.EnvironmentPauseLimit != 0 && len(w.Stages) == 0 {
 		return errors.New("workflow.environment_pause_limit needs an ordered run and must not be negative")
+	}
+	if w.Preview != nil && len(w.Stages) == 0 {
+		return errors.New("workflow.preview needs an ordered run with a stage marked confirm, whose question it comes before")
 	}
 	if len(w.Stages) > 0 {
 		if len(w.LaunchLimit) > 0 {
@@ -131,6 +149,10 @@ func (w *Workflow) clone() *Workflow {
 	copy := &Workflow{Start: slices.Clone(w.Start), After: map[string][]string{}, Recover: map[string][]string{},
 		Stages: slices.Clone(w.Stages), Question: w.Question, EntranceReworkLimit: w.EntranceReworkLimit,
 		ConfirmationReworkLimit: w.ConfirmationReworkLimit, EnvironmentPauseLimit: w.EnvironmentPauseLimit}
+	if w.Preview != nil {
+		preview := *w.Preview
+		copy.Preview = &preview
+	}
 	if w.LaunchLimit != nil {
 		copy.LaunchLimit = make(map[string]int, len(w.LaunchLimit))
 		for role, limit := range w.LaunchLimit {
