@@ -202,6 +202,19 @@ func requestNotices(cfg config, issue sourceIssue, directory string) notices {
 
 func (n notices) path() string { return filepath.Join(n.directory, "notices.json") }
 
+// noticeLocks keeps one lock for each request's notices. The watcher of a
+// running request settles and posts them, and so does the run itself when it
+// posts the address of a page put up for the requester; each settles or
+// posts whole, so neither submits a notice the other is submitting.
+var noticeLocks sync.Map
+
+func (n notices) hold() func() {
+	lock, _ := noticeLocks.LoadOrStore(filepath.Clean(n.directory), &sync.Mutex{})
+	mutex := lock.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
+
 func (n notices) load() (noticeLog, error) {
 	var log noticeLog
 	raw, err := os.ReadFile(n.path())
@@ -354,6 +367,9 @@ func postableKinds(cfg config) []string {
 	if cfg.Intake.QuestionReminderMinutes > 0 {
 		kinds = append(kinds, reminderNotice)
 	}
+	if cfg.Workflow != nil && cfg.Workflow.Preview != nil {
+		kinds = append(kinds, previewNotice)
+	}
 	if cfg.Intake.Announce {
 		kinds = append(kinds, acceptedNotice, startedNotice, resumedNotice, modelsNotice)
 		if cfg.Workflow != nil {
@@ -464,6 +480,7 @@ func (n notices) say(ctx context.Context, kind, text, models string, at time.Tim
 // earlier unconfirmed notice is settled, and gives the notice to record, and
 // whether it speaks at all.
 func (n notices) sayAs(ctx context.Context, kind, event string, at time.Time, compose func(noticeLog, time.Time) (noticeRecord, bool)) error {
+	defer n.hold()()
 	log, err := n.load()
 	if err != nil {
 		return err
@@ -510,6 +527,7 @@ func (n notices) sayAs(ctx context.Context, kind, event string, at time.Time, co
 // flush retries a notice that was recorded but never confirmed, so a failed
 // submission is carried by later ticks instead of being lost or duplicated.
 func (n notices) flush(ctx context.Context) error {
+	defer n.hold()()
 	log, err := n.load()
 	if err != nil {
 		return err

@@ -707,7 +707,13 @@ func bindRequestConfig(cfg config, directory, issue string) (config, error) {
 			// The activity record lives in the process's own home, which the
 			// launcher already lets it write and which outlasts a restart.
 			home := filepath.Join(directory, "homes", fmt.Sprintf("%d-%d", i, j))
-			for key, value := range map[string]string{"TASK_WORKSPACE": workspace, "TASK_HOME": home, "TASK_ISSUE": issue, chain.ActivityEnv: filepath.Join(home, "task-activity.json")} {
+			owned := map[string]string{"TASK_WORKSPACE": workspace, "TASK_HOME": home, "TASK_ISSUE": issue, chain.ActivityEnv: filepath.Join(home, "task-activity.json")}
+			if cfg.Workflow != nil && cfg.Workflow.Preview != nil && role.Name == cfg.Workflow.Preview.Up {
+				// Only the role that puts the page up writes its address,
+				// in its own home, as the activity record is kept.
+				owned[previewEnv] = filepath.Join(home, "task-preview.txt")
+			}
+			for key, value := range owned {
 				if process.ModelEnv == key {
 					return config{}, fmt.Errorf("watch environment %s overlaps model selection", key)
 				}

@@ -150,6 +150,13 @@ type Chain struct {
 	// AttemptLimit stops the run before the next choice once FailedInARow
 	// reaches it, so the stage is not launched again. Zero sets no limit.
 	AttemptLimit int
+	// PreviewUp puts the change up for the requester to see, with the role
+	// the request's saved workflow names for that. It is called once each
+	// time the decision after a stage that confirms the change chooses the
+	// question, before the question is launched, and returns the runtime's
+	// own note of what came of it and the words added to the question's
+	// instruction. Nothing it returns fails, repeats or satisfies a stage.
+	PreviewUp func(ctx context.Context, role string, state State) (note, instruction string)
 }
 
 // Run keeps handing work on until the router selects done or the caller
@@ -350,6 +357,20 @@ func (c Chain) Run(ctx context.Context) error {
 		// Where the question was chosen is taken before the launch, so a
 		// launch that returns no result still waits as a confirmation.
 		asking := next.Role == c.WaitAfter && state.confirmationDecision()
+		if asking && c.PreviewUp != nil && state.Workflow != nil && state.Workflow.Preview != nil {
+			// The page goes up before the question is pending: a restart
+			// while it goes up leaves no question that never ran, and the
+			// decision is asked again. Its record is saved with the pending
+			// question below, never as a stage's result.
+			began := time.Now().UTC()
+			note, instruction := c.PreviewUp(ctx, state.Workflow.Preview.Up, state)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			next.Instruction += instruction
+			state.History = append(state.History, Result{Role: "router", Speaker: "runtime", Output: note,
+				StartedAt: began, FinishedAt: time.Now().UTC()})
+		}
 		launched := time.Now().UTC()
 		state.Pending, state.PendingSince = &next, launched
 		if err := c.save(ctx, state); err != nil {

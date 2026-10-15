@@ -358,7 +358,9 @@ ownership across separate queue roots or supervision after a hard process crash.
 In watch mode a process directory must be empty or relative to its job workspace,
 not a shared absolute checkout. The launcher receives `TASK_WORKSPACE`,
 `TASK_HOME` (different for each role process), `TASK_ISSUE` and `TASK_ACTIVITY`
-(below). These names cannot also be process `env`, credential or
+(below). The process of the role `workflow.preview.up` names also receives
+`TASK_PREVIEW` (see "A page to see the change before the question").
+These names cannot also be process `env`, credential or
 model-selection destinations. The Hermes bridge uses
 `TASK_HOME` instead of a global `HERMES_HOME`. Commands and referenced bridge
 paths must be available from the per-job directory. Repository preparation and
@@ -1319,6 +1321,87 @@ the requester once about a change that could not be read. The question role's in
 question for a change a fixed closing sentence in Japanese, and the report
 says whether the requester's confirmation was asked: `依頼者の確認: なし` with
 the reason, or the question and the reply.
+
+### A page to see the change before the question
+
+A change to a screen is hard to judge from words. An operator who can put the
+checkout up somewhere the requester can open names two roles of their own:
+
+```json
+"workflow": {
+  "stages": [ ... ],
+  "preview": { "up": "preview_up", "down": "preview_down" }
+}
+```
+
+Each is an ordinary configured role whose processes run the operator's
+commands; what they put up, where, and with which credentials is theirs, and
+the engine knows none of it. Both must be configured roles, different from
+each other, neither a stage nor the question role, and neither may launch a
+model. The up role has exactly one process. The setting needs an ordered run
+with a stage marked `"confirm": true`; anything else is refused before work is
+accepted. Without the setting nothing changes. A request keeps the copy of the
+workflow it was accepted with, so adding the setting does not reach requests
+accepted before it. Of the setting, that copy keeps only the up role: naming
+another one later does not change which role puts an accepted request's page
+up.
+
+**When the page goes up.** Only when the decision after the stage that
+confirms the change chooses the question role, and right before the question
+is launched: not for a question after the first stage, and not when the
+decision chooses the next stage, so an internal change puts nothing up. The
+runtime first removes the file the previous launch wrote, writes
+`queue/jobs/<id>/preview.json` saying a page is going up (`"state":
+"starting"`), and then launches the up role once with the same launching the
+stages have. The page goes up before the question is recorded as pending: a
+restart while it goes up leaves no question that never ran, the decision is
+asked again, and a question chosen again puts the page up again.
+
+**What the up role writes.** Its process is given `TASK_PREVIEW`, a file named
+`task-preview.txt` in that process's own `TASK_HOME`. The first line is the
+page's address and the lines after it are words for the requester, such as how
+long the page stays open. The page came up when every process exited 0 and
+the first line is an `https://` address without spaces. The file is read as
+`TASK_ACTIVITY` is: an ordinary file with one name and at most 16 KiB, without
+following a link or waiting on a pipe, in UTF-8. Every credential value the
+engine can name is replaced with `[credential]` before anything is used.
+`preview.json` then says `"up"` with the address, or `"failed"` with the
+reason; a failed launch may still have made part of a page.
+
+**What the requester and the question are told.** When the page came up, the
+engine posts its own comment before the question:
+
+> 確認用の画面: https://sample-12.preview.example.invalid/
+> この画面は 10/17 18:00 まで開けます
+
+The comment is a notice of kind `preview`, recorded in `notices.json` like the
+others, and said once for each point in the request's record where the
+question was chosen: a restart that puts the page up again at the same point
+does not post it again, and a page put up again for a question about a
+corrected change is posted again. The run and the watcher of the same request
+settle and post notices one at a time, so neither submits a notice the other
+is submitting. The question's instruction then says the address was posted,
+asks it to point the requester to it, and tells it not to write that it opened
+the page. When the comment could not be confirmed, the question is told to
+give the address itself; one that was recorded and not confirmed is retried
+by the watcher like any notice. When the page
+did not come up (an exit status other than 0, the time limit, a first line
+that is not such an address, nothing written, or a file that is not an
+ordinary one), nothing is posted and the question is told to say in one line
+`確認用の画面は用意できなかった` and describe the change in words as before.
+Whether the question mentions the address is still the question role's words;
+the engine's own comment above it is what is certain.
+
+**What it changes in the run.** Nothing. The runtime keeps one record of its
+own of what came of the page, with `"role": "router"`, `"speaker": "runtime"`
+and the outcome in `output`; its `error` is always empty, so the choice of a
+model does not read it as a failure. No stage is satisfied, failed or run again
+by it, the request is never stopped by it, and the decisions that follow are
+offered what they would be without the setting. Nothing a role prints is read.
+
+This engine does not launch the down role yet: a page it puts up stays up
+until the operator's own cleanup removes it. Do not set `workflow.preview` on
+an installation until the engine also takes the page down.
 
 ### A pull request description from the run's reports
 
