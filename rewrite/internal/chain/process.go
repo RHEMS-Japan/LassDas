@@ -73,11 +73,16 @@ type Processes struct {
 	// HistoryPath names this run's existing checkpoint. It grants no parent
 	// directory: a confined launcher exposes only this file, read-only.
 	HistoryPath string
-	SelectModel func(context.Context, Role, Process, State, []string) (string, error)
+	// SelectModel names the model of one launch as the catalog names it, and
+	// the id the harness is handed to reach it. An empty id is read as
+	// ModelPrefix + model.
+	SelectModel func(context.Context, Role, Process, State, []string) (model, endpoint string, err error)
 	// ModelPrefix reaches the selected model through a gateway that lists it
 	// under a prefixed id. Only the value handed to the harness changes; the
 	// selection, the peer separation and the recorded model keep the catalog
-	// id, and the prefix is recorded beside it.
+	// id, and the prefix is recorded beside it. A gateway that lists the
+	// model without its publisher is reached by the id the selection named,
+	// and that id is recorded too.
 	ModelPrefix string
 	// Prepare attaches launch-scoped resources. Release runs after the child
 	// returns, including cancellation. It must not evaluate the child's answer.
@@ -110,7 +115,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 				Error: "TASK_HISTORY is reserved for the runtime's request history.", FinishedAt: time.Now().UTC()}
 			continue
 		}
-		model, prefix := "", ""
+		model, prefix, invoked := "", "", ""
 		if process.ModelEnv != "" {
 			started := time.Now().UTC()
 			var err error
@@ -121,7 +126,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 			} else if _, secret := process.Credentials[process.ModelEnv]; secret {
 				err = fmt.Errorf("model environment variable overlaps a controller credential")
 			} else {
-				model, err = p.SelectModel(ctx, role, process, state, append([]string(nil), selected...))
+				model, invoked, err = p.SelectModel(ctx, role, process, state, append([]string(nil), selected...))
 			}
 			if err != nil {
 				results[index] = Result{Role: name, Speaker: process.Name, Instruction: assignment.Instruction,
@@ -138,11 +143,18 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 			for name, value := range process.Env {
 				environment[name] = value
 			}
-			environment[process.ModelEnv] = prefix + model
+			// The record keeps the id it was handed only where the prefix and
+			// the model do not already say it.
+			if invoked == "" || invoked == prefix+model {
+				invoked = ""
+				environment[process.ModelEnv] = prefix + model
+			} else {
+				environment[process.ModelEnv] = invoked
+			}
 			process.Env = environment
 		}
 		group.Add(1)
-		go func(index int, process Process, model, prefix string) {
+		go func(index int, process Process, model, prefix, invoked string) {
 			defer group.Done()
 			if p.Prepare != nil {
 				started := time.Now().UTC()
@@ -151,7 +163,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 					defer release()
 				}
 				if err != nil {
-					results[index] = Result{Role: name, Speaker: process.Name, Model: model, ModelPrefix: prefix,
+					results[index] = Result{Role: name, Speaker: process.Name, Model: model, ModelPrefix: prefix, Invoked: invoked,
 						Instruction: assignment.Instruction, Error: "Preparing role access: " + err.Error(),
 						Interrupted: ctx.Err() != nil, StartedAt: started, FinishedAt: time.Now().UTC()}
 					return
@@ -161,8 +173,8 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 			process.historyPath = p.HistoryPath
 			process.environmentFacts = p.EnvironmentFacts
 			results[index] = process.run(ctx, role, assignment, state)
-			results[index].Model, results[index].ModelPrefix = model, prefix
-		}(index, process, model, prefix)
+			results[index].Model, results[index].ModelPrefix, results[index].Invoked = model, prefix, invoked
+		}(index, process, model, prefix, invoked)
 	}
 	group.Wait()
 	return results

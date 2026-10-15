@@ -35,6 +35,8 @@ type selectionConfig struct {
 // without capabilities or prices, so it narrows the eligible set and never
 // replaces the public catalog the judge reads. The prefix is a route to the
 // same model, not a different model and not a judgement about its answer.
+// The list may name a model with its publisher or without it; endpoints
+// reads both, so the operator writes the prefix and nothing about the shape.
 type gatewayConfig struct {
 	ModelsURL string `json:"models_url"`
 	KeyEnv    string `json:"key_env"`
@@ -47,9 +49,11 @@ func (s selectionConfig) fixedModel() string {
 	return strings.TrimSpace(s.Fixed)
 }
 
-// invocationPrefix is prepended when reaching the chosen model, and nowhere
-// else: eligibility, the judge's choices and the recorded model keep the
-// catalog id. An empty prefix leaves invocation exactly as configured.
+// invocationPrefix is the prefix the gateway lists catalog models under. A
+// model it lists with its publisher, and the operator's fixed model, are
+// reached as the prefix + the catalog id; eligibility, the judge's choices
+// and the recorded model keep the catalog id, and the prefix is recorded
+// beside it. An empty prefix leaves invocation exactly as configured.
 func (s selectionConfig) invocationPrefix() string {
 	if s.Gateway == nil {
 		return ""
@@ -99,7 +103,7 @@ type selectedChatRouter struct {
 }
 
 func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.Assignment, error) {
-	model, err := r.selection.choose(ctx,
+	model, endpoint, err := r.selection.choose(ctx,
 		chain.Role{Name: "router", Purpose: "Choose the next responsible role from the original request and independent reports; resolve remaining work before delivery or completion"},
 		chain.Process{Name: "routing"}, state, nil)
 	if err != nil {
@@ -108,7 +112,6 @@ func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.
 	chat := r.chat
 	// Routing is an invocation too: it reaches the same model by the same
 	// route as the working roles. The chosen id itself is unchanged.
-	endpoint := r.selection.invocationPrefix() + model
 	chat.Service.Model = endpoint
 	if r.selection.observe != nil {
 		notice := "routing with freshly selected model: " + model
@@ -127,12 +130,15 @@ func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.
 	return next, nil
 }
 
-func (s selectionConfig) choose(ctx context.Context, role chain.Role, process chain.Process, state chain.State, selected []string) (string, error) {
+// choose names the model for one launch as the catalog names it, which is
+// what is recorded, separated from peers and told to the requester, and the
+// id it is invoked by.
+func (s selectionConfig) choose(ctx context.Context, role chain.Role, process chain.Process, state chain.State, selected []string) (model, endpoint string, err error) {
 	// The operator named the model, so there is nothing to look up or judge:
 	// no catalog, no gateway list and no selector call. Peer separation cannot
 	// exclude a fixed model, so a parallel review group runs the same one.
 	if fixed := s.fixedModel(); fixed != "" {
-		return fixed, nil
+		return fixed, s.invocationPrefix() + fixed, nil
 	}
 	// With no decision service named, the chat service configured as the
 	// alternative makes every choice by itself: nothing is tried first and
@@ -141,29 +147,29 @@ func (s selectionConfig) choose(ctx context.Context, role chain.Role, process ch
 	if strings.TrimSpace(s.Judge.URL) == "" && s.Fallback != nil {
 		return s.selectWith(ctx, chain.ChatJudge{Service: *s.Fallback}, role, process, state, selected)
 	}
-	model, err := s.selectWith(ctx, s.Judge, role, process, state, selected)
+	model, endpoint, err = s.selectWith(ctx, s.Judge, role, process, state, selected)
 	if err == nil || ctx.Err() != nil || s.Fallback == nil {
-		return model, err
+		return model, endpoint, err
 	}
 	if s.observe != nil {
 		s.observe("model selector unavailable; using configured chat alternative: " + err.Error())
 	}
 	// This is a new selection attempt, so selectWith fetches a new catalog
 	// rather than letting the alternative decide from an earlier snapshot.
-	model, alternativeError := s.selectWith(ctx, chain.ChatJudge{Service: *s.Fallback}, role, process, state, selected)
+	model, endpoint, alternativeError := s.selectWith(ctx, chain.ChatJudge{Service: *s.Fallback}, role, process, state, selected)
 	if alternativeError != nil {
-		return "", errors.Join(err, fmt.Errorf("alternative model selector: %w", alternativeError))
+		return "", "", errors.Join(err, fmt.Errorf("alternative model selector: %w", alternativeError))
 	}
-	return model, nil
+	return model, endpoint, nil
 }
 
-func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role chain.Role, process chain.Process, state chain.State, selected []string) (string, error) {
+func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role chain.Role, process chain.Process, state chain.State, selected []string) (string, string, error) {
 	if len(s.Authors) == 0 {
-		return "", errors.New("configure eligible model publishers; none were supplied")
+		return "", "", errors.New("configure eligible model publishers; none were supplied")
 	}
 	snapshot, err := currentModelList(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	excluded := map[string]bool{}
 	for _, model := range selected {
@@ -171,6 +177,9 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 		excluded[author] = true
 	}
 	choices := map[string]string{}
+	// named holds, for each model name in lower case, the catalog ids that
+	// end in it, whatever their publisher or capabilities.
+	named := map[string]map[string]bool{}
 	for _, raw := range snapshot.Data {
 		var model struct {
 			ID           string   `json:"id"`
@@ -180,15 +189,21 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 			} `json:"architecture"`
 		}
 		if err := json.Unmarshal(raw, &model); err != nil {
-			return "", fmt.Errorf("read catalog capabilities: %w", err)
+			return "", "", fmt.Errorf("read catalog capabilities: %w", err)
 		}
-		author, _, ok := strings.Cut(model.ID, "/")
+		author, name, ok := strings.Cut(model.ID, "/")
+		if ok {
+			if named[strings.ToLower(name)] == nil {
+				named[strings.ToLower(name)] = map[string]bool{}
+			}
+			named[strings.ToLower(name)][strings.ToLower(model.ID)] = true
+		}
 		if !ok || excluded[author] || !slices.Contains(s.Authors, author) || !slices.Contains(model.Supported, "tools") || !slices.Contains(model.Architecture.Output, "text") {
 			continue
 		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &fields); err != nil {
-			return "", err
+			return "", "", err
 		}
 		// Only the selection input is summarized. --list-models still exposes
 		// every provider field, and no working report is trimmed or decoded.
@@ -206,27 +221,21 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 		}
 		data, err := json.Marshal(metadata)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		choices[model.ID] = string(data)
 	}
-	if s.Gateway != nil {
-		// Keep only ids this gateway actually serves, using a list fetched for
-		// this attempt. A failure here leaves the attempt unavailable: falling
-		// back to the bare id would invoke the account being moved away from,
-		// and an earlier list would claim availability nobody observed.
-		served, err := gatewayModelIDs(ctx, *s.Gateway)
-		if err != nil {
-			return "", err
-		}
-		for id := range choices {
-			if !served[s.Gateway.Prefix+id] {
-				delete(choices, id)
-			}
+	endpoints, err := s.endpoints(ctx, choices, named)
+	if err != nil {
+		return "", "", err
+	}
+	for id := range choices {
+		if _, served := endpoints[id]; !served {
+			delete(choices, id)
 		}
 	}
 	if len(choices) == 0 {
-		return "", errors.New("fresh catalog has no eligible independent model; no earlier selection was reused")
+		return "", "", errors.New("fresh catalog has no eligible independent model; no earlier selection was reused")
 	}
 	// Runtime failures inform recovery without copying every previous work
 	// report into the model-selection query. Those reports remain unchanged
@@ -236,12 +245,62 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 		"Responsibility: " + role.Purpose + "\nProcess: " + process.Name + "\nCatalog observation: " + snapshot.FetchedAt.String() + "\n" + s.Instructions
 	model, err := judge.Choose(ctx, input, instructions, choices)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if _, exists := choices[model]; !exists {
-		return "", errors.New("model selector did not choose an eligible endpoint from the current catalog")
+		return "", "", errors.New("model selector did not choose an eligible endpoint from the current catalog")
 	}
-	return model, nil
+	return model, endpoints[model], nil
+}
+
+// endpoints says the id each eligible catalog model is invoked by, and leaves
+// out every model the configured gateway does not serve. Without a gateway a
+// model is invoked by its catalog id. A gateway lists a model either with its
+// publisher, prefix + "z-ai/glm-5.3", or without it, prefix + "glm-5.3", and
+// upper and lower case are not told apart; the first shape wins when both are
+// listed, and the id is used exactly as the gateway lists it. A model name
+// alone may be another publisher's model of the same name. It is taken as
+// this one only when the entry's owner is a configured publisher and is this
+// one, or, when the owner is not a configured publisher or not given, when no
+// other catalog id ends in that name: a match that cannot be checked chooses
+// nothing.
+func (s selectionConfig) endpoints(ctx context.Context, choices map[string]string, named map[string]map[string]bool) (map[string]string, error) {
+	endpoints := make(map[string]string, len(choices))
+	if s.Gateway == nil {
+		for id := range choices {
+			endpoints[id] = id
+		}
+		return endpoints, nil
+	}
+	// Keep only ids this gateway actually serves, using a list fetched for
+	// this attempt. A failure here leaves the attempt unavailable: falling
+	// back to the bare id would invoke the account being moved away from,
+	// and an earlier list would claim availability nobody observed.
+	served, err := gatewayModels(ctx, *s.Gateway)
+	if err != nil {
+		return nil, err
+	}
+	prefix := strings.ToLower(s.Gateway.Prefix)
+	for id := range choices {
+		if listed, found := served[prefix+strings.ToLower(id)]; found {
+			endpoints[id] = listed.ID
+			continue
+		}
+		author, name, _ := strings.Cut(id, "/")
+		listed, found := served[prefix+strings.ToLower(name)]
+		if !found {
+			continue
+		}
+		owner := strings.TrimSpace(listed.OwnedBy)
+		if slices.ContainsFunc(s.Authors, func(configured string) bool { return strings.EqualFold(configured, owner) }) {
+			if strings.EqualFold(owner, author) {
+				endpoints[id] = listed.ID
+			}
+		} else if len(named[strings.ToLower(name)]) == 1 {
+			endpoints[id] = listed.ID
+		}
+	}
+	return endpoints, nil
 }
 
 // selectionFailures and selectionErrorLimit bound what the judge reads of

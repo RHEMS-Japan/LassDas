@@ -2174,7 +2174,9 @@ figure. When it is set, the remaining balance on the key named by
 `router.decision.key_env` is read before a request is launched and on every
 tick of a running one. `model_credit_url` defaults to the OpenRouter key
 endpoint above and may point at a gateway instead; it must be an HTTPS URL
-without credentials or a query. The answer's `limit_remaining` is read as the
+without credentials or a query. Where the account paying for the models has no
+such balance endpoint, leave `min_model_credit` out: there is nothing for the
+floor to read. The answer's `limit_remaining` is read as the
 balance, and a null there means the key has no limit, which never pauses
 anything. Below the floor, the running role is stopped exactly as an authorized
 stop stops it, no work is launched, and the requester is told once:
@@ -2420,8 +2422,8 @@ reviewers run that one model, and their reports are no longer independent in
 that sense. This is an experiment switch for comparing one strong model against
 per-launch selection among the configured publishers. It is not a
 recommendation, and neither arrangement is established here as the better one.
-With a gateway configured, the named id is invoked through it exactly as a
-selected one is.
+With a gateway configured, the named id is invoked through it as before, as
+the prefix + the named id; the gateway's list is not read for it.
 
 ### Invoking through a gateway
 
@@ -2469,11 +2471,27 @@ unavailable, that selection attempt is unavailable and returns to the existing
 recovery loop; nothing falls back to invoking the un-prefixed id, which would
 bill the account the operator is moving away from.
 
+A gateway lists a catalog model in one of two shapes, and both are read with
+no further setting: with its publisher, as `prefix` + `z-ai/glm-5.3`, or
+without it, as `prefix` + `glm-5.3`, which is how a provider that serves models
+under their own names is listed. Upper and lower case are not told apart, the
+shape with the publisher wins when a gateway lists both, and the model is
+invoked by the id exactly as the gateway lists it. A name alone can be another
+publisher's model of the same name, so it is taken only when the entry's
+`owned_by` names one of `model_selection.authors` and that is the catalog
+model's publisher, or, when `owned_by` is missing or names none of them, when
+no other catalog id ends in that name. A catalog model the gateway lists in
+neither shape, or under a name spelled otherwise, is not offered. The judge
+still reads the public catalog's prices and context lengths, which need not be
+the gateway provider's.
+
 `prefix + id` is a route to the same model, not a different model and not a
 mark of quality. The judge is offered bare catalog ids, publisher separation in
 a parallel review group still compares publishers rather than the gateway name,
 and the runtime history records the chosen id as `model` with the route beside
-it as `model_prefix`. A gateway configured without `models_url`, `key_env` or
+it as `model_prefix`. A model reached by its name alone also has the id it was
+invoked by recorded as `invoked`, which is what the status page shows; the
+requester is told the catalog id either way. A gateway configured without `models_url`, `key_env` or
 `prefix` is refused before any request is accepted, because a half-configured
 one would quietly keep invoking the account being moved away from. Without
 `model_selection.gateway`, none of this applies and invocation is unchanged.

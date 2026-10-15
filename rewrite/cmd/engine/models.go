@@ -41,11 +41,20 @@ func currentModelList(ctx context.Context) (modelList, error) {
 	return snapshot, nil
 }
 
-// gatewayModelIDs reports which endpoint ids an invocation gateway serves.
-// This is provider catalog data like the public list; nothing here decodes or
-// judges a role's answer. The gateway publishes ids without capabilities or
-// prices, so eligibility still comes from the public catalog.
-func gatewayModelIDs(ctx context.Context, gateway gatewayConfig) (map[string]bool, error) {
+// gatewayModel is one entry of a gateway's list: the id it serves the model
+// under, and whom the gateway names as the model's owner, when it names one.
+type gatewayModel struct {
+	ID      string
+	OwnedBy string
+}
+
+// gatewayModels reports which endpoint ids an invocation gateway serves,
+// keyed by the id in lower case; of two ids that differ only in case, the
+// first listed is kept. This is provider catalog data like the public list;
+// nothing here decodes or judges a role's answer. The gateway publishes ids
+// without capabilities or prices, so eligibility still comes from the public
+// catalog.
+func gatewayModels(ctx context.Context, gateway gatewayConfig) (map[string]gatewayModel, error) {
 	// This list is the one catalog request that carries a credential, so the
 	// endpoint must be one that cannot expose it in transit.
 	address, err := url.Parse(gateway.ModelsURL)
@@ -60,13 +69,22 @@ func gatewayModelIDs(ctx context.Context, gateway gatewayConfig) (map[string]boo
 	if err != nil {
 		return nil, err
 	}
-	served := make(map[string]bool, len(entries))
+	served := make(map[string]gatewayModel, len(entries))
 	for _, entry := range entries {
-		var model struct{ ID string }
+		var model struct {
+			ID      string
+			OwnedBy json.RawMessage `json:"owned_by"`
+		}
 		if err := json.Unmarshal(entry, &model); err != nil {
 			return nil, err
 		}
-		served[model.ID] = true
+		// An owner given as anything but a string names no owner; it does
+		// not make the list unreadable.
+		var owner string
+		_ = json.Unmarshal(model.OwnedBy, &owner)
+		if _, listed := served[strings.ToLower(model.ID)]; !listed {
+			served[strings.ToLower(model.ID)] = gatewayModel{ID: model.ID, OwnedBy: owner}
+		}
 	}
 	return served, nil
 }
