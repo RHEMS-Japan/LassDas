@@ -164,8 +164,14 @@ func TestADeliveredOrStoppedRequestsPageIsTakenDownOnce(t *testing.T) {
 
 // A page that cannot be taken down is tried again later, spaced out as a
 // refused status is, and its reason is said once while it stays the same.
-// The request's caches stay until the page is down.
+// The request's caches stay until the page is down, delivered or stopped.
 func TestAPageThatCannotBeTakenDownIsTriedAgainAndSaidOnce(t *testing.T) {
+	for _, ending := range []string{"delivered", "stopped"} {
+		t.Run(ending, func(t *testing.T) { testPageTriedAgain(t, ending) })
+	}
+}
+
+func testPageTriedAgain(t *testing.T, ending string) {
 	cfg, files := previewDownConfig(t)
 	fixture := &noticeTracker{}
 	fixture.install(t, alwaysChoose("done"))
@@ -173,8 +179,7 @@ func TestAPageThatCannotBeTakenDownIsTriedAgainAndSaidOnce(t *testing.T) {
 	previous := turnClock
 	turnClock = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
 	t.Cleanup(func() { turnClock = previous })
-	root := t.TempDir()
-	directory := pageUpJob(t, root, 51, time.Now().Add(-time.Hour))
+	root, directory := pageJob(t, cfg, ending, time.Now().Add(-time.Hour))
 	if err := os.WriteFile(files.fail, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -266,9 +271,10 @@ func noticeJobAt(t *testing.T, root string, id int) (string, string) {
 	return root, directory
 }
 
-// stoppedPageFixture is a stopped request whose page is up, whose stop report
-// has not run yet, and whose workspace the operator lets the engine reclaim.
-func stoppedPageFixture(t *testing.T, cfg config) (string, string) {
+// stoppedPageFixture is a stopped request whose page went up at the given
+// time, whose stop report has not run yet, and whose workspace the operator
+// lets the engine reclaim when the configuration allows it.
+func stoppedPageFixture(t *testing.T, cfg config, started time.Time) (string, string) {
 	t.Helper()
 	root, directory, _ := stoppedTrimFixture(t, cfg, nil)
 	raw, _ := json.Marshal(cfg)
@@ -285,10 +291,21 @@ func stoppedPageFixture(t *testing.T, cfg config) (string, string) {
 			t.Fatal(err)
 		}
 	}
-	if err := writePreviewRecord(directory, previewRecord{State: "up", Role: "preview_up", StartedAt: time.Now().Add(-time.Hour), URL: previewAddress}); err != nil {
+	if err := writePreviewRecord(directory, previewRecord{State: "up", Role: "preview_up", StartedAt: started, URL: previewAddress}); err != nil {
 		t.Fatal(err)
 	}
 	return root, directory
+}
+
+// pageJob lays down a delivered or a stopped request whose page went up at
+// the given time.
+func pageJob(t *testing.T, cfg config, ending string, started time.Time) (string, string) {
+	t.Helper()
+	if ending == "stopped" {
+		return stoppedPageFixture(t, cfg, started)
+	}
+	root := t.TempDir()
+	return root, pageUpJob(t, root, 51, started)
 }
 
 // withStopReport adds a stop report role that notes when it ran in the same
@@ -310,7 +327,7 @@ func TestAStoppedRequestsReportGoesOnWhileItsPageIsTakenDown(t *testing.T) {
 	cfg = withStopReport(cfg, files)
 	fixture := &noticeTracker{}
 	fixture.install(t, alwaysChoose("done"))
-	root, directory := stoppedPageFixture(t, cfg)
+	root, directory := stoppedPageFixture(t, cfg, time.Now().Add(-time.Hour))
 	files.hold(t)
 	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, &lockedLog{})
 	waitFor(t, func() bool { done, err := stoppedReportDone(directory); return err == nil && done })
@@ -373,15 +390,21 @@ func TestAPageCutShortByAStopIsTakenDown(t *testing.T) {
 // said once, the caches are removed, and the take-down is not tried again,
 // since a reclaimed workspace leaves the role nowhere to run. The hold is the
 // operator's when written, 73 hours when not; a page three hours old is past
-// a written hold of two, and would be taken down under the default.
+// a written hold of two, and would be taken down under the default. A stopped
+// request's report goes out, and its workspace is reclaimed after.
 func TestAPageNotConfirmedDownByTheHoldNoLongerHoldsTheRequest(t *testing.T) {
-	for _, hold := range []string{"left-out", "written"} {
-		t.Run(hold, func(t *testing.T) { testPageNotConfirmedDownByTheHold(t, hold) })
+	for _, ending := range []string{"delivered", "stopped"} {
+		for _, hold := range []string{"left-out", "written"} {
+			t.Run(ending+"/"+hold, func(t *testing.T) { testPageNotConfirmedDownByTheHold(t, ending, hold) })
+		}
 	}
 }
 
-func testPageNotConfirmedDownByTheHold(t *testing.T, hold string) {
+func testPageNotConfirmedDownByTheHold(t *testing.T, ending, hold string) {
 	cfg, files := previewDownConfig(t)
+	if ending == "stopped" {
+		cfg = withStopReport(cfg, files)
+	}
 	fixture := &noticeTracker{}
 	fixture.install(t, alwaysChoose("done"))
 	if err := os.WriteFile(files.fail, nil, 0600); err != nil {
@@ -393,15 +416,22 @@ func testPageNotConfirmedDownByTheHold(t *testing.T, hold string) {
 		cfg.Workflow.Preview.HoldHours = &hours
 		age = 3 * time.Hour
 	}
-	root := t.TempDir()
-	directory := pageUpJob(t, root, 51, time.Now().Add(-age))
+	root, directory := pageJob(t, cfg, ending, time.Now().Add(-age))
 	log := &lockedLog{}
 	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, log)
-	waitFor(t, func() bool { return trimmed(directory) })
+	waitFor(t, func() bool {
+		_, reclaimed := os.Stat(filepath.Join(directory, removalFile))
+		return trimmed(directory) && (ending == "delivered" || reclaimed == nil)
+	})
 	waitTicks()
 	finish()
-	if got := files.lines(t); len(got) != 0 {
-		t.Fatalf("the take-down was tried after the hold ran out: %v", got)
+	for _, line := range files.lines(t) {
+		if strings.HasPrefix(line, "start_") {
+			t.Fatalf("the take-down was tried after the hold ran out: %v", files.lines(t))
+		}
+	}
+	if ending == "stopped" && files.count(t, "report EXAMPLE-51") != 1 {
+		t.Fatalf("the stopped request's report did not go out once: %v", files.lines(t))
 	}
 	if record := pageState(t, directory); record.State != "unconfirmed" {
 		t.Fatalf("the request's record does not say the page was not confirmed down: %+v", record)
@@ -414,11 +444,62 @@ func testPageNotConfirmedDownByTheHold(t *testing.T, hold string) {
 	}
 }
 
+// A page is taken down with the operator's current setting, not with what the
+// request was accepted with: its saved copy keeps only the up role. A hold
+// shortened after acceptance applies to the accepted request at once, and a
+// down role named afterwards is the one launched.
+func TestTheTakeDownFollowsTheCurrentSetting(t *testing.T) {
+	for _, change := range []string{"hold-shortened", "down-renamed"} {
+		t.Run(change, func(t *testing.T) {
+			cfg, files := previewDownConfig(t)
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			root := t.TempDir()
+			directory := pageUpJob(t, root, 51, time.Now().Add(-3*time.Hour))
+			// The request was accepted, and its workflow saved, before the
+			// operator changed the setting.
+			accepted := loadJobState(t, directory)
+			workflow := *cfg.Workflow
+			workflow.Question = "ask_requester"
+			accepted.Workflow = &workflow
+			accepted.Workflow.Preview = &chain.Preview{Up: "preview_up"}
+			data, _ := json.Marshal(accepted)
+			if err := writeRuntimeFile(filepath.Join(directory, "run", "history.json"), data); err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "hold-shortened":
+				hours := 2
+				cfg.Workflow.Preview.HoldHours = &hours
+			case "down-renamed":
+				cfg.Roles[5].Name = "preview_down_now"
+				cfg.Roles[5].Processes[0].Command = []string{"/bin/sh", "-c", strings.Replace(downScript, `echo "start $TASK_ISSUE"`, `echo "now $TASK_ISSUE"`, 1)}
+				cfg.Workflow.Preview.Down = "preview_down_now"
+			}
+			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, &lockedLog{})
+			waitFor(t, func() bool { return trimmed(directory) })
+			waitTicks()
+			finish()
+			record := pageState(t, directory)
+			switch change {
+			case "hold-shortened":
+				if got := files.lines(t); len(got) != 0 || record.State != "unconfirmed" {
+					t.Fatalf("the shortened hold did not reach the accepted request: %v %+v", got, record)
+				}
+			case "down-renamed":
+				if got := files.lines(t); len(got) != 2 || got[0] != "now_EXAMPLE-51" || record.State != "down" {
+					t.Fatalf("the down role named now was not the one launched: %v %+v", got, record)
+				}
+			}
+		})
+	}
+}
+
 // The reclaim of a stopped workspace also stops at a running take-down, but a
 // request that never put a page up has no such lock and is reclaimed as
 // before, and the three locks it already waited on are read as before.
 func TestTheReclaimWaitsOnlyForATakeDownThatIsRunning(t *testing.T) {
-	for _, lock := range []string{"never-put-up", "running", "finished", "missing-run-lock"} {
+	for _, lock := range []string{"never-put-up", "running", "finished", "missing-run-lock", "missing-report-lock", "missing-prepare-lock"} {
 		t.Run(lock, func(t *testing.T) {
 			cfg, _, dir, kept := retentionFixture(t)
 			issue, _ := cfg.source().ReadIssue(kept["issue.json"])
@@ -438,8 +519,10 @@ func TestTheReclaimWaitsOnlyForATakeDownThatIsRunning(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-			case "missing-run-lock":
-				if err := os.Remove(filepath.Join(dir, "run/runner.lock")); err != nil {
+			case "missing-run-lock", "missing-report-lock", "missing-prepare-lock":
+				name := map[string]string{"missing-run-lock": "run/runner.lock", "missing-report-lock": "stop-report/runner.lock",
+					"missing-prepare-lock": ".workspace.prepare.lock"}[lock]
+				if err := os.Remove(filepath.Join(dir, name)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -454,7 +537,7 @@ func TestTheReclaimWaitsOnlyForATakeDownThatIsRunning(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), "owned") || recorded == nil {
 					t.Fatalf("the reclaim did not stop at the running take-down: %v %v", err, recorded)
 				}
-			case "missing-run-lock":
+			case "missing-run-lock", "missing-report-lock", "missing-prepare-lock":
 				if !errors.Is(err, os.ErrNotExist) || recorded == nil {
 					t.Fatalf("a missing lock the reclaim already waited on is read differently: %v %v", err, recorded)
 				}

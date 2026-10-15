@@ -1342,7 +1342,9 @@ model. The up role has exactly one process. `hold_hours` may be left out
 (below). The setting needs an ordered run with a stage marked
 `"confirm": true`; anything else is refused before work is accepted. Without the setting nothing changes. A request keeps the copy of the
 workflow it was accepted with, so adding the setting does not reach requests
-accepted before it.
+accepted before it. Of the setting, that copy keeps only the up role: naming
+another one later does not change which role puts an accepted request's page
+up.
 
 **When the page goes up.** Only when the decision after the stage that
 confirms the change chooses the question role, and right before the question
@@ -1425,8 +1427,11 @@ says `"unconfirmed"`, the log says once that the page was not confirmed taken
 down, the caches and workspace are no longer held for it, and the down role is
 not launched again for that request. A request accepted before the setting,
 or whose page never went up, has no `preview.json` and is trimmed and
-reclaimed as before. Removing the setting stops the take-downs too: the
-engine holds nothing for a page it no longer has a role to take down.
+reclaimed as before. The down role and `hold_hours` are read from the
+operator's current setting, not from the request's copy: a changed
+`hold_hours` reaches requests already accepted at once, and removing the
+setting leaves their pages to the operator's own cleanup, with nothing held
+for them.
 
 ### A pull request description from the run's reports
 
