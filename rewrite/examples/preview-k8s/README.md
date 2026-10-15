@@ -49,13 +49,15 @@ as before, in words, with one line saying so.
 4. Waits for the new Pod's `receive` container and streams the archive into
    it with `kubectl exec`. While it waits it reads the Pod about once a
    second: a dependency step (`install`) that ended with a status other than
-   0, or was started again, makes it remove the Deployment at once and end 1,
-   so the kubelet does not run the step again with public addresses open.
-   A ReplicaSet the cluster refused to create a Pod for (a policy, the quota)
-   ends it at once too, with the cluster's reason.
+   0, or was started again, ends the wait at once, so the kubelet does not run
+   the step again with public addresses open. A ReplicaSet the cluster
+   refused to create a Pod for (a policy, the quota) ends it at once too, with
+   the cluster's reason.
 5. Waits until the Pod is ready and the Service has a ready endpoint. Steps 4
-   and 5 together end at `PREVIEW_WAIT_SECONDS`; a wait that ends with the Pod
-   short of its last rules container (`net`) removes the Deployment first.
+   and 5 together end at `PREVIEW_WAIT_SECONDS`. When the wait ends for any
+   reason (the dependency step, a rules container, the hand-over, a failed
+   read, the time) with the Pod short of its last rules container (`net`),
+   `up` removes the Deployment first and says so.
 6. Makes the signed URL for the preview's end, and opens the public address
    as the requester would: (a) `PREVIEW_READY_PATH` without the password,
    which the router must answer with 401; (b) the same with the check user's
@@ -98,7 +100,7 @@ setting. As the engine's design writes it:
                "PREVIEW_IMAGE": "python:3.12-slim", "PREVIEW_DOMAIN": "preview.example.invalid",
                "PREVIEW_NAMESPACE": "preview-apps", "PREVIEW_K8S_SERVER": "https://<api-server>",
                "PREVIEW_K8S_CA_FILE": "/opt/ticket-automation/operator/preview-k8s-ca.crt",
-               "PREVIEW_NET_IMAGE": "<rules-image>@sha256:<digest>" },
+               "PREVIEW_NET_IMAGE": "<net-image>" },
       "secrets": { "PREVIEW_K8S_TOKEN": "PREVIEW_K8S_TOKEN", "PREVIEW_CHECK_AUTH": "PREVIEW_CHECK_AUTH",
                    "PREVIEW_SIGNING_KEY": "PREVIEW_SIGNING_KEY" },
       "timeout_minutes": 10 } ] },
@@ -116,7 +118,7 @@ setting. As the engine's design writes it:
 `preview.py` and the cluster's CA certificate go into the operator-scripts
 ConfigMap (see
 [operator-scripts-configmap.yaml.example](../../../deploy/ticket-engine/operator-scripts-configmap.yaml.example)),
-whose mode makes the script executable. The two credentials go into the
+whose mode makes the script executable. The three credentials go into the
 engine's Secret and the StatefulSet's environment like the other keys
 ([SETUP.md](../../../deploy/ticket-engine/SETUP.md), section 5).
 
@@ -149,16 +151,16 @@ Set in the role's `env`. The engine reads none of them.
 | `PREVIEW_READY_PATH` | `/` | yes (up) | The path that answers once the application is up. It is the readiness probe and the path of the public check. |
 | `PREVIEW_LIFETIME_HOURS` | `72` | yes (up) | How long a preview stays after it was last brought up, 1 to 720. |
 | `PREVIEW_IMAGE` | `python:3.12-slim` | yes (up) | The image the application runs in. It needs `sh`, `tar` and `sleep`, and `timeout` (coreutils, or BusyBox 1.30 or later) when `PREVIEW_INSTALL` is set. Name it by digest to keep it fixed. |
-| `PREVIEW_MEMORY` | `512Mi` | no (`512Mi`) | The memory limit of the application and of the dependency step. |
+| `PREVIEW_MEMORY` | `512Mi` | no (`512Mi`) | The memory limit of the application and of the dependency step. At most the preview namespace's per-container maximum (2Gi in the example cluster setup), or the Pod is refused when it is created. |
 | `PREVIEW_INSTALL` | `npm ci` | no | A dependency step, run with `sh -c` in the checkout before the application. Only during this step can the Pod reach public addresses. |
-| `PREVIEW_INSTALL_SECONDS` | `240` | no (`240`) | The step's time limit: digits only, 1 to 480, and at most `PREVIEW_WAIT_SECONDS` − 180 (see Time above). Anything else ends `up` before the cluster is called. |
+| `PREVIEW_INSTALL_SECONDS` | `240` | no (`240`) | The step's time limit: digits only, 1 to 480, and, when `PREVIEW_INSTALL` is set, at most `PREVIEW_WAIT_SECONDS` − 180 (see Time above). Anything else ends `up` before the cluster is called. |
 | `PREVIEW_ENV_FILE` | `.env.preview` | no | A file in the checkout, relative to it, of `KEY=VALUE` lines for the application's environment. No secrets: the file is in the branch. At most 64 KiB; a line that is not `KEY=VALUE` (blank lines and `#` lines aside) ends `up`. `PORT` is always the script's. |
-| `PREVIEW_WAIT_SECONDS` | `420` | no (420 for up, 60 for down) | How long to wait for the Pod to be ready (up) or for the objects to be gone (down). With `PREVIEW_INSTALL`, at least `PREVIEW_INSTALL_SECONDS` + 180. |
+| `PREVIEW_WAIT_SECONDS` | `420` | no (420 for up, 60 for down) | How long to wait for the Pod to be ready (up) or for the objects to be gone (down): 1 to 3600. With `PREVIEW_INSTALL`, at least `PREVIEW_INSTALL_SECONDS` + 180. Above 1800 the cleanup, which removes a Deployment that has had no ready Pod for 30 minutes, may remove the preview while `up` still waits. |
 | `PREVIEW_DOMAIN` | `preview.example.invalid` | yes (up) | The domain under which every preview gets one label: `sample-12.preview.example.invalid`. The same for every installation using the router. |
 | `PREVIEW_NAMESPACE` | `preview-apps` | yes | The preview namespace. |
 | `PREVIEW_K8S_SERVER` | `https://<api-server>` | yes | The cluster's API server address. |
 | `PREVIEW_K8S_CA_FILE` | `/opt/ticket-automation/operator/preview-k8s-ca.crt` | yes | The cluster's CA certificate (not a secret), by its absolute path. |
-| `PREVIEW_NET_IMAGE` | `<rules-image>@sha256:<digest>` | yes (up) | The image of the containers that load the egress rules, by digest (see [The rules image](#the-rules-image)). |
+| `PREVIEW_NET_IMAGE` | `<net-image>` | yes (up) | The image of the containers that load the egress rules, by digest (see [The rules image](#the-rules-image)). |
 
 The engine gives each command `TASK_WORKSPACE` (the checkout), `TASK_HOME`,
 `TASK_ISSUE` (the request number), `TASK_PREVIEW` (where `up` writes its
@@ -232,10 +234,10 @@ address stops opening at the preview's end.
 | 1 | Anything else. The last line of the output is the reason, with the cluster's own message where it gave one (a policy refusal names the policy). `TASK_PREVIEW` is not written. |
 | 2 | A wrong command line. The engine never starts it so with this configuration. |
 
-After a failure nothing is removed, except a Deployment whose dependency step
-failed or was started again, or whose Pod had not reached its last rules
-container (`net`) when `PREVIEW_WAIT_SECONDS` ended. `down` and the cleanup
-remove the rest.
+After a failure nothing is removed, except a Deployment whose Pod had not
+reached its last rules container (`net`) when the wait ended, for whatever
+reason: until then the dependency step could still run with public addresses
+open. `down` and the cleanup remove the rest.
 
 ## What it never reads
 
@@ -313,7 +315,8 @@ the digest.
   attempt.
 - The signed URL is posted on the tracker: whoever can read the request and
   knows the shared password can open that request's preview until its end.
-  It also stays in the requester's browser history, and a load balancer
-  access log records it if one is turned on. Changing the signing key is the
+  It also stays in the engine's own records of the request (its history and
+  its notices), in the requester's browser history, and in a load balancer
+  access log if one is turned on. Changing the signing key is the
   only way to stop a URL before its end, and it stops every open preview.
 - An application cannot use paths under `/_preview/`: the router keeps them.

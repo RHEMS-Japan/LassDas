@@ -19,9 +19,10 @@ removes the Deployment and the Service and reads back that they are gone.
 
 Exit status: 0 when the preview is up (up) or gone (down); 1 otherwise, the
 reason on the last line of the output; 2 for a wrong command line. Nothing
-is removed after a failure, except a Deployment whose dependency step failed,
-or whose Pod had not reached its last rules container when the wait ended:
-the cleanup and down remove the rest.
+is removed after a failure, except a Deployment whose Pod had not reached its
+last rules container (net) when the wait ended for any reason: there the
+dependency step could still run with public addresses open. The cleanup and
+down remove the rest.
 
 Credentials. The engine passes PREVIEW_K8S_TOKEN (and, to up,
 PREVIEW_CHECK_AUTH and PREVIEW_SIGNING_KEY) in the environment and lists their
@@ -102,6 +103,10 @@ Names = collections.namedtuple("Names", "name label host url")
 
 class Failure(Exception):
     """A reason to end with status 1, in one line."""
+
+
+class Waiting(Exception):
+    """An answer the public check waits out."""
 
 
 def say(text):
@@ -615,25 +620,44 @@ def ready_pod(cluster, names, change):
 
 def wait_until_ready(cluster, settings, names, change, archive):
     """Hands the checkout to the Pod of this change and waits until it is
-    ready behind its Service. Looks at the dependency step on every round and
-    removes the Deployment once that step failed: the kubelet would run it
-    again, with the public addresses open for another PREVIEW_INSTALL_SECONDS."""
+    ready behind its Service, within PREVIEW_WAIT_SECONDS. Whatever ends the
+    wait early (a failed or restarted dependency step, a failed setup
+    container, a failed read, the end of the wait) removes the Deployment
+    first while its Pod is short of its last rules container (net): until
+    then the kubelet could run the dependency step again, with public
+    addresses open, and nobody would be looking any more."""
+    seen = []
+    try:
+        watch(cluster, settings, names, change, archive, seen)
+    except Failure as failure:
+        if seen and past_the_last_rules(seen[-1]):
+            raise
+        problem = cluster.remove("deployment", names.name)
+        raise Failure(str(failure) + ("; the Deployment was removed, as its Pod had not reached its last rules"
+                                      if problem is None else "; removing the Deployment failed: " + problem)) from None
+
+
+def watch(cluster, settings, names, change, archive, seen):
+    """The rounds of wait_until_ready, about a second apart: each appends
+    the Pod it found (or None) to seen."""
     deadline = time.monotonic() + settings.wait_seconds
     handed = False
     while True:
-        items = cluster.items("deployments,replicasets,pods", "%s=%s" % (LABEL, names.name))
+        try:
+            items = cluster.items("deployments,replicasets,pods", "%s=%s" % (LABEL, names.name))
+        except Failure as failure:
+            raise Failure("reading the preview's Pod failed: %s" % failure) from None
         refused = creation_refused(items, change)
-        if refused:
-            raise Failure("the cluster refused to create the preview's Pod: " + refused)
         found = pods_of(items, change)
         pod = found[0] if found else None
+        seen.append(pod)
+        if refused:
+            raise Failure("the cluster refused to create the preview's Pod: " + refused)
         progressed = False
         if pod is not None:
             failed = install_failure(pod)
             if failed:
-                problem = cluster.remove("deployment", names.name)
-                raise Failure(failed + ("; the Deployment was removed so that it does not run again" if problem is None
-                                        else "; removing the Deployment failed: " + problem))
+                raise Failure(failed)
             blocked = stuck(pod)
             if blocked:
                 raise Failure(blocked)
@@ -649,16 +673,8 @@ def wait_until_ready(cluster, settings, names, change, archive):
         if progressed:
             continue
         if time.monotonic() >= deadline:
-            reason = "the preview was not ready within PREVIEW_WAIT_SECONDS (%d): %s" % (
-                settings.wait_seconds, describe(pod))
-            if past_the_last_rules(pod):
-                raise Failure(reason)
-            # Short of net the Pod may still run, or run again, its
-            # dependency step with public addresses open, and nobody would be
-            # looking any more: the Deployment goes now.
-            problem = cluster.remove("deployment", names.name)
-            raise Failure(reason + ("; the Deployment was removed, as its Pod had not reached its last rules"
-                                    if problem is None else "; removing the Deployment failed: " + problem))
+            raise Failure("the preview was not ready within PREVIEW_WAIT_SECONDS (%d): %s"
+                          % (settings.wait_seconds, describe(pod)))
         time.sleep(POLL)
 
 
@@ -725,6 +741,8 @@ def check_public_url(url, auth, *, signed, seconds=CHECK_SECONDS, pause=2.0):
     while True:
         try:
             anonymous = status_of(opener, url)
+            if anonymous in ROUTER_STATUSES:
+                raise Waiting("%s answered %d without credentials: the router is not there yet" % (url, anonymous))
             if anonymous != 401:
                 raise Failure("%s answered %d without credentials; the router's password check must answer 401"
                               % (url, anonymous))
@@ -750,6 +768,8 @@ def check_public_url(url, auth, *, signed, seconds=CHECK_SECONDS, pause=2.0):
             except urllib.error.HTTPError as error:
                 error.close()
                 answer = error.code
+        except Waiting as waiting:
+            observed = str(waiting)
         except (OSError, http.client.HTTPException) as error:
             observed = "%s could not be reached: %s" % (url, getattr(error, "reason", None) or error)
         else:

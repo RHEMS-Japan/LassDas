@@ -68,7 +68,11 @@ POD_POLICY_REFUSAL = ("pods \"pv-sample-12-6d4cf-x2v9p\" is forbidden: Validatin
 #   pod          name      what the Pod does once the checkout has arrived:
 #                          ready, never_ready, crash, install_fails,
 #                          install_restarts, install_slow (install never
-#                          ends); failed_create makes no Pod at all
+#                          ends), install_restarted_clean (started again,
+#                          the last run ended 0), install_restarted_bare
+#                          (started again, no last state), net_install_fails;
+#                          failed_create makes no Pod at all
+#   get_fails    phase     reading the objects fails while the Pod is in it
 #   start        starting  the Pod stays in its first rules container
 #                          (net-hold) and never asks for the checkout
 #   delete_stuck true      delete leaves everything in place
@@ -83,7 +87,8 @@ import time
 HERE = Path(__file__).resolve().parent
 OUTCOME = {"ready": "ready", "never_ready": "unready", "crash": "crashing",
            "install_fails": "install_failed", "install_restarts": "install_restarted",
-           "install_slow": "installing"}
+           "install_slow": "installing", "install_restarted_clean": "install_restarted_clean",
+           "install_restarted_bare": "install_restarted_bare", "net_install_fails": "net_install_failed"}
 
 
 def parent_environment():
@@ -131,6 +136,18 @@ def pod_object(deployment, pod):
                 status["state"] = done
             elif name == "install":
                 status["state"] = {"running": {}}
+        elif phase in ("install_restarted_clean", "install_restarted_bare"):
+            if index < names.index("install"):
+                status["state"] = done
+            elif name == "install":
+                status.update(restartCount=1, state={"running": {}})
+                if phase == "install_restarted_clean":
+                    status["lastState"] = {"terminated": {"exitCode": 0, "reason": "Completed"}}
+        elif phase == "net_install_failed":
+            if index < names.index("net-install"):
+                status["state"] = done
+            elif name == "net-install":
+                status["state"] = {"terminated": {"exitCode": 1, "reason": "Error"}}
         elif phase in ("install_failed", "install_restarted"):
             if index < names.index("install"):
                 status["state"] = done
@@ -173,7 +190,10 @@ def replicaset_object(deployment, pod):
             "status": {"conditions": conditions}}
 
 
-def get(state, arguments):
+def get(scenario, state, arguments):
+    if scenario.get("get_fails") and any(pod["phase"] == scenario["get_fails"] for pod in state["pods"].values()):
+        print("Unable to connect to the server: dial tcp: i/o timeout", file=sys.stderr)
+        return 1
     kinds = arguments[0].split(",")
     key, _, value = option(arguments, "-l").partition("=")
     items = []
@@ -289,7 +309,7 @@ def main():
     if verb == "apply":
         status = apply(scenario, state, data)
     elif verb == "get":
-        status = get(state, arguments[1:])
+        status = get(scenario, state, arguments[1:])
     elif verb == "exec":
         status = execute(scenario, state, arguments[1:], data)
     elif verb == "annotate":
@@ -646,6 +666,57 @@ class PreviewExampleTests(unittest.TestCase):
                 status, output = self.up(PREVIEW_INSTALL="npm ci", PREVIEW_INSTALL_SECONDS=value,
                                          PREVIEW_WAIT_SECONDS=wait)
                 self.assertEqual(status, 0, output)
+
+    def test_any_failure_short_of_the_last_rules_removes_the_deployment(self):
+        """rs-3: whatever ends the wait while the Pod is short of net (a
+        failed net-install, a failed read during the dependency step) removes
+        the Deployment first; a failure past net leaves it (the control)."""
+        for scenario, changes, removed, word in (
+                ({"pod": "net_install_fails"}, {"PREVIEW_INSTALL": "npm ci", "PREVIEW_INSTALL_SECONDS": "60"},
+                 True, "net-install"),
+                ({"pod": "install_slow", "get_fails": "installing"},
+                 {"PREVIEW_INSTALL": "npm ci", "PREVIEW_INSTALL_SECONDS": "60"}, True, "reading"),
+                ({"pod": "crash"}, {}, False, "CrashLoopBackOff")):
+            with self.subTest(scenario=scenario):
+                self.reset_cluster()
+                self.scenario(scenario)
+                status, output = self.up(PREVIEW_WAIT_SECONDS="240", **changes)
+                self.assertEqual(status, 1, output)
+                last = output.strip().splitlines()[-1]
+                self.assertIn(word, last)
+                deletes = [call["argv"] for call in self.calls() if call["verb"] == "delete"]
+                if removed:
+                    self.assertEqual(len(deletes), 1, output)
+                    self.assertNotIn("pv-sample-12", self.state()["deployments"])
+                    self.assertIn("removed", last)
+                else:
+                    self.assertEqual(deletes, [])
+                    self.assertIn("pv-sample-12", self.state()["deployments"])
+
+    def test_a_restart_of_the_install_step_alone_removes_the_deployment(self):
+        """rs-4: started again counts, whatever the last run ended with."""
+        for scenario in ("install_restarted_clean", "install_restarted_bare"):
+            with self.subTest(scenario=scenario):
+                self.reset_cluster()
+                self.scenario({"pod": scenario})
+                status, output = self.up(PREVIEW_INSTALL="npm ci", PREVIEW_INSTALL_SECONDS="60",
+                                         PREVIEW_WAIT_SECONDS="240")
+                self.assertEqual(status, 1, output)
+                self.assertEqual(len([call for call in self.calls() if call["verb"] == "delete"]), 1, output)
+                self.assertIn("started again", output.strip().splitlines()[-1])
+
+    def test_the_pod_is_looked_at_at_most_two_seconds_apart(self):
+        """rs-7: the dependency step is looked at at most 2 seconds apart, so
+        a failed step is removed before the kubelet's first retry (10 s)."""
+        self.tool.INSTALL_MARGIN = 0
+        self.scenario({"pod": "install_slow"})
+        status, output = self.up(PREVIEW_INSTALL="npm ci", PREVIEW_INSTALL_SECONDS="1", PREVIEW_WAIT_SECONDS="6")
+        self.assertEqual(status, 1, output)
+        reads = [call["time"] for call in self.calls()
+                 if call["verb"] == "get" and "deployments,replicasets,pods" in call["argv"]]
+        self.assertGreaterEqual(len(reads), 3, "the Pod was hardly looked at")
+        gaps = [later - earlier for earlier, later in zip(reads, reads[1:])]
+        self.assertLessEqual(max(gaps), 2.0, gaps)
 
     def test_the_wait_has_to_outlast_the_install_step(self):
         """r7-2: the command has to outlive the dependency step, so that a
@@ -1048,7 +1119,7 @@ class PreviewExampleTests(unittest.TestCase):
 
     TOKEN_IN_URL = "1800000000.c2lnbmF0dXJlLWZvci10aGUtc3RhbmQtaW4tcm91dGVy"
 
-    def router(self, anonymous=401, unsigned=403, opened=None, answers=(200,), refuse_user=False):
+    def router(self, anonymous=(401,), unsigned=403, opened=None, answers=(200,), refuse_user=False):
         """A local stand-in for the router: the password on every path,
         /_preview/open?t= turning the expected token into the cookie, and
         the cookie required on every other path. answers are the
@@ -1056,13 +1127,14 @@ class PreviewExampleTests(unittest.TestCase):
         expected = "Basic " + CHECK_HEADER
         token = self.TOKEN_IN_URL
         pending = list(answers)
+        unauthenticated = list(anonymous) if isinstance(anonymous, (list, tuple)) else [anonymous]
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 headers = {}
                 given = self.headers.get("Authorization")
                 if given is None:
-                    code = anonymous
+                    code = unauthenticated.pop(0) if len(unauthenticated) > 1 else unauthenticated[0]
                 elif given != expected or refuse_user:
                     code = 401
                 elif self.path.startswith("/_preview/open?"):
@@ -1132,6 +1204,19 @@ class PreviewExampleTests(unittest.TestCase):
                 self.assertIn(word, str(caught.exception))
                 self.assertNoLeak(str(caught.exception), "the check's reason")
                 self.assertNotIn(self.TOKEN_IN_URL, str(caught.exception), "the reason carries the signed URL")
+
+    def test_the_public_check_waits_for_the_router_to_come(self):
+        """rs-10: without the password too, the load balancer's and the
+        router's own answers (502, 503) are waited out like in step (d)."""
+        ready, signed, _ = self.router(anonymous=(503, 502, 401))
+        try:
+            self.tool.check_public_url(ready, CHECK_AUTH, signed=signed, seconds=10, pause=0.05)
+        except self.tool.Failure as failure:
+            self.fail("the check did not wait for the router: %s" % failure)
+        ready, signed, _ = self.router(anonymous=(503,))
+        with self.assertRaises(self.tool.Failure) as caught:
+            self.tool.check_public_url(ready, CHECK_AUTH, signed=signed, seconds=0.5, pause=0.05)
+        self.assertIn("503", str(caught.exception))
 
     def test_the_public_check_waits_for_the_router_to_find_the_application(self):
         ready, signed, pending = self.router(answers=(502, 503, 200))
