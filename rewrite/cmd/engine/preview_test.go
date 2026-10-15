@@ -247,7 +247,7 @@ func TestAPageThatDidNotComeUpLeavesTheQuestionInWords(t *testing.T) {
 		name, script string
 		limit        time.Duration
 	}{
-		{"exit-1", write(previewAddress) + `; echo 'the cluster refused the deployment' >&2; exit 1`, 0},
+		{"exit-1", write(previewAddress) + `; echo "the cluster refused the deployment for $PREVIEW_K8S_TOKEN" >&2; exit 1`, 0},
 		{"time-limit", `cat > /dev/null; exec sleep 5`, 300 * time.Millisecond},
 		{"not-https", write("http://sample-51.preview.example.invalid/"), 0},
 		{"space-in-address", write(previewAddress + " (ready)"), 0},
@@ -284,6 +284,16 @@ func TestAPageThatDidNotComeUpLeavesTheQuestionInWords(t *testing.T) {
 			}
 			if record := readPreviewFile(t, filepath.Join(directory, previewFile)); record.State != "failed" || record.Reason == "" || record.URL != "" {
 				t.Fatalf("the request's record does not keep a page that may be partly made: %+v", record)
+			}
+			if mode.name == "exit-1" {
+				// What the role said on its way out is kept, with the
+				// credential it was handed replaced.
+				if !strings.Contains(note, "the cluster refused the deployment for [credential]") {
+					t.Fatalf("the reason the role gave is not in the note: %q", note)
+				}
+				if strings.Contains(note, previewToken) || bytes.Contains(readFile(t, filepath.Join(directory, previewFile)), []byte(previewToken)) {
+					t.Fatal("the preview credential is in the record of a page that did not come up")
+				}
 			}
 		})
 	}
