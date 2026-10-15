@@ -65,9 +65,9 @@ def built(preview, namespace, net_image, install):
     settings = preview.Settings(
         workspace="/unused", result="/unused", issue="1", site="dry-run", start="sleep 3600", port=8080,
         ready_path="/", lifetime=1, image="registry.example.com/app:1", memory="64Mi",
-        install="true" if install else None, install_seconds=60, env_file=None, domain="preview.example.com",
+        install="true" if install else None, install_seconds=60, env_file=None, domain="preview.example.invalid",
         namespace=namespace, server="https://unused", ca_file="/unused", net_image=net_image, wait_seconds=60)
-    names = preview.preview_names("dry-run", "1", "preview.example.com")
+    names = preview.preview_names("dry-run", "1", "preview.example.invalid")
     expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
     deployment, service = preview.manifests(settings, names, [], expires)
     deployment["spec"]["template"]["metadata"]["annotations"][preview.CHANGE] = "0" * 12
@@ -264,7 +264,7 @@ def cases():
              "select"),
         Case("a Service with an external-dns hostname", "service", False,
              lambda item: item["metadata"].update(annotations={
-                 "external-dns.alpha.kubernetes.io/hostname": "preview.example.com"}), S, "annotations"),
+                 "external-dns.alpha.kubernetes.io/hostname": "preview.example.invalid"}), S, "annotations"),
         Case("a Service with a load balancer annotation", "service", False,
              lambda item: item["metadata"].update(annotations={
                  "service.beta.kubernetes.io/aws-load-balancer-scheme": "internet-facing"}), S, "annotations"),

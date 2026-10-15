@@ -94,22 +94,28 @@ public repository.
 | [namespaces.yaml.example](namespaces.yaml.example) | The preview namespace and the router namespace. |
 | [preview-namespace.yaml.example](preview-namespace.yaml.example) | The quota (five previews, 3 GiB of memory between them), the default limits and the egress rules `preview-egress`. Nothing else is ever put there by a person. |
 | [admission-policy.yaml.example](admission-policy.yaml.example) | The admission policies for Deployments, Pods and Services in the preview namespace, and their bindings. |
-| [router.yaml.example](router.yaml.example) | The router (nginx with the password check), its egress rules, its Service and the one Ingress for `*.<preview-domain>`. |
+| [router.yaml.example](router.yaml.example) | The router (nginx with the password check and the signed URL's check), its egress rules, its Service and the one Ingress for `*.<preview-domain>`. |
+| [preview-router.js](preview-router.js) | The router's check of the signed URLs, for nginx's njs module (see [The signed URL](#the-signed-url)). |
 | [access.yaml.example](access.yaml.example) | The ServiceAccount of the preview commands with its token and Role, and the cleanup's ServiceAccount and Role. |
 | [cleanup.yaml.example](cleanup.yaml.example) and [cleanup.sh](cleanup.sh) | The CronJob that removes what is past its lifetime, never got ready, or whose dependency step restarted, every ten minutes. |
 | [dry_run.py](dry_run.py) | The check of the policy, with dry runs only (see [Checking the policy](#checking-the-policy)). |
 
-Example values used below: the domain `preview.example.com`, the namespaces
+Example values used below: the domain `preview.example.invalid`, the namespaces
 `preview-apps` (previews) and `preview-router` (router), five previews at
 once, a lifetime of 72 hours, 3 GiB of memory in all.
 
 1. **A certificate and a DNS name for `*.<preview-domain>`.** Every preview
-   is one label under the domain (`sample-12.preview.example.com`), so one
+   is one label under the domain (`sample-12.preview.example.invalid`), so one
    wildcard certificate and one wildcard DNS record serve them all and no
-   request ever creates a DNS record. A certificate for `*.example.com` does
-   not cover `sample-12.preview.example.com`: a wildcard covers one label.
-   Choose a domain whose name says nothing internal: the address is posted on
-   the tracker. With AWS Certificate Manager, in the load balancer's region:
+   request ever creates a DNS record. A certificate for `*.example.invalid` does
+   not cover `sample-12.preview.example.invalid`: a wildcard covers one label.
+   Choose a domain whose name says nothing internal (the address is posted on
+   the tracker) and whose registrable part runs nothing else of yours, as
+   `example.invalid` in these examples: a preview runs a branch's code in the
+   requester's browser. Under a domain your other services share, its
+   JavaScript could set cookies for that whole domain, would receive the
+   cookies those services set for it, and would send them requests that count
+   as same-site. With AWS Certificate Manager, in the load balancer's region:
 
    ```sh
    aws acm request-certificate --region <region> \
@@ -138,13 +144,25 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
    the C libraries of Linux nginx images, read it. (`openssl passwd -apr1`
    makes a weaker hash nginx reads by itself everywhere.)
 
+   Then the signing key of the signed URLs, and the router's script. The key
+   goes to the router here and to the engine in step 5; keep the file only
+   until then:
+
    ```sh
    printf '%s:%s\n' requester "$(openssl passwd -6)" > htpasswd
    printf '%s:%s\n' preview-check "$(openssl passwd -6)" >> htpasswd
    kubectl -n <router-namespace> create secret generic preview-router-auth --from-file=htpasswd
    rm htpasswd
+   openssl rand -base64 32 | tr -d '\n' > signing-key
+   kubectl -n <router-namespace> create secret generic preview-router-signing --from-file=key=signing-key
+   kubectl -n <router-namespace> create configmap preview-router-js --from-file=preview-router.js
    kubectl apply -f router.yaml
    ```
+
+   The nginx image needs the njs module (loaded from
+   `/etc/nginx/modules/ngx_http_js_module.so`) and the auth_request module;
+   the official images have both. If the image has njs built in, drop the
+   `load_module` line.
 
    The Ingress makes one internet-facing load balancer (it costs while it
    exists). When it has an address
@@ -163,10 +181,12 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
    (see [The rules image](#the-rules-image)).
 5. **The identities.** Apply [access.yaml.example](access.yaml.example). Put
    the token of `preview-operator` into the engine's Secret as
-   `PREVIEW_K8S_TOKEN` and the check user's `user:password` as
-   `PREVIEW_CHECK_AUTH`, add both to the StatefulSet's environment the way the
-   other keys are added ([SETUP.md](../../../deploy/ticket-engine/SETUP.md),
-   section 5), and restart the engine: it reads its keys when it starts.
+   `PREVIEW_K8S_TOKEN`, the check user's `user:password` as
+   `PREVIEW_CHECK_AUTH` and the content of `signing-key` as
+   `PREVIEW_SIGNING_KEY`, add the three to the StatefulSet's environment the
+   way the other keys are added
+   ([SETUP.md](../../../deploy/ticket-engine/SETUP.md), section 5), remove
+   `signing-key`, and restart the engine: it reads its keys when it starts.
 6. **The cleanup.**
 
    ```sh
@@ -189,7 +209,7 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
 | --- | --- | --- |
 | `<preview-namespace>` | every file, `PREVIEW_NAMESPACE` | The namespace of the previews, for example `preview-apps`. |
 | `<router-namespace>` | every file but the policy | The namespace of the router, the identities and the cleanup, for example `preview-router`. |
-| `<preview-domain>` | router, `PREVIEW_DOMAIN` | The domain every preview gets one label under, for example `preview.example.com`. |
+| `<preview-domain>` | router, `PREVIEW_DOMAIN` | The domain every preview gets one label under, for example `preview.example.invalid`. |
 | `<certificate-arn>` | router | The ARN of the certificate for `*.<preview-domain>` (step 1). |
 | `<cluster-dns-ip>` | preview namespace, router | The cluster DNS Service address: `kubectl -n kube-system get service kube-dns -o jsonpath='{.spec.clusterIP}'`. It has to be the nameserver a Pod's `/etc/resolv.conf` names. |
 | `<service-cidr>` | preview namespace, router | The cluster's Service address range. |
@@ -329,6 +349,10 @@ address stops opening at the preview's end.
   first line of `TASK_PREVIEW`. A lifetime extended (the same change brought
   up again) gets a new URL with the new end; the old one stops at the old
   end.
+- **Checked:** the tests run [preview-router.js](preview-router.js) with the
+  njs command line where one is installed (`PREVIEW_NJS`, or `njs` on
+  `PATH`) and skip it where not; a table of signatures njs made binds
+  `preview.py` to the same text everywhere.
 - **The router** checks it after the password: the signature made again
   from the request's `Host` and `<end>` has to match (compared in constant
   time), and `<end>` has to be later than now. Then it sets the cookie
@@ -512,6 +536,29 @@ Every one of these came out as expected on a local kube-apiserver v1.36.0
 with this directory's manifests applied. That is not the cluster the
 previews will run on: run it there after applying.
 
+## Checking a running preview
+
+What only a real cluster shows, to try once the setup is applied and a
+preview is up (the name below is an example):
+
+- **No egress while the application runs.** From the application's
+  container, open a TCP connection to a public address by its number, not
+  its name: a name already fails at DNS, which would pass with the TCP rule
+  broken.
+
+  ```sh
+  kubectl -n <preview-namespace> exec deploy/pv-sample-12 -c app -- \
+    python3 -c "import socket; socket.create_connection(('1.1.1.1', 443), 5)"
+  ```
+
+  It has to fail (connection refused or timed out).
+- **The password never reaches the application.** Bring up a checkout whose
+  application answers with the headers it received, open it, and look for
+  `Authorization` and `__Host-preview`: neither may be there.
+- **No token in the router's log.**
+  `kubectl -n <router-namespace> logs deploy/preview-router | grep -c 't='`
+  has to print 0 after a signed URL was opened.
+
 ## Replacing the token or the password
 
 The token of `preview-operator` has no expiry: the engine reads its keys when
@@ -540,6 +587,21 @@ Secret as `PREVIEW_CHECK_AUTH` and the engine restarted, then the old line
 removed. The requesters' password is changed in the password file alone and
 handed to them again outside the tracker.
 
+The signing key of the signed URLs is held twice, by the router and by the
+engine, and both have to change:
+
+1. Make a new key: `openssl rand -base64 32 | tr -d '\n' > signing-key`.
+2. Replace the router's Secret `preview-router-signing` with it, and restart
+   the router (`kubectl -n <router-namespace> rollout restart deployment/preview-router`):
+   nginx reads the key from its environment when it starts.
+3. Put the same value into the engine's Secret as `PREVIEW_SIGNING_KEY`, and
+   restart the engine (with its owner's go-ahead). Remove `signing-key`.
+4. Every open preview's URL and cookie now answer 403; a requester asks for
+   the preview again, and it is brought up with a new URL.
+
+Between steps 2 and 3 the two keys differ: every preview brought up then
+fails its check with 403 and the requester gets the question in words.
+
 ## Limits
 
 - The checkout lives in the Pod's emptyDir. A Pod moved to another node (the
@@ -562,6 +624,8 @@ handed to them again outside the tracker.
   access log records it if one is turned on. Changing the signing key is the
   only way to stop a URL before its end, and it stops every open preview.
 - An application cannot use paths under `/_preview/`: the router keeps them.
+- The router's access log writes the path without its query, so tokens stay
+  out of it; its error log is not written by the signed URL's check.
 - One password file for every installation the router serves: a requester of
   one installation can open another's previews.
 - Nothing stops other Pods of the cluster from connecting to a preview: the
@@ -570,7 +634,8 @@ handed to them again outside the tracker.
 - `kubectl exec` can still run anything in a preview Pod; the policy cannot
   shape it. Only the preview identity may, and the Pod holds nothing secret.
 - Not yet tried on a real cluster, only on a local API server and in the
-  tests: that the rules image loads the rules inside a Pod with its own user
+  tests: that the chosen nginx image has the njs and auth_request modules,
+  that the rules image loads the rules inside a Pod with its own user
   namespace (`hostUsers: false`), that the running rules still let the
   router and the readiness probe in, that the engine's Pod reaches the API
   server and the hand-over over `kubectl exec` works from inside the role

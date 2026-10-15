@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,10 @@ import time
 import unittest
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "preview-k8s"
+# The njs command line, to run the router's script. CI has none, and those
+# tests are skipped there; the README says how they were run.
+NJS = os.environ.get("PREVIEW_NJS") or shutil.which("njs")
+SIGNING_KEY = "fake-router-signing-key-6a5b4c3d2e1f0a9b8c7d6e5f"
 MANIFESTS = sorted(EXAMPLE.glob("*.yaml.example"))
 PLACEHOLDER = re.compile(r"<([a-z][a-z0-9-]*)>")
 NET_IMAGE = "registry.example.com/net@sha256:" + "0" * 64
@@ -71,10 +76,10 @@ class ManifestTests(unittest.TestCase):
         settings = self.preview.Settings(
             workspace="/unused", result="/unused", issue="1", site="sample", start="sleep 1", port=8080,
             ready_path="/", lifetime=1, image="registry.example.com/app:1", memory="64Mi",
-            install="true" if install else None, install_seconds=60, env_file=None, domain="preview.example.com",
+            install="true" if install else None, install_seconds=60, env_file=None, domain="preview.example.invalid",
             namespace="preview-apps", server="https://unused", ca_file="/unused", net_image=NET_IMAGE,
             wait_seconds=60)
-        names = self.preview.preview_names("sample", "1", "preview.example.com")
+        names = self.preview.preview_names("sample", "1", "preview.example.invalid")
         return self.preview.manifests(settings, names, [], datetime.datetime.now(datetime.timezone.utc))
 
     def test_every_placeholder_is_explained_and_used(self):
@@ -152,6 +157,42 @@ class ManifestTests(unittest.TestCase):
             for part in documents(path):
                 if kind_of(part) == "Secret":
                     self.assertIn("namespace: <router-namespace>", part)
+
+    def test_the_router_needs_the_password_and_the_signed_url(self):
+        router = (EXAMPLE / "router.yaml.example").read_text()
+        config = router[router.index("  nginx.conf: |"):router.index("  ended.html: |")]
+        self.assertIn("load_module /etc/nginx/modules/ngx_http_js_module.so;", config)
+        self.assertIn("env PREVIEW_SIGNING_KEY;", config)
+        self.assertIn("js_import preview from preview-router.js;", config)
+        self.assertIn("location = /_preview/open { js_content preview.open; }", config)
+        self.assertIn("location = /_preview/check { internal; js_content preview.check; }", config)
+        self.assertIn("location ^~ /_preview/ { return 404; }", config)
+        preview_server = config[config.index("server_name *.<preview-domain>;"):]
+        self.assertIn("auth_basic_user_file", preview_server)
+        self.assertNotIn("satisfy any", config, "the password and the signed URL are both required")
+        location = preview_server[preview_server.index("location / {"):]
+        self.assertIn("auth_request /_preview/check;", location)
+        self.assertIn('proxy_set_header Authorization "";', location)
+        self.assertIn("proxy_set_header Cookie $preview_other_cookies;", location)
+        self.assertIn("js_header_filter preview.dropOwnCookie;", location)
+        self.assertIn("js_set $preview_other_cookies preview.otherCookies;", config)
+        self.assertIn("secretKeyRef: { name: preview-router-signing, key: key }", router)
+        self.assertIn("name: preview-router-js", router)
+
+    def test_the_router_logs_no_query_and_no_referer(self):
+        router = (EXAMPLE / "router.yaml.example").read_text()
+        config = router[router.index("  nginx.conf: |"):router.index("  ended.html: |")]
+        formats = re.findall(r"log_format (\S+) ((?:'[^']*'\s*)+);", config)
+        self.assertEqual([name for name, _ in formats], ["preview"])
+        written = formats[0][1]
+        self.assertIn("$uri", written)
+        for variable in ("$request ", "$request\"", "$request_uri", "$args", "$query_string", "$arg_", "$http_referer",
+                         "$http_cookie", "$cookie_"):
+            self.assertNotIn(variable, written)
+        logs = re.findall(r"access_log ([^;]+);", config)
+        self.assertTrue(logs)
+        for line in logs:
+            self.assertTrue(line.strip() == "off" or line.split()[-1] == "preview", line)
 
     def test_the_router_drops_the_password_and_makes_no_dns_record(self):
         router = (EXAMPLE / "router.yaml.example").read_text()
@@ -404,3 +445,127 @@ print("yes" if "can-i" in sys.argv else "applied (server dry run)")
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def njs_request(host, args=None, cookie=None):
+    return ("request(%s, %s, %s)" % (json.dumps(host), json.dumps(args or {}),
+                                    "undefined" if cookie is None else json.dumps(cookie)))
+
+
+@unittest.skipUnless(NJS, "the njs command line is not installed (set PREVIEW_NJS); the router's script is not run")
+class RouterScriptTests(unittest.TestCase):
+    """preview-router.js run by the njs command line with a stand-in for
+    nginx's request object. The tokens are made by preview.py's sign(): the
+    router has to take what the preview command writes."""
+
+    HOST = "sample-12.preview.example.invalid"
+
+    def setUp(self):
+        self.preview = load("preview")
+        temporary = tempfile.TemporaryDirectory(prefix="preview-njs-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+
+    def token(self, end, host=None, key=SIGNING_KEY):
+        return "%d.%s" % (end, self.preview.sign(key, host or self.HOST, end))
+
+    def run_script(self, body, key=SIGNING_KEY):
+        harness = self.base / "harness.js"
+        harness.write_text("""import preview from 'preview-router.js';
+function request(host, args, cookie) {
+    var r = {variables: {host: host}, args: args, headersIn: {}, headersOut: {}, status: 0, location: null};
+    r.return = function (code, text) { r.status = code; r.location = text === undefined ? null : text; };
+    if (cookie !== undefined) { r.headersIn.Cookie = cookie; }
+    return r;
+}
+var results = [];
+""" + body + "\nconsole.log(JSON.stringify(results));\n")
+        environment = {"PATH": os.environ.get("PATH", os.defpath)}
+        if key is not None:
+            environment["PREVIEW_SIGNING_KEY"] = key
+        done = subprocess.run([NJS, "-m", "-p", str(EXAMPLE), str(harness)], env=environment, capture_output=True,
+                              text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def test_it_signs_what_the_preview_command_signs(self):
+        from test_preview_k8s_example import SIGNATURES
+        body = "".join("results.push(preview.sign(%s, %s, %s));\n" % (json.dumps(key), json.dumps(host), json.dumps(end))
+                       for key, host, end, _ in SIGNATURES)
+        self.assertEqual(self.run_script(body), [entry[3] for entry in SIGNATURES])
+
+    def test_open_turns_a_valid_token_into_the_cookie(self):
+        now = int(time.time())
+        good = self.token(now + 3600)
+        cases = [
+            ("no token", njs_request(self.HOST), 403),
+            ("another request's token", njs_request(self.HOST, {"t": self.token(now + 3600, "sample-13.preview.example.invalid")}), 403),
+            ("an ended token", njs_request(self.HOST, {"t": self.token(now - 1)}), 403),
+            ("a changed signature", njs_request(self.HOST, {"t": good[:-1] + ("A" if good[-1] != "A" else "B")}), 403),
+            ("a changed end", njs_request(self.HOST, {"t": str(now + 7200) + good[good.index("."):]}), 403),
+            ("an end with a leading zero", njs_request(self.HOST, {"t": "0" + good}), 403),
+            ("padding", njs_request(self.HOST, {"t": good + "="}), 403),
+            ("another key", njs_request(self.HOST, {"t": self.token(now + 3600, key="another-signing-key-0123456789abcdefgh")}), 403),
+            ("a valid token", njs_request(self.HOST, {"t": good}), 302),
+        ]
+        body = "".join("var r%d = %s; preview.open(r%d); results.push([r%d.status, r%d.location, r%d.headersOut]);\n"
+                       % (index, call, index, index, index, index) for index, (_, call, _) in enumerate(cases))
+        results = self.run_script(body)
+        for (label, _, status), (got, location, headers) in zip(cases, results):
+            with self.subTest(label):
+                self.assertEqual(got, status)
+                if status == 302:
+                    self.assertEqual(location, "/")
+                    cookie = headers.get("Set-Cookie", [])
+                    self.assertEqual(len(cookie), 1)
+                    attributes = [part.strip() for part in cookie[0].split(";")]
+                    self.assertEqual(attributes[0], "__Host-preview=" + good)
+                    self.assertEqual(set(attributes[1:]) - {a for a in attributes[1:] if a.startswith("Max-Age=")},
+                                     {"Path=/", "Secure", "HttpOnly", "SameSite=Lax"})
+                    age = int(next(a for a in attributes if a.startswith("Max-Age="))[len("Max-Age="):])
+                    self.assertTrue(3590 <= age <= 3600, age)
+                    self.assertFalse(any(a.lower().startswith("domain") for a in attributes))
+                    self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
+                    self.assertEqual(headers.get("Cache-Control"), "no-store")
+                else:
+                    self.assertNotIn("Set-Cookie", headers)
+
+    def test_every_other_path_needs_the_cookie_of_this_host(self):
+        now = int(time.time())
+        good = self.token(now + 3600)
+        cases = [
+            ("no cookie", njs_request(self.HOST), 403),
+            ("the cookie", njs_request(self.HOST, cookie="__Host-preview=" + good), 204),
+            ("the cookie among others", njs_request(self.HOST, cookie="a=1; __Host-preview=%s; b=2" % good), 204),
+            ("another host's cookie", njs_request(self.HOST, cookie="__Host-preview=" + self.token(
+                now + 3600, "sample-13.preview.example.invalid")), 403),
+            ("an ended cookie", njs_request(self.HOST, cookie="__Host-preview=" + self.token(now - 1)), 403),
+            ("two cookies of the name", njs_request(self.HOST, cookie="__Host-preview=%s; __Host-preview=x" % good), 403),
+            ("a cookie of another name", njs_request(self.HOST, cookie="preview=" + good), 403),
+        ]
+        body = "".join("var r%d = %s; preview.check(r%d); results.push(r%d.status);\n" % (index, call, index, index)
+                       for index, (_, call, _) in enumerate(cases))
+        for (label, _, status), got in zip(cases, self.run_script(body)):
+            with self.subTest(label):
+                self.assertEqual(got, status)
+
+    def test_without_a_key_of_32_characters_nothing_opens(self):
+        now = int(time.time())
+        for key in (None, "", "short-key"):
+            with self.subTest(key=key):
+                token = self.token(now + 3600, key=key or "x")
+                body = ("var a = %s; preview.open(a); var b = %s; preview.check(b); results.push([a.status, b.status]);"
+                        % (njs_request(self.HOST, {"t": token}), njs_request(self.HOST, cookie="__Host-preview=" + token)))
+                self.assertEqual(self.run_script(body, key=key), [[403, 403]])
+
+    def test_the_application_never_sees_or_sets_the_router_cookie(self):
+        body = """
+results.push(preview.otherCookies(request('h', {}, 'a=1; __Host-preview=tok; b=2')));
+results.push(preview.otherCookies(request('h', {}, '__Host-preview=tok')));
+results.push(preview.otherCookies(request('h', {})));
+var r = request('h', {}); r.headersOut['Set-Cookie'] = ['__Host-preview=evil; Path=/', 'session=1; Path=/'];
+preview.dropOwnCookie(r); results.push(r.headersOut['Set-Cookie']);
+var s = request('h', {}); s.headersOut['Set-Cookie'] = ['__Host-preview=evil'];
+preview.dropOwnCookie(s); results.push(s.headersOut['Set-Cookie'] === undefined);
+"""
+        self.assertEqual(self.run_script(body), ["a=1; b=2", "", "", ["session=1; Path=/"], True])
