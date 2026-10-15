@@ -25,7 +25,9 @@
 # and every other path needs that cookie (403 without it). The Authorization
 # header and the router's own cookie are removed before forwarding, and a
 # Set-Cookie of the same name from the application is dropped: the
-# application never sees the shared password or the token. The access log
+# application never sees the shared password or the token. The Domain of the
+# application's cookies is bound to the preview's host, so its answers cannot
+# set cookies for the parent domain (its JavaScript still can). The access log
 # writes the path without its query, so tokens stay out of it. When there is
 # nothing to forward to (the preview was removed, or is not up yet) the router
 # answers 404, 502 or 503 with the page that says so; the preview command
@@ -98,7 +100,10 @@ data:
           proxy_pass http://pv-$preview_label.<preview-namespace>.svc.cluster.local;
           proxy_set_header Authorization "";
           proxy_set_header Cookie $preview_other_cookies;
-          js_header_filter preview.dropOwnCookie;
+          # The Domain of the application's cookies becomes this host; what
+          # still names another domain afterwards is dropped (filterCookies).
+          proxy_cookie_domain ~.+ $host;
+          js_header_filter preview.filterCookies;
           proxy_set_header Host $host;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
           proxy_set_header X-Forwarded-Proto https;

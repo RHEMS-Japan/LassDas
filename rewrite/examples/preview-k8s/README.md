@@ -371,6 +371,10 @@ address stops opening at the preview's end.
   Every other path needs the password and that cookie; without them it
   answers 401 and 403. Paths under `/_preview/` belong to the router and
   never reach the application.
+- **The application's cookies:** before forwarding, the router removes its
+  own cookie from the `Cookie` header; in the answer, it rewrites the
+  `Domain` of every `Set-Cookie` to the host and drops one of its own name or
+  with a `Domain` that still names something else.
 
 ## Exit status and output
 
@@ -636,6 +640,12 @@ fails its check with 403 and the requester gets the question in words.
   access log records it if one is turned on. Changing the signing key is the
   only way to stop a URL before its end, and it stops every open preview.
 - An application cannot use paths under `/_preview/`: the router keeps them.
+- Cookies the application sets in its answers are bound to the preview's
+  host: the router rewrites their `Domain` to the host
+  (`proxy_cookie_domain`) and drops any whose `Domain` still names something
+  else. Cookies its JavaScript writes or sends are not stopped: under a
+  domain other services share, a preview can still set cookies for that
+  domain from the browser.
 - The router's access log writes the path without its query, so tokens stay
   out of it; its error log is not written by the signed URL's check.
 - One password file for every installation the router serves: a requester of

@@ -174,7 +174,9 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("auth_request /_preview/check;", location)
         self.assertIn('proxy_set_header Authorization "";', location)
         self.assertIn("proxy_set_header Cookie $preview_other_cookies;", location)
-        self.assertIn("js_header_filter preview.dropOwnCookie;", location)
+        self.assertIn("js_header_filter preview.filterCookies;", location)
+        self.assertIn("proxy_cookie_domain ~.+ $host;", location,
+                      "the application's cookies have to be bound to the preview's host")
         self.assertIn("js_set $preview_other_cookies preview.otherCookies;", config)
         self.assertIn("secretKeyRef: { name: preview-router-signing, key: key }", router)
         self.assertIn("name: preview-router-js", router)
@@ -378,13 +380,20 @@ class DryRunToolTests(unittest.TestCase):
         written = sorted((self.base / "cases").glob("*.json"))
         self.assertEqual(len(written), len(self.tool.cases()))
         preview = self.tool.load_preview()
-        unchanged = [json.dumps(self.tool.obj(preview, self.tool.Case("", kind, install, None, None, None),
-                                              "preview-apps", NET_IMAGE), sort_keys=True)
+        def timeless(item):
+            # The lifetime is now + 1 hour, to the second: it moves while the
+            # cases are written and built again.
+            item = json.loads(json.dumps(item))
+            item.get("metadata", {}).get("annotations", {}).pop("preview-expires-at", None)
+            return json.dumps(item, sort_keys=True)
+
+        unchanged = [timeless(self.tool.obj(preview, self.tool.Case("", kind, install, None, None, None),
+                                            "preview-apps", NET_IMAGE))
                      for kind, install in (("deployment", False), ("deployment", True), ("service", False),
                                            ("pod", False))]
         for path in written:
             entry = json.loads(path.read_text())
-            text = json.dumps(entry["object"], sort_keys=True)
+            text = timeless(entry["object"])
             same = text in unchanged
             if entry["expect"] == "accepted":
                 self.assertTrue(same, entry["case"])
@@ -564,8 +573,42 @@ results.push(preview.otherCookies(request('h', {}, 'a=1; __Host-preview=tok; b=2
 results.push(preview.otherCookies(request('h', {}, '__Host-preview=tok')));
 results.push(preview.otherCookies(request('h', {})));
 var r = request('h', {}); r.headersOut['Set-Cookie'] = ['__Host-preview=evil; Path=/', 'session=1; Path=/'];
-preview.dropOwnCookie(r); results.push(r.headersOut['Set-Cookie']);
+preview.filterCookies(r); results.push(r.headersOut['Set-Cookie']);
 var s = request('h', {}); s.headersOut['Set-Cookie'] = ['__Host-preview=evil'];
-preview.dropOwnCookie(s); results.push(s.headersOut['Set-Cookie'] === undefined);
+preview.filterCookies(s); results.push(s.headersOut['Set-Cookie'] === undefined);
 """
         self.assertEqual(self.run_script(body), ["a=1; b=2", "", "", ["session=1; Path=/"], True])
+
+    def test_the_application_cannot_set_cookies_for_another_domain(self):
+        """r7-3 and r8-3: after nginx's proxy_cookie_domain, a Set-Cookie
+        whose Domain attributes (any of them, any letter case, spaces around
+        "=") name anything but this host is dropped; the host itself, with or
+        without a leading dot, stays, and so does a cookie without Domain."""
+        host = self.HOST
+        cases = [
+            ("no Domain", "session=1; Path=/", True),
+            ("Domain is the host", "a=1; Domain=%s; Path=/" % host, True),
+            ("the host with a leading dot, in capitals", "a=1; Domain=.%s" % host.upper(), True),
+            ("spaces around = and the host", "a=1; domain = %s" % host, True),
+            ("the parent domain", "a=1; Domain=example.invalid", False),
+            ("the parent domain with a leading dot", "a=1; Domain=.example.invalid", False),
+            ("two Domains, the last the parent", "a=1; Domain=%s; Domain=example.invalid" % host, False),
+            ("two Domains, the first the parent", "a=1; Domain=example.invalid; Domain=%s" % host, False),
+            ("a space before =", "a=1; Domain =example.invalid", False),
+            ("DOMAIN in capitals", "a=1; DOMAIN=example.invalid", False),
+            ("another preview's host", "a=1; Domain=sample-13.preview.example.invalid", False),
+            ("an empty Domain", "a=1; Domain=", False),
+            ("the router's own name", "__Host-preview=evil; Path=/", False),
+        ]
+        body = "".join("var r%d = request(%s, {}); r%d.headersOut['Set-Cookie'] = [%s]; preview.filterCookies(r%d); "
+                       "results.push(r%d.headersOut['Set-Cookie'] === undefined ? [] : r%d.headersOut['Set-Cookie']);\n"
+                       % (index, json.dumps(host), index, json.dumps(value), index, index, index)
+                       for index, (_, value, _) in enumerate(cases))
+        for (label, value, kept), got in zip(cases, self.run_script(body)):
+            with self.subTest(label):
+                self.assertEqual(got, [value] if kept else [])
+        mixed = ("var m = request(%s, {}); m.headersOut['Set-Cookie'] = ['a=1; Domain=example.invalid', 'b=2', "
+                 "'c=3; Domain=%s']; preview.filterCookies(m); results.push(m.headersOut['Set-Cookie']);"
+                 % (json.dumps(host), host))
+        self.assertEqual(self.run_script(mixed), [["b=2", "c=3; Domain=%s" % host]])
+

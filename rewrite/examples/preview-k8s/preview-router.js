@@ -9,8 +9,12 @@
 //                  holds a valid token for this host, 403 otherwise.
 //   otherCookies   the Cookie header without this router's cookie, for the
 //                  application: it never sees the token.
-//   dropOwnCookie  removes a Set-Cookie of the same name from the
-//                  application's answer.
+//   filterCookies  removes from the application's answer every Set-Cookie of
+//                  the router's own name, and every one whose Domain
+//                  attribute (any of them, in any letter case, with or
+//                  without spaces around "=") names something other than
+//                  this host. nginx's proxy_cookie_domain has rewritten the
+//                  Domain to the host before; this catches what it left.
 // The key is the environment variable PREVIEW_SIGNING_KEY of the nginx
 // process (nginx.conf says "env PREVIEW_SIGNING_KEY;"). Without a key of 32
 // characters or more every token is refused. Nothing here writes a token to
@@ -112,13 +116,35 @@ function otherCookies(r) {
     }).join('; ');
 }
 
-function dropOwnCookie(r) {
+// Whether every Domain attribute of a Set-Cookie value names this host. A
+// cookie without one stays with the host that set it.
+function hostOnly(entry, host) {
+    var attributes = entry.split(';').slice(1);
+    for (var i = 0; i < attributes.length; i++) {
+        var at = attributes[i].indexOf('=');
+        var name = (at < 0 ? attributes[i] : attributes[i].slice(0, at)).trim().toLowerCase();
+        if (name !== 'domain') {
+            continue;
+        }
+        var value = at < 0 ? '' : attributes[i].slice(at + 1).trim().toLowerCase();
+        if (value.charAt(0) === '.') {
+            value = value.slice(1);
+        }
+        if (value !== host) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function filterCookies(r) {
     var set = r.headersOut['Set-Cookie'];
     if (!set) {
         return;
     }
+    var host = String(r.variables.host || '').toLowerCase();
     var kept = (Array.isArray(set) ? set : [set]).filter(function (entry) {
-        return !own(entry);
+        return !own(entry) && hostOnly(entry, host);
     });
     if (kept.length) {
         r.headersOut['Set-Cookie'] = kept;
@@ -127,4 +153,4 @@ function dropOwnCookie(r) {
     }
 }
 
-export default {open, check, otherCookies, dropOwnCookie, sign, valid, same};
+export default {open, check, otherCookies, filterCookies, sign, valid, same};
