@@ -482,6 +482,25 @@ moment before it acts (0.6 seconds on the local server below): the command
 first sends one shape only the policy refuses until it is refused, for at
 most `--settle-seconds` (30).
 
+Both kubeconfig files have to hold the credential itself: a `token`, or a
+`tokenFile` naming a file that holds one. kubectl runs here with `PATH`,
+`LANG`, a temporary `HOME` and `KUBECONFIG` only, so a credential plugin
+(`exec`) finds neither its configuration under the home directory nor any
+`AWS_*` variable. The AWS CLI's `aws eks get-token`, which an EKS kubeconfig
+names, is such a plugin: with it every Pod case fails with the plugin's own
+error. (A stand-in plugin that needs its file under `HOME` and
+`AWS_PROFILE` answered kubectl from the caller's shell, and failed for each
+Pod case under this command, on the local server below.) On EKS, write the
+token the plugin would print to a private file, with the same arguments as
+the kubeconfig's `exec` section (role, profile), and name that file as the
+admin user's `tokenFile`. The token is short-lived, so run the command right
+after, and remove the file:
+
+```sh
+(umask 077; aws eks get-token --region <region> --cluster-name <cluster> \
+  --query status.token --output text > admin-token)
+```
+
 A case passes when what has to pass passes, and what has to be refused is
 refused with `ValidatingAdmissionPolicy '<its policy>'` and the rule's
 message. A refusal for another reason (RBAC, the API's own validation, the
@@ -523,6 +542,8 @@ another namespace no. It exits 0 when every check came out as expected.
 | a checkout file mounted over /policy/run.rules in net | Deployment | preview-deployment-shape |
 | an environment variable in net (XTABLES_LIBDIR) | Deployment | preview-deployment-shape |
 | PATH set in net | Deployment | preview-deployment-shape |
+| net mounting the rules without readOnly | Deployment | preview-deployment-shape |
+| envFrom in net (a ConfigMap) | Deployment | preview-deployment-shape |
 | the rules ConfigMap with install.rules as run.rules | Deployment | preview-deployment-shape |
 | the application mounting the rules volume | Deployment | preview-deployment-shape |
 | the init containers without net | Deployment | preview-deployment-shape |
