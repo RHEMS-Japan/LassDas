@@ -138,6 +138,31 @@ class SetupModelPreflightTests(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.assertEqual(json.loads(out)["tool_text_matches"], 0)
 
+    def test_catalogue_lists_the_ids_the_engine_would_invoke_in_either_shape(self):
+        # The fallback and the reviewer are served under names no public model has.
+        configured = [{"id": "route/chat-fallback"}, {"id": "route/independent-review"}]
+        for name, public, authors, served, want in (
+                ("name alone", [self.public_model()], ["maker"], [{"id": "route/current"}], ["route/current"]),
+                ("both shapes", [self.public_model()], ["maker"], [{"id": "route/current"}, {"id": "route/maker/current"}],
+                 ["route/maker/current"]),
+                ("case", [self.public_model()], ["maker"], [{"id": "Route/Current"}], ["Route/Current"]),
+                ("another publisher has the name", [self.public_model(), self.public_model("other/current")], ["maker"],
+                 [{"id": "route/current"}], []),
+                ("owner names this publisher", [self.public_model(), self.public_model("other/current")], ["maker"],
+                 [{"id": "route/current", "owned_by": "Maker"}], ["route/current"]),
+                ("owner is not a configured publisher", [self.public_model()], ["maker"],
+                 [{"id": "route/current", "owned_by": "route"}], ["route/current"]),
+                ("owner names another configured publisher", [self.public_model()], ["maker", "another"],
+                 [{"id": "route/current", "owned_by": "another"}], [])):
+            with self.subTest(name):
+                config = self.gateway()
+                config["model_selection"]["authors"] = authors
+                config["model_selection"]["fallback"]["model"] = "route/chat-fallback"
+                config["roles"][0]["processes"][0]["env"]["REVIEW_MODEL"] = "route/independent-review"
+                (code, out, _), _ = self.catalogue(config=config, public=public, served=served + configured)
+                self.assertEqual(json.loads(out)["first_20_matches"], want)
+                self.assertEqual(code == 0, bool(want), code)
+
     def test_refused_or_invalid_catalogue_cannot_leak_response_or_send_to_plain_http(self):
         for status in (302, 401, 405, 500):
             failure = urllib.error.HTTPError("https://gateway.example/v1/models", status,
