@@ -734,9 +734,13 @@ class PreviewExampleTests(unittest.TestCase):
         """as-2: an error starting kubectl (here: not executable) is a
         failure with its reason on the last line, not a traceback."""
         (self.fake / "kubectl").chmod(0o644)
-        # Only the fake's directory and the system's: a kubectl further on
-        # the usual PATH would be found and run instead of the fake.
-        path = os.pathsep.join([str(self.fake), "/usr/bin", "/bin"])
+        # Only the fake's directory and one holding ps (the fakes read their
+        # parent's environment with it where there is no /proc): any other
+        # kubectl, such as the system's, would be found and run instead.
+        tools = self.base / "tools"
+        tools.mkdir()
+        os.symlink(shutil.which("ps"), tools / "ps")
+        path = os.pathsep.join([str(self.fake), str(tools)])
         self.assertIsNone(shutil.which("kubectl", path=path), "another kubectl would run in place of the fake")
         status, output = self.up(PATH=path)
         self.assertEqual(status, 1, output)
