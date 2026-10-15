@@ -149,7 +149,7 @@ def read_settings(environment, command):
                         None, namespace, server, ca_file, None, wait_seconds)
     label = r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
     domain = matching(environment, "PREVIEW_DOMAIN", r"%s(\.%s)+" % (label, label),
-                      "a lowercase domain name such as preview.example.com")
+                      "a lowercase domain name such as preview.example.invalid")
     result = required(environment, "TASK_PREVIEW")
     if not os.path.isabs(result):
         raise Failure("TASK_PREVIEW must be an absolute path")
