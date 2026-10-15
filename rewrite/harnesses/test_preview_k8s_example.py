@@ -71,7 +71,9 @@ POD_POLICY_REFUSAL = ("pods \"pv-sample-12-6d4cf-x2v9p\" is forbidden: Validatin
 #                          ends), install_restarted_clean (started again,
 #                          the last run ended 0), install_restarted_bare
 #                          (started again, no last state), net_install_fails,
-#                          receive_stuck (receive keeps running after it);
+#                          receive_stuck (receive keeps running after it),
+#                          net_fails (the last rules end with status 1),
+#                          net_slow (the last rules never end);
 #                          failed_create makes no Pod at all
 #   get_fails    phase     reading the objects fails while the Pod is in it
 #   start        starting  the Pod stays in its first rules container
@@ -90,7 +92,7 @@ OUTCOME = {"ready": "ready", "never_ready": "unready", "crash": "crashing",
            "install_fails": "install_failed", "install_restarts": "install_restarted",
            "install_slow": "installing", "install_restarted_clean": "install_restarted_clean",
            "install_restarted_bare": "install_restarted_bare", "net_install_fails": "net_install_failed",
-           "receive_stuck": "receiving"}
+           "receive_stuck": "receiving", "net_fails": "net_failed", "net_slow": "net_running"}
 
 
 def parent_environment():
@@ -145,6 +147,13 @@ def pod_object(deployment, pod):
                 status.update(restartCount=1, state={"running": {}})
                 if phase == "install_restarted_clean":
                     status["lastState"] = {"terminated": {"exitCode": 0, "reason": "Completed"}}
+        elif phase in ("net_failed", "net_running"):
+            if name != "net":
+                status["state"] = done
+            elif phase == "net_failed":
+                status["state"] = {"terminated": {"exitCode": 1, "reason": "Error"}}
+            else:
+                status["state"] = {"running": {}}
         elif phase == "net_install_failed":
             if index < names.index("net-install"):
                 status["state"] = done
@@ -678,6 +687,7 @@ class PreviewExampleTests(unittest.TestCase):
                  True, "net-install"),
                 ({"pod": "install_slow", "get_fails": "installing"},
                  {"PREVIEW_INSTALL": "npm ci", "PREVIEW_INSTALL_SECONDS": "60"}, True, "reading"),
+                ({"pod": "net_fails"}, {}, True, "net failed"),
                 ({"pod": "crash"}, {}, False, "CrashLoopBackOff")):
             with self.subTest(scenario=scenario):
                 self.reset_cluster()
@@ -720,6 +730,23 @@ class PreviewExampleTests(unittest.TestCase):
         gaps = [later - earlier for earlier, later in zip(reads, reads[1:])]
         self.assertLessEqual(max(gaps), 2.0, gaps)
 
+    def test_a_kubectl_that_cannot_be_started_ends_with_a_reason(self):
+        """as-2: an error starting kubectl (here: not executable) is a
+        failure with its reason on the last line, not a traceback."""
+        (self.fake / "kubectl").chmod(0o644)
+        # Only the fake's directory and the system's: a kubectl further on
+        # the usual PATH would be found and run instead of the fake.
+        path = os.pathsep.join([str(self.fake), "/usr/bin", "/bin"])
+        self.assertIsNone(shutil.which("kubectl", path=path), "another kubectl would run in place of the fake")
+        status, output = self.up(PATH=path)
+        self.assertEqual(status, 1, output)
+        self.assertNotIn("Traceback", output)
+        self.assertIn("kubectl could not be started", output.strip().splitlines()[-1])
+        status, output = self.down(PATH=path)
+        self.assertEqual(status, 1, output)
+        self.assertNotIn("Traceback", output)
+        self.assertIn("kubectl could not be started", output.strip().splitlines()[-1])
+
     def test_the_wait_has_to_outlast_the_install_step(self):
         """r7-2: the command has to outlive the dependency step, so that a
         step that fails late still has someone to remove its Deployment."""
@@ -749,6 +776,7 @@ class PreviewExampleTests(unittest.TestCase):
         for scenario, changes, removed in (
                 ({"start": "starting"}, {}, True),
                 ({"pod": "receive_stuck"}, {}, True),
+                ({"pod": "net_slow"}, {}, True),
                 ({"pod": "install_slow"}, {"PREVIEW_INSTALL": "npm ci", "PREVIEW_INSTALL_SECONDS": "1"}, True),
                 ({"pod": "never_ready"}, {}, False),
                 ({"pod": "never_ready"}, {"PREVIEW_INSTALL": "npm ci", "PREVIEW_INSTALL_SECONDS": "1"}, False)):

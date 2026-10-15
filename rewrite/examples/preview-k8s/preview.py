@@ -19,9 +19,10 @@ removes the Deployment and the Service and reads back that they are gone.
 
 Exit status: 0 when the preview is up (up) or gone (down); 1 otherwise, the
 reason on the last line of the output; 2 for a wrong command line. Nothing
-is removed after a failure, except a Deployment whose Pod had not reached its
-last rules container (net) when the wait ended for any reason: there the
-dependency step could still run with public addresses open. The cleanup and
+is removed after a failure, except a Deployment whose Pod's last rules
+container (net) had not ended with status 0 when the wait ended for any
+reason: until then the dependency step could still run with public addresses
+open. The cleanup and
 down remove the rest.
 
 Credentials. The engine passes PREVIEW_K8S_TOKEN (and, to up,
@@ -481,6 +482,8 @@ class Cluster:
             raise Failure("kubectl was not found on PATH") from None
         except subprocess.TimeoutExpired:
             raise Failure("kubectl %s did not finish within %d seconds" % (arguments[0], timeout)) from None
+        except OSError as error:
+            raise Failure("kubectl could not be started: %s" % (error.strerror or error)) from None
 
     def call(self, arguments, what):
         done = self.run(arguments)
@@ -504,7 +507,10 @@ class Cluster:
 
     def remove(self, kinds, name):
         """None when the objects are removed or were not there, else why not."""
-        done = self.run(["delete", kinds, "-l", "%s=%s" % (LABEL, name), "--ignore-not-found", "--wait=false"])
+        try:
+            done = self.run(["delete", kinds, "-l", "%s=%s" % (LABEL, name), "--ignore-not-found", "--wait=false"])
+        except Failure as failure:
+            return str(failure)
         return None if done.returncode == 0 else last_line(done.stderr)
 
 
@@ -578,15 +584,13 @@ def stuck(pod):
 
 
 def past_the_last_rules(pod):
-    """Whether the Pod has reached its last rules container (net) or gone
-    past it: from then on no dependency step can run in it any more."""
+    """Whether the Pod's last rules container (net) has ended with status 0:
+    from then on its running rules are in place and no dependency step can
+    run in it any more. net still running, or ended otherwise, is not."""
     if pod is None:
         return False
     state = statuses(pod, "initContainerStatuses").get("net", {}).get("state") or {}
-    if "running" in state or "terminated" in state:
-        return True
-    return any("running" in (entry.get("state") or {}) or "terminated" in (entry.get("state") or {})
-               for entry in statuses(pod, "containerStatuses").values())
+    return (state.get("terminated") or {}).get("exitCode") == 0
 
 
 def describe(pod):
@@ -623,17 +627,17 @@ def wait_until_ready(cluster, settings, names, change, archive):
     ready behind its Service, within PREVIEW_WAIT_SECONDS. Whatever ends the
     wait early (a failed or restarted dependency step, a failed setup
     container, a failed read, the end of the wait) removes the Deployment
-    first while its Pod is short of its last rules container (net): until
-    then the kubelet could run the dependency step again, with public
-    addresses open, and nobody would be looking any more."""
+    first unless its Pod's last rules container (net) has ended with status
+    0: until then the kubelet could run the dependency step again, with
+    public addresses open, and nobody would be looking any more."""
     seen = []
     try:
         watch(cluster, settings, names, change, archive, seen)
-    except Failure as failure:
+    except (Failure, OSError) as failure:
         if seen and past_the_last_rules(seen[-1]):
             raise
         problem = cluster.remove("deployment", names.name)
-        raise Failure(str(failure) + ("; the Deployment was removed, as its Pod had not reached its last rules"
+        raise Failure(str(failure) + ("; the Deployment was removed, as its last rules had not ended with status 0"
                                       if problem is None else "; removing the Deployment failed: " + problem)) from None
 
 
@@ -881,6 +885,11 @@ def up(environment, credentials, *, check=None):
     except Failure as failure:
         say(redact(str(failure)))
         return 1
+    except OSError as error:
+        # Anything the system refused (a file, a program): the reason as the
+        # last line, never a traceback.
+        say(redact("the preview command stopped: %s" % error))
+        return 1
     finally:
         if directory is not None:
             shutil.rmtree(directory, ignore_errors=True)
@@ -910,6 +919,11 @@ def down(environment, credentials):
             time.sleep(POLL)
     except Failure as failure:
         say(redact(str(failure)))
+        return 1
+    except OSError as error:
+        # Anything the system refused (a file, a program): the reason as the
+        # last line, never a traceback.
+        say(redact("the preview command stopped: %s" % error))
         return 1
     finally:
         if directory is not None:
