@@ -377,6 +377,37 @@ os.execv(@GIT@, [@GIT@] + sys.argv[1:])
 '''
 
 
+def isolated_environment(base, fake, tools=("ps",)):
+    """PATH, KUBECONFIG and HOME for every command a test starts (as-8): the
+    fake's directory and one holding only the programs named, found on the
+    caller's PATH; a kubeconfig naming a server that cannot exist; an empty
+    home. A kubectl other than the fake cannot be found, and none would read
+    the caller's kubeconfig or reach a cluster."""
+    shelf = Path(base) / "tools"
+    shelf.mkdir(exist_ok=True)
+    for name in tools:
+        found = shutil.which(name)
+        if found is None:
+            raise AssertionError("these tests need %s" % name)
+        if not (shelf / name).exists():
+            os.symlink(found, shelf / name)
+    home = Path(base) / "test-home"
+    home.mkdir(exist_ok=True)
+    config = Path(base) / "test-kubeconfig"
+    config.write_text(json.dumps({
+        "apiVersion": "v1", "kind": "Config", "current-context": "none",
+        "clusters": [{"name": "none", "cluster": {"server": "https://no-cluster.invalid"}}],
+        "users": [{"name": "none", "user": {}}],
+        "contexts": [{"name": "none", "context": {"cluster": "none", "user": "none"}}]}))
+    return {"PATH": os.pathsep.join([str(fake), str(shelf)]), "KUBECONFIG": str(config), "HOME": str(home)}
+
+
+def assert_fake_kubectl(test, environment, fake):
+    """Ends the test before it runs anything unless kubectl is the fake."""
+    test.assertEqual(shutil.which("kubectl", path=environment["PATH"]), str(Path(fake) / "kubectl"),
+                     "kubectl on the test's PATH is not the fake")
+
+
 def load_tool(path=TOOL, name="preview_k8s_example"):
     specification = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(specification)
@@ -411,6 +442,8 @@ class PreviewExampleTests(unittest.TestCase):
         self.write_fake("git", FAKE_GIT.replace("@GIT@", repr(self.real_git)).replace(
             "@TMP@", repr(str(self.tmp))).replace("@TOKEN@", repr(TOKEN)))
         self.scenario({})
+        self.isolated = isolated_environment(self.base, self.fake)
+        assert_fake_kubectl(self, self.isolated, self.fake)
         self.tool = load_tool()
         self.checks = []
 
@@ -434,18 +467,17 @@ class PreviewExampleTests(unittest.TestCase):
                 path.unlink()
 
     def environment(self, **changes):
-        environment = {
-            "PATH": str(self.fake) + os.pathsep + os.environ.get("PATH", os.defpath),
-            "LANG": "C.UTF-8",
+        environment = dict(self.isolated, LANG="C.UTF-8")
+        environment.update({
             "TASK_WORKSPACE": str(self.checkout), "TASK_HOME": str(self.home), "TASK_ISSUE": "12",
             "TASK_PREVIEW": str(self.home / "task-preview.txt"), "TMPDIR": str(self.tmp),
             "PREVIEW_NAME": "sample",
             "PREVIEW_START": 'python3 -m http.server "$PORT" --bind 0.0.0.0 --directory site',
             "PREVIEW_PORT": "8080", "PREVIEW_READY_PATH": "/", "PREVIEW_LIFETIME_HOURS": "72",
             "PREVIEW_IMAGE": "python:3.12-slim", "PREVIEW_DOMAIN": "preview.example.invalid",
-            "PREVIEW_NAMESPACE": "preview-apps", "PREVIEW_K8S_SERVER": "https://cluster.example.com",
+            "PREVIEW_NAMESPACE": "preview-apps", "PREVIEW_K8S_SERVER": "https://cluster.example.invalid",
             "PREVIEW_K8S_CA_FILE": str(self.ca), "PREVIEW_NET_IMAGE": NET_IMAGE,
-        }
+        })
         environment.update(changes)
         return {key: value for key, value in environment.items() if value is not None}
 
@@ -734,22 +766,44 @@ class PreviewExampleTests(unittest.TestCase):
         """as-2: an error starting kubectl (here: not executable) is a
         failure with its reason on the last line, not a traceback."""
         (self.fake / "kubectl").chmod(0o644)
-        # Only the fake's directory and one holding ps (the fakes read their
-        # parent's environment with it where there is no /proc): any other
-        # kubectl, such as the system's, would be found and run instead.
-        tools = self.base / "tools"
-        tools.mkdir()
-        os.symlink(shutil.which("ps"), tools / "ps")
-        path = os.pathsep.join([str(self.fake), str(tools)])
-        self.assertIsNone(shutil.which("kubectl", path=path), "another kubectl would run in place of the fake")
-        status, output = self.up(PATH=path)
+        # The test's PATH holds the fake's directory and ps only (as-8): no
+        # other kubectl, such as the system's, can be found in its place.
+        self.assertIsNone(shutil.which("kubectl", path=self.environment()["PATH"]),
+                          "another kubectl would run in place of the fake")
+        status, output = self.up()
         self.assertEqual(status, 1, output)
         self.assertNotIn("Traceback", output)
         self.assertIn("kubectl could not be started", output.strip().splitlines()[-1])
-        status, output = self.down(PATH=path)
+        status, output = self.down()
         self.assertEqual(status, 1, output)
         self.assertNotIn("Traceback", output)
         self.assertIn("kubectl could not be started", output.strip().splitlines()[-1])
+
+    def test_an_error_of_the_system_ends_with_a_reason(self):
+        """as-7: an OSError outside the wait (the result file's directory is
+        missing) ends 1 with the reason on the last line, no traceback."""
+        try:
+            status, output = self.up(TASK_PREVIEW=str(self.base / "missing" / "task-preview.txt"))
+        except OSError as error:
+            self.fail("up let an OSError out: %r" % error)
+        self.assertEqual(status, 1, output)
+        self.assertNotIn("Traceback", output)
+        self.assertIn("the preview command stopped", output.strip().splitlines()[-1])
+
+    def test_an_error_of_the_system_in_the_wait_removes_the_deployment(self):
+        """as-7: an OSError in the wait (the archive cannot be opened for the
+        hand-over) removes the Deployment like any other failure there."""
+        def unreadable(*arguments, **keywords):
+            raise PermissionError(13, "Permission denied", "checkout.tar")
+        self.tool.hand_over_checkout = unreadable
+        status, output = self.up()
+        self.assertEqual(status, 1, output)
+        self.assertNotIn("Traceback", output)
+        last = output.strip().splitlines()[-1]
+        self.assertIn("Permission denied", last)
+        self.assertIn("removed", last)
+        self.assertEqual(len([call for call in self.calls() if call["verb"] == "delete"]), 1)
+        self.assertNotIn("pv-sample-12", self.state()["deployments"])
 
     def test_the_wait_has_to_outlast_the_install_step(self):
         """r7-2: the command has to outlive the dependency step, so that a
@@ -805,7 +859,7 @@ class PreviewExampleTests(unittest.TestCase):
         for name, value in (("PREVIEW_PORT", "0"), ("PREVIEW_PORT", "http"), ("PREVIEW_READY_PATH", "health"),
                             ("PREVIEW_READY_PATH", "/a b"), ("PREVIEW_LIFETIME_HOURS", "0"),
                             ("PREVIEW_NET_IMAGE", "registry.example.com/net:latest"), ("PREVIEW_MEMORY", "lots"),
-                            ("PREVIEW_DOMAIN", "Preview.Example.invalid"), ("PREVIEW_K8S_SERVER", "http://cluster.example.com"),
+                            ("PREVIEW_DOMAIN", "Preview.Example.invalid"), ("PREVIEW_K8S_SERVER", "http://cluster.example.invalid"),
                             ("PREVIEW_ENV_FILE", "../outside/environ"), ("PREVIEW_ENV_FILE", "/etc/hosts"),
                             ("PREVIEW_START", None), ("PREVIEW_IMAGE", None), ("TASK_PREVIEW", None),
                             ("PREVIEW_K8S_CA_FILE", str(self.base / "missing.crt"))):
