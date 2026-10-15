@@ -472,7 +472,10 @@ Services are sent with the preview commands' own permissions. The Pod cases
 need an identity that may create Pods (`--admin-kubeconfig`), since
 `preview-operator` may not; they check the Pod policy, the last line, met
 when a ReplicaSet creates a Pod. `--write DIRECTORY` writes every case's
-object as JSON instead, without a cluster.
+object as JSON instead, without a cluster. A policy just applied takes a
+moment before it acts (0.6 seconds on the local server below): the command
+first sends one shape only the policy refuses until it is refused, for at
+most `--settle-seconds` (30).
 
 A case passes when what has to pass passes, and what has to be refused is
 refused with `ValidatingAdmissionPolicy '<its policy>'` and the rule's
@@ -503,6 +506,16 @@ another namespace no. It exits 0 when every check came out as expected.
 | net with another command | Deployment | preview-deployment-shape |
 | net with args | Deployment | preview-deployment-shape |
 | net-install with net's command | Deployment | preview-deployment-shape |
+| net adding SYS_ADMIN besides NET_ADMIN | Deployment | preview-deployment-shape |
+| net without dropping ALL | Deployment | preview-deployment-shape |
+| every rules container reading /policy from the checkout | Deployment | preview-deployment-shape |
+| net alone reading /policy from the checkout | Deployment | preview-deployment-shape |
+| the checkout mounted over /usr/sbin in net | Deployment | preview-deployment-shape |
+| a checkout file mounted over /policy/run.rules in net | Deployment | preview-deployment-shape |
+| an environment variable in net (XTABLES_LIBDIR) | Deployment | preview-deployment-shape |
+| PATH set in net | Deployment | preview-deployment-shape |
+| the rules ConfigMap with install.rules as run.rules | Deployment | preview-deployment-shape |
+| the application mounting the rules volume | Deployment | preview-deployment-shape |
 | the init containers without net | Deployment | preview-deployment-shape |
 | an init container after net | Deployment | preview-deployment-shape |
 | an init container before net-hold | Deployment | preview-deployment-shape |
@@ -650,7 +663,9 @@ fails its check with 403 and the requester gets the question in words.
   domain other services share, a preview can still set cookies for that
   domain from the browser.
 - The router's access log writes the path without its query, so tokens stay
-  out of it; its error log is not written by the signed URL's check.
+  out of it. Its error log keeps only critical errors for the signed URL's
+  path, so a mistyped password or an unknown user does not write the request
+  line, with its token, there either; such failures are not logged at all.
 - One password file for every installation the router serves: a requester of
   one installation can open another's previews.
 - Nothing stops other Pods of the cluster from connecting to a preview: the

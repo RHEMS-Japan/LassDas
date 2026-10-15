@@ -90,7 +90,9 @@ data:
         location = /ended.html { internal; auth_basic off; root /etc/preview-router/pages; }
         location = /denied.html { internal; auth_basic off; root /etc/preview-router/pages; }
         # After the password: a valid token becomes the cookie, 302 to /.
-        location = /_preview/open { js_content preview.open; }
+        # Only critical errors here: a mistyped password would otherwise log the
+        # request line, with its token, at the error level.
+        location = /_preview/open { error_log stderr crit; js_content preview.open; }
         location = /_preview/check { internal; js_content preview.check; }
         location ^~ /_preview/ { return 404; }
         location / {

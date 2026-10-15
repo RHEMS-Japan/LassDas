@@ -164,7 +164,8 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("load_module /etc/nginx/modules/ngx_http_js_module.so;", config)
         self.assertIn("env PREVIEW_SIGNING_KEY;", config)
         self.assertIn("js_import preview from preview-router.js;", config)
-        self.assertIn("location = /_preview/open { js_content preview.open; }", config)
+        self.assertIn("location = /_preview/open { error_log stderr crit; js_content preview.open; }", config,
+                      "a mistyped password would log the request line, with its token")
         self.assertIn("location = /_preview/check { internal; js_content preview.check; }", config)
         self.assertIn("location ^~ /_preview/ { return 404; }", config)
         preview_server = config[config.index("server_name *.<preview-domain>;"):]
@@ -431,11 +432,12 @@ print("yes" if "can-i" in sys.argv else "applied (server dry run)")
         done = subprocess.run([sys.executable, "-B", str(EXAMPLE / "dry_run.py"), "--kubeconfig",
                                str(self.base / "operator.kubeconfig"), "--context", "preview",
                                "--admin-kubeconfig", str(self.base / "admin.kubeconfig"), "--admin-context", "admin",
-                               "--namespace", "preview-apps", "--net-image", NET_IMAGE],
+                               "--namespace", "preview-apps", "--net-image", NET_IMAGE, "--settle-seconds", "2"],
                               env=environment, capture_output=True, text=True, timeout=300)
         self.assertEqual(done.returncode, 1, "a cluster that accepts everything has to fail the check")
         self.assertIn("FAIL  a privileged container: accepted, but the policy has to refuse it", done.stdout)
         self.assertIn("PASS  preview.py's Deployment without the dependency step", done.stdout)
+        self.assertIn("the policy did not refuse a nodeName within 2 seconds", done.stdout)
         calls = [json.loads(line) for line in (self.base / "calls.jsonl").read_text().splitlines()]
         self.assertGreater(len(calls), len(self.tool.cases()))
         for call in calls:
@@ -451,9 +453,6 @@ print("yes" if "can-i" in sys.argv else "applied (server dry run)")
             else:
                 self.assertEqual(argv[7], "can-i")
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 def njs_request(host, args=None, cookie=None):
@@ -612,3 +611,6 @@ preview.filterCookies(s); results.push(s.headersOut['Set-Cookie'] === undefined)
                  % (json.dumps(host), host))
         self.assertEqual(self.run_script(mixed), [["b=2", "c=3; Domain=%s" % host]])
 
+
+if __name__ == "__main__":
+    unittest.main()

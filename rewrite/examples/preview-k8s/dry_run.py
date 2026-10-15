@@ -29,6 +29,10 @@ creates a Pod, and the preview identity cannot create Pods to try it.
 --write writes every case's object to DIRECTORY as JSON and contacts no
 cluster, to read what would be sent.
 
+A policy just applied takes a moment before it acts. Before the cases, the
+command sends one shape only the policy refuses (a nodeName) until it is
+refused, for at most --settle-seconds (30 by default).
+
 Both kubeconfig files are named explicitly and only they are used: the
 default kubeconfig and KUBECONFIG of the caller are never read.
 Exit status: 0 when every check came out as expected, 1 otherwise, 2 for a
@@ -44,6 +48,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEPLOYMENT_POLICY = "preview-deployment-shape"
@@ -125,6 +130,27 @@ def insert_init(index, name):
     return change(apply)
 
 
+def rules_from_checkout(*names):
+    """The rules containers named read /policy from the checkout's emptyDir,
+    which receive and install can write."""
+    def apply(spec):
+        for name in names:
+            mounts = container(spec, name)["volumeMounts"]
+            mounts[0] = {"name": "src", "mountPath": "/policy", "readOnly": True}
+    return change(apply)
+
+
+def net_mount(mount):
+    return change(lambda spec: container(spec, "net")["volumeMounts"].append(mount))
+
+
+def rules_items(spec):
+    for volume in spec["volumes"]:
+        if volume["name"] == "policy":
+            volume["configMap"]["items"] = [{"key": "install.rules", "path": "run.rules"},
+                                            {"key": "install.rules", "path": "install.rules"}]
+
+
 def run_rules(spec):
     container(spec, "net-install")["command"] = ["iptables-restore", "--wait", "5", "/policy/run.rules"]
 
@@ -183,6 +209,29 @@ def cases():
              setting(["sh", "-c", "exit 0"], "@net", "command"), D, "rules image"),
         Case("net with args", "deployment", False, setting(["--noflush"], "@net", "args"), D, "rules image"),
         Case("net-install with net's command", "deployment", True, change(run_rules), D, "rules image"),
+        Case("net adding SYS_ADMIN besides NET_ADMIN", "deployment", False,
+             setting({"drop": ["ALL"], "add": ["NET_ADMIN", "SYS_ADMIN"]}, "@net", "securityContext", "capabilities"),
+             D, "NET_ADMIN only"),
+        Case("net without dropping ALL", "deployment", False,
+             setting({"add": ["NET_ADMIN"]}, "@net", "securityContext", "capabilities"), D, "dropping ALL"),
+        Case("every rules container reading /policy from the checkout", "deployment", True,
+             rules_from_checkout("net-hold", "net-install", "net"), D, "rules ConfigMap at /policy"),
+        Case("net alone reading /policy from the checkout", "deployment", False, rules_from_checkout("net"), D,
+             "rules ConfigMap at /policy"),
+        Case("the checkout mounted over /usr/sbin in net", "deployment", False,
+             net_mount({"name": "src", "mountPath": "/usr/sbin"}), D, "rules ConfigMap at /policy"),
+        Case("a checkout file mounted over /policy/run.rules in net", "deployment", False,
+             net_mount({"name": "src", "mountPath": "/policy/run.rules", "subPath": "run.rules"}), D,
+             "rules ConfigMap at /policy"),
+        Case("an environment variable in net (XTABLES_LIBDIR)", "deployment", False,
+             setting([{"name": "XTABLES_LIBDIR", "value": "/policy"}], "@net", "env"), D, "rules ConfigMap at /policy"),
+        Case("PATH set in net", "deployment", False, setting([{"name": "PATH", "value": "/policy"}], "@net", "env"), D,
+             "rules ConfigMap at /policy"),
+        Case("the rules ConfigMap with install.rules as run.rules", "deployment", True, change(rules_items), D,
+             "as a whole"),
+        Case("the application mounting the rules volume", "deployment", False,
+             change(lambda spec: container(spec, "app")["volumeMounts"].append(
+                 {"name": "policy", "mountPath": "/rules", "readOnly": True})), D, "rules containers only"),
         Case("the init containers without net", "deployment", False,
              change(lambda s: s["initContainers"].pop()), D, "init containers"),
         Case("an init container after net", "deployment", False, insert_init(-1, "late"), D, "init containers"),
@@ -326,6 +375,23 @@ def judge(case, status, output):
     return True, "refused by %s" % case.policy
 
 
+def settle(sender, preview, arguments):
+    """Waits until the Deployment policy refuses a nodeName."""
+    probe = obj(preview, Case("probe", "deployment", False, setting("node-1", "nodeName"), DEPLOYMENT_POLICY,
+                              "nodeName"), arguments.namespace, arguments.net_image)
+    started = time.monotonic()
+    while True:
+        status, output = sender.dry_run(probe)
+        if status != 0 and "ValidatingAdmissionPolicy '%s'" % DEPLOYMENT_POLICY in output:
+            print("the policy acts (after %.1f seconds)" % (time.monotonic() - started), flush=True)
+            return
+        if time.monotonic() - started >= arguments.settle_seconds:
+            print("the policy did not refuse a nodeName within %.0f seconds; the cases follow anyway"
+                  % arguments.settle_seconds, flush=True)
+            return
+        time.sleep(1)
+
+
 PERMISSIONS = [
     # (verb, resource, namespace key, expected answer)
     ("create", "deployments.apps", "preview", "yes"),
@@ -355,6 +421,7 @@ def main(argv=None):
     parser.add_argument("--other-namespace", default="default")
     parser.add_argument("--net-image", required=True)
     parser.add_argument("--write")
+    parser.add_argument("--settle-seconds", type=float, default=30.0)
     arguments = parser.parse_args(argv)
     preview = load_preview()
     every = cases()
@@ -376,6 +443,7 @@ def main(argv=None):
         preview_identity = Kubectl(arguments.kubeconfig, arguments.context, arguments.namespace, home)
         admin = Kubectl(arguments.admin_kubeconfig, arguments.admin_context, arguments.namespace, home) \
             if arguments.admin_kubeconfig else None
+        settle(preview_identity, preview, arguments)
         for case in every:
             sender = admin if case.kind == "pod" else preview_identity
             if sender is None:
