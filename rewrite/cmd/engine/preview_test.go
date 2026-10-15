@@ -65,7 +65,7 @@ func previewStagesConfig(t *testing.T) config {
 		{Name: "elicit", Kind: chain.ModelStage},
 		{Name: "confirm_change", Kind: chain.ModelStage, Confirm: true},
 		{Name: "deliver", Kind: chain.CommandStage, OnFailure: "elicit"},
-	}, Preview: &chain.Preview{Up: "preview_up", Down: "preview_down"}}
+	}, Preview: &chain.Preview{Up: "preview_up", Down: "preview_down", HoldHours: 73}}
 	return cfg
 }
 
@@ -443,8 +443,9 @@ func TestOnlyThePreviewRoleIsToldWhereToWriteTheAddress(t *testing.T) {
 	}
 }
 
-// The preview roles run commands, not models, and the role that puts the
-// page up has one process, whose file is the one read back.
+// The preview roles run commands, not models, the role that puts the page up
+// has one process, whose file is the one read back, and the hold for taking
+// the page down is a positive number of hours.
 func TestThePreviewRolesAreCommandsAndTheUpRoleHasOneProcess(t *testing.T) {
 	check := func(cfg config) error {
 		data, err := json.Marshal(cfg)
@@ -460,7 +461,8 @@ func TestThePreviewRolesAreCommandsAndTheUpRoleHasOneProcess(t *testing.T) {
 	if err := check(previewStagesConfig(t)); err != nil {
 		t.Fatalf("a valid setting was refused: %v", err)
 	}
-	for _, variant := range []struct{ name, want string }{{"up-launches-a-model", "model"}, {"down-launches-a-model", "model"}, {"up-has-two-processes", "one process"}} {
+	for _, variant := range []struct{ name, want string }{{"up-launches-a-model", "model"}, {"down-launches-a-model", "model"}, {"up-has-two-processes", "one process"},
+		{"no-hold", "hold_hours"}, {"negative-hold", "hold_hours"}} {
 		t.Run(variant.name, func(t *testing.T) {
 			cfg := previewStagesConfig(t)
 			switch variant.name {
@@ -470,6 +472,10 @@ func TestThePreviewRolesAreCommandsAndTheUpRoleHasOneProcess(t *testing.T) {
 				cfg.Roles[5].Processes[0].ModelEnv = "MODEL"
 			case "up-has-two-processes":
 				cfg.Roles[4].Processes = append(cfg.Roles[4].Processes, chain.Process{Name: "second", Command: []string{"/bin/sh", "-c", "exit 0"}})
+			case "no-hold":
+				cfg.Workflow.Preview.HoldHours = 0
+			case "negative-hold":
+				cfg.Workflow.Preview.HoldHours = -1
 			}
 			if err := check(cfg); err == nil || !strings.Contains(err.Error(), variant.want) {
 				t.Fatalf("the setting was not refused: %v", err)

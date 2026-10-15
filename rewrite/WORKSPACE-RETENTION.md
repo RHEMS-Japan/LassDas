@@ -36,7 +36,13 @@ The status page distinguishes discarded or partially removed workspaces and read
 their retained evidence. This evidence does not recreate unpublished work or
 change a stopped request into a completed delivery.
 
-The controller takes the existing work, report and preparation locks. It does not
+The controller takes the existing work, report and preparation locks, and the
+lock a running take-down of the page put up for the requester holds
+(`preview-down/runner.lock`); a request that never put a page up has no such lock
+and is reclaimed as before. A stopped request whose page is not down yet is not
+reclaimed at all until it is, or until `workflow.preview.hold_hours` after it was
+put up (see "A page to see the change before the question" in README.md), since
+the role that takes it down runs in this workspace. It does not
 follow workspace links or cross observed mount boundaries. Locked, unreadable or
 unsupported targets wait; a failed removal retries on later ticks against the
 same recorded directory. Each attempt is bounded so a large tree does not require

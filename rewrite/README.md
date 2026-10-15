@@ -1330,7 +1330,7 @@ checkout up somewhere the requester can open names two roles of their own:
 ```json
 "workflow": {
   "stages": [ ... ],
-  "preview": { "up": "preview_up", "down": "preview_down" }
+  "preview": { "up": "preview_up", "down": "preview_down", "hold_hours": 73 }
 }
 ```
 
@@ -1338,9 +1338,9 @@ Each is an ordinary configured role whose processes run the operator's
 commands; what they put up, where, and with which credentials is theirs, and
 the engine knows none of it. Both must be configured roles, different from
 each other, neither a stage nor the question role, and neither may launch a
-model. The up role has exactly one process. The setting needs an ordered run
-with a stage marked `"confirm": true`; anything else is refused before work is
-accepted. Without the setting nothing changes. A request keeps the copy of the
+model. The up role has exactly one process. `hold_hours` is a positive number
+of hours (below). The setting needs an ordered run with a stage marked
+`"confirm": true`; anything else is refused before work is accepted. Without the setting nothing changes. A request keeps the copy of the
 workflow it was accepted with, so adding the setting does not reach requests
 accepted before it.
 
@@ -1397,8 +1397,33 @@ model does not read it as a failure. No stage is satisfied, failed or run again
 by it, the request is never stopped by it, and the decisions that follow are
 offered what they would be without the setting. Nothing a role prints is read.
 
-This engine does not launch the down role yet: the page stays up until the
-operator's own cleanup removes it.
+**When the page comes down.** When a request whose `preview.json` says
+`starting`, `up` or `failed` is delivered or stopped, the queue launches the
+down role once for it, right after it sets the issue's status, bound to the
+request's own homes, workspace and `TASK_ISSUE` as its other roles are. The
+launch runs apart from the queue's ticks, under the name
+`preview-down:<id>`, so the other requests are taken up and run while it
+runs; it takes none of their execution slots, and one take-down runs at a
+time. When every process exited 0, `preview.json` says `"down"` with the
+time. Otherwise the reason goes to the log once while it stays the same and
+into `preview.json`, the request is left as it is, and the launch is tried
+again on a later tick, spaced as a refused status move is: a minute after the
+first refusal, doubling up to an hour.
+
+A stopped request's report goes out at once and does not wait for the page.
+The trim of the request's caches and, where the operator allows it, the
+reclaim of a stopped workspace do wait, because the down role runs in that
+workspace: they go on once `preview.json` says `"down"`. While the down role
+runs it holds `queue/jobs/<id>/preview-down/runner.lock`, which the reclaim
+also stops at. They wait at most `workflow.preview.hold_hours` after the page
+was put up; set it to the page's own lifetime plus an hour, so that the
+operator's own cleanup has removed the page by then. After that `preview.json`
+says `"unconfirmed"`, the log says once that the page was not confirmed taken
+down, the caches and workspace are no longer held for it, and the down role is
+not launched again for that request. A request accepted before the setting,
+or whose page never went up, has no `preview.json` and is trimmed and
+reclaimed as before. Removing the setting stops the take-downs too: the
+engine holds nothing for a page it no longer has a role to take down.
 
 ### A pull request description from the run's reports
 
