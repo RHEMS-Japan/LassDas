@@ -313,13 +313,13 @@ else:
     def stamp(self, offset):
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.NOW + offset))
 
-    def run_cleanup(self, deployments, services, pods, failing=()):
+    def run_cleanup(self, deployments, services, pods, failing=(), environment=None):
         (self.base / "deployments.txt").write_text("".join("|".join(row) + "\n" for row in deployments))
         (self.base / "services.txt").write_text("".join(name + "\n" for name in services))
         (self.base / "pods.txt").write_text("".join("|".join(row) + "\n" for row in pods))
         if failing:
             (self.base / "failing.txt").write_text(" ".join(failing))
-        environment = dict(self.isolated, PREVIEW_NAMESPACE="preview-apps", LANG="C")
+        environment = dict(environment or self.isolated, PREVIEW_NAMESPACE="preview-apps", LANG="C")
         done = subprocess.run(["/bin/sh", str(EXAMPLE / "cleanup.sh")], env=environment, capture_output=True,
                               text=True, timeout=60)
         deleted = (self.base / "deleted.txt").read_text().split("\n") if (self.base / "deleted.txt").exists() else []
@@ -359,6 +359,23 @@ else:
         done, removed = self.run_cleanup(deployments, [], [], failing=("pv-a",))
         self.assertEqual(done.returncode, 1)
         self.assertEqual(removed, ["pv-b"])
+
+    def test_a_missing_program_ends_1_before_anything_is_removed(self):
+        """rs-18: without grep every Service would look like one without a
+        Deployment, without expr no lifetime would end: the script has to
+        stop first, saying which program is missing."""
+        deployments = [("pv-a", self.stamp(-1), "True", "", "")]
+        for missing in ("grep", "expr", "mktemp", "cut", "rm"):
+            with self.subTest(missing=missing):
+                base = self.base / ("without-" + missing)
+                base.mkdir()
+                environment = isolated_environment(base, self.fake, [name for name in CLEANUP_TOOLS if name != missing])
+                assert_fake_kubectl(self, environment, self.fake)
+                self.assertIsNone(shutil.which(missing, path=environment["PATH"]))
+                done, removed = self.run_cleanup(deployments, ["pv-a", "pv-b"], [], environment=environment)
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertEqual(removed, [])
+                self.assertIn(missing, done.stderr)
 
     def test_nothing_to_remove(self):
         done, removed = self.run_cleanup([], [], [])

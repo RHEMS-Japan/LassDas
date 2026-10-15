@@ -15,9 +15,18 @@
 # and a Service whose Deployment is gone. It works whether or not the engine
 # is running. Exits 0 when every removal it tried went through.
 #
-# Needs a POSIX sh, kubectl, expr, mktemp, cut, grep and a date that reads
-# "-d @SECONDS" (BusyBox or GNU coreutils).
+# Needs a POSIX sh, kubectl, date that reads "-d @SECONDS" (BusyBox or GNU
+# coreutils), expr, mktemp, cut, grep and rm. Without one it ends 1 before
+# reading anything: without grep every Service would look like one without a
+# Deployment, without expr no lifetime would end.
 set -eu
+
+for program in kubectl date expr mktemp cut grep rm; do
+  if ! command -v "$program" > /dev/null 2>&1; then
+    echo "the cleanup needs $program, which this image does not have; nothing was removed" >&2
+    exit 1
+  fi
+done
 
 namespace="${PREVIEW_NAMESPACE:?PREVIEW_NAMESPACE is not set}"
 now_seconds=$(date +%s)

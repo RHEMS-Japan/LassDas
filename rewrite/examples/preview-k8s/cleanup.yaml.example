@@ -5,9 +5,10 @@
 #   kubectl -n <router-namespace> create configmap preview-cleanup --from-file=cleanup.sh
 # and apply. The script says what it removes.
 #
-# <kubectl-image>  an image with kubectl, a POSIX sh and a date that reads
-#                  "-d @SECONDS" (an Alpine based kubectl image has all three),
-#                  by digest
+# <kubectl-image>  an image with kubectl, a POSIX sh, a date that reads
+#                  "-d @SECONDS", expr, mktemp, cut, grep and rm (an Alpine
+#                  based kubectl image has them all), by digest. The script
+#                  ends 1 without removing anything when one is missing.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
