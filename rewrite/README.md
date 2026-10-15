@@ -1330,17 +1330,25 @@ checkout up somewhere the requester can open names two roles of their own:
 ```json
 "workflow": {
   "stages": [ ... ],
-  "preview": { "up": "preview_up", "down": "preview_down" }
-}
+  "preview": { "up": "preview_up", "down": "preview_down", "hold_hours": 73 }
+},
+"roles": [
+  { "name": "preview_up", "purpose": "...",
+    "processes": [ { "name": "up", "command": [ ... ], "timeout_minutes": 10 } ] },
+  { "name": "preview_down", "purpose": "...",
+    "processes": [ { "name": "down", "command": [ ... ], "timeout_minutes": 3 } ] }
+]
 ```
 
 Each is an ordinary configured role whose processes run the operator's
 commands; what they put up, where, and with which credentials is theirs, and
 the engine knows none of it. Both must be configured roles, different from
-each other, neither a stage nor the question role, and neither may launch a
-model. The up role has exactly one process. The setting needs an ordered run
-with a stage marked `"confirm": true`; anything else is refused before work is
-accepted. Without the setting nothing changes. A request keeps the copy of the
+each other, neither a stage, the question role nor `intake.stop_report_role`,
+and neither may launch a model. Every process of theirs needs
+`timeout_minutes`: a take-down that never returned would hold its request,
+and every later take-down, past the hold. The up role has exactly one process. `hold_hours` may be left out
+(below). The setting needs an ordered run with a stage marked
+`"confirm": true`; anything else is refused before work is accepted. Without the setting nothing changes. A request keeps the copy of the
 workflow it was accepted with, so adding the setting does not reach requests
 accepted before it. Of the setting, that copy keeps only the up role: naming
 another one later does not change which role puts an accepted request's page
@@ -1363,8 +1371,14 @@ page's address and the lines after it are words for the requester, such as how
 long the page stays open. The page came up when every process exited 0 and
 the first line is an `https://` address without spaces. The file is read as
 `TASK_ACTIVITY` is: an ordinary file with one name and at most 16 KiB, without
-following a link or waiting on a pipe, in UTF-8. Every credential value the
-engine can name is replaced with `[credential]` before anything is used.
+following a link or waiting on a pipe, in UTF-8, a Windows line end read as a
+line break. The address line holds no control character and no invisible
+formatting character (such as a zero-width space); the words after it hold no
+control character other than the tab, and none that turns the direction of
+text (U+202A to U+202E, U+2066 to U+2069). A file that is not counts as a page
+that did not come up. Every credential value the engine can name is replaced
+with `[credential]` before anything is used, and the file is removed once it
+has been read, so nothing written there stays in the role's home.
 `preview.json` then says `"up"` with the address, or `"failed"` with the
 reason; a failed launch may still have made part of a page.
 
@@ -1399,9 +1413,55 @@ model does not read it as a failure. No stage is satisfied, failed or run again
 by it, the request is never stopped by it, and the decisions that follow are
 offered what they would be without the setting. Nothing a role prints is read.
 
-This engine does not launch the down role yet: a page it puts up stays up
-until the operator's own cleanup removes it. Do not set `workflow.preview` on
-an installation until the engine also takes the page down.
+**When the page comes down.** When a request whose `preview.json` says
+`starting`, `up` or `failed` is delivered or stopped, the queue launches the
+down role once for it, right after it sets the issue's status, bound to the
+request's own homes, workspace and `TASK_ISSUE` as its other roles are. The
+launch runs apart from the queue's ticks, under the name
+`preview-down:<id>`, so the other requests are taken up and run while it
+runs; it takes none of their execution slots, and one take-down runs at a
+time. When every process exited 0, `preview.json` says `"down"` with the
+time. Otherwise the reason goes to the log once while it stays the same and
+into `preview.json`, the request is left as it is, and the launch is tried
+again on a later tick, spaced as a refused status move is: a minute after the
+first refusal, doubling up to an hour.
+
+A stopped request's report goes out at once and does not wait for the page.
+That is the order when the queue finds the request stopped: the take-down is
+launched first and the report right after. A request stopped while its work
+runs reports its stop within that run, as before, and its page is taken down
+once that report has returned and the queue comes to it. The trim of the
+request's caches and, where the operator allows it, the
+reclaim of a stopped workspace do wait, because the down role runs in that
+workspace: they go on once `preview.json` says `"down"`. While the down role
+runs it holds `queue/jobs/<id>/preview-down/runner.lock`, which the reclaim
+also stops at. They wait at most `workflow.preview.hold_hours` after the page
+was put up: write the page's own lifetime plus one, so that the operator's own
+cleanup has removed the page by then; left out, it is 73 (a lifetime of 72
+hours plus one). A shorter value only lets the trim and the reclaim go on
+sooner, leaving the page to that cleanup; a longer one keeps the workspace a
+little longer. After that `preview.json` says `"unconfirmed"`, with why in
+`gave_up` and when in `gave_up_at`, the log says once that the page was not
+confirmed taken down, the caches and workspace are no longer held for it, and
+the down role is not launched again for that request. A request accepted before the setting,
+or whose page never went up, has no `preview.json` and is trimmed and
+reclaimed as before. The down role and `hold_hours` are read from the
+operator's current setting, not from the request's copy: a changed
+`hold_hours` reaches requests already accepted at once, and removing the
+setting leaves their pages to the operator's own cleanup: when such a request
+is delivered or stopped, nothing is launched or held for its page, its
+`preview.json` ends as `"unconfirmed"` the same way, and the log says so once.
+An ended record stays ended, so neither a restart nor the setting coming back
+reaches that page again. A `preview.json` that is not a record holds nothing
+either: it is set aside as `preview.json.unreadable` for a person to read,
+which is said once, and the request is trimmed and reclaimed as one that put
+no page up. One that cannot be opened for now, for want of permission for
+example, is not set aside: the request is held, the reason is said once, and
+the file is read again on the next tick, but no longer than `hold_hours` from
+when it was last written, and not at all without the setting. Past that the
+page is not confirmed taken down, which is said once and kept in
+`preview.json.gave-up` beside it, so neither a restart nor the record opening
+again reaches that page.
 
 ### A pull request description from the run's reports
 

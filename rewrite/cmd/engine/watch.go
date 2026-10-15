@@ -356,6 +356,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			}
 		}()
 	}
+	downs := pageDowns{ctx: ctx, cfg: cfg, active: active, launch: launch, trouble: map[string]string{}}
 	// The queue learns which kinds of notice this engine posts before anything
 	// is accepted or said, so a request accepted from here on is not older
 	// than its kinds, and one delivered or begun before is not news now.
@@ -415,6 +416,11 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			} else if stopped {
 				applyStatus(ctx, cfg, issue, directory, stoppedStatus, say)
 				assignTurn(ctx, cfg, issue, directory, "requester", say)
+				// A page put up for the requester goes down in a launch of
+				// its own. The stop report below does not wait for it; the
+				// trim and the reclaim, which take the workspace the role
+				// runs in, do.
+				pageSettled := downs.settle(issue, directory, entry.Name(), say)
 				if cfg.Intake.StopReportRole != "" {
 					if done, err := stoppedReportDone(directory); err != nil {
 						observe("reading stopped report: " + err.Error())
@@ -423,6 +429,9 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 						launch(entry.Name(), func() error { return reportStoppedRequest(ctx, cfg, issue, directory, turns, log) })
 						continue
 					}
+				}
+				if !pageSettled {
+					continue
 				}
 				// The reporter may still need its home to resume. Only after
 				// it finishes (or with none configured) are its caches unused.
@@ -460,11 +469,15 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			if state.Done {
 				applyStatus(ctx, cfg, issue, directory, deliveredStatus, say)
 				assignTurn(ctx, cfg, issue, directory, "requester", say)
+				pageSettled := downs.settle(issue, directory, entry.Name(), say)
 				if info, err := os.Stat(filepath.Join(directory, "issue.json")); err == nil && len(state.History) > 0 {
 					hoursTurn(ctx, cfg, issue, directory, info.ModTime(), state.History[len(state.History)-1].FinishedAt, say)
 				}
 				modelsTurn(ctx, cfg, issue, directory, state, say)
-				trim(entry.Name(), directory, say)
+				// The caches go once the page is down, or the hold ran out.
+				if pageSettled {
+					trim(entry.Name(), directory, say)
+				}
 				continue
 			}
 			if held, err := holdPausedRequest(ctx, cfg, issue, directory, request, interval, say); held || err != nil {

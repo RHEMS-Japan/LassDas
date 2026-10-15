@@ -233,6 +233,8 @@ func TestNoPreviewWhereNoConfirmationQuestionIsChosen(t *testing.T) {
 // operator's current setting.
 func TestTheAcceptedRunKeepsItsOwnCopyOfThePreviewRoles(t *testing.T) {
 	flow := previewFlow(t)
+	hold := 5
+	flow.Preview.HoldHours = &hold
 	store := &memoryStore{state: State{Request: "Show the item count on the list screen."}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

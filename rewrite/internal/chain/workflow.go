@@ -64,6 +64,12 @@ type Preview struct {
 	// Down is launched once the request is delivered or stopped. The queue
 	// reads it from the operator's current setting, not from the copy.
 	Down string `json:"down,omitempty"`
+	// HoldHours is how long, in hours from when a page was put up, the
+	// request's caches and stopped workspace are kept for the down role to
+	// take the page down; after that they are cleared whether or not it did.
+	// Left out, the engine uses its default. Like Down, it is read from the
+	// operator's current setting, so a change reaches accepted requests.
+	HoldHours *int `json:"hold_hours,omitempty"`
 }
 
 func (w *Workflow) Validate(roles map[string]string) error {

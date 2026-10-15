@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -56,9 +58,9 @@ func previewStagesConfig(t *testing.T) config {
 		{Name: "deliver", Purpose: "Deliver the change.", Processes: []chain.Process{{Name: "delivery", Command: sh(`cat > /dev/null; echo delivered`)}}},
 		{Name: "ask_requester", Purpose: "Ask the requester.", Processes: []chain.Process{{Name: "questioner", TrackerAccess: "comment",
 			Command: sh(`cat > question-prompt.txt; echo 'Asked in ordinary prose.'`)}}},
-		{Name: "preview_up", Purpose: "Put the change up for the requester to see.", Processes: []chain.Process{{Name: "up",
+		{Name: "preview_up", Purpose: "Put the change up for the requester to see.", Processes: []chain.Process{{Name: "up", TimeoutMinutes: 10,
 			Secrets: map[string]string{"PREVIEW_K8S_TOKEN": "PREVIEW_TEST_TOKEN"}, Command: sh(previewUpScript)}}},
-		{Name: "preview_down", Purpose: "Take the page down.", Processes: []chain.Process{{Name: "down",
+		{Name: "preview_down", Purpose: "Take the page down.", Processes: []chain.Process{{Name: "down", TimeoutMinutes: 3,
 			Secrets: map[string]string{"PREVIEW_K8S_TOKEN": "PREVIEW_TEST_TOKEN"}, Command: sh(`cat > /dev/null; echo down >> preview-downs.txt`)}}},
 	}
 	cfg.Workflow = &chain.Workflow{Stages: []chain.Stage{
@@ -125,6 +127,11 @@ func TestThePagesAddressIsPostedOnceBeforeTheConfirmationQuestion(t *testing.T) 
 	}
 	if launches := string(readFile(t, filepath.Join(workspace, "preview-launches.txt"))); launches != "up\n" {
 		t.Fatalf("the preview role ran %q", launches)
+	}
+	// What the role wrote, its credential included, is not kept in its home
+	// once the engine has read it.
+	if _, err := os.Lstat(filepath.Join(directory, "homes", "4-0", "task-preview.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the address file is left in the role's home: %v", err)
 	}
 	if record := readPreviewFile(t, filepath.Join(workspace, "preview-at-launch.json")); record.State != "starting" || record.StartedAt.IsZero() {
 		t.Fatalf("the request did not record that a page was going up before the role ran: %+v", record)
@@ -282,6 +289,9 @@ func TestAPageThatDidNotComeUpLeavesTheQuestionInWords(t *testing.T) {
 			if posted := fixture.all(); len(posted) != 0 {
 				t.Fatalf("a page that did not come up was posted: %q", posted)
 			}
+			if _, err := os.Lstat(previewFileOf(p)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the address file is left in the role's home after it was read: %v", err)
+			}
 			if record := readPreviewFile(t, filepath.Join(directory, previewFile)); record.State != "failed" || record.Reason == "" || record.URL != "" {
 				t.Fatalf("the request's record does not keep a page that may be partly made: %+v", record)
 			}
@@ -294,6 +304,67 @@ func TestAPageThatDidNotComeUpLeavesTheQuestionInWords(t *testing.T) {
 				if strings.Contains(note, previewToken) || bytes.Contains(readFile(t, filepath.Join(directory, previewFile)), []byte(previewToken)) {
 					t.Fatal("the preview credential is in the record of a page that did not come up")
 				}
+			}
+		})
+	}
+}
+
+// The address file is read as text for a person: no more than 16 KiB, in
+// UTF-8, and without control characters other than the line breaks; a tab
+// is let through in the words for the requester, not in the address, which
+// also holds no invisible formatting character, and the words hold none that
+// turns the direction of text. A file that is not is a page that did not come
+// up: the question is told so and nothing is posted. The right forms come
+// up: Windows line ends, a tab in the words, Japanese and emoji, and what is
+// posted holds no carriage return.
+func TestAnAddressFileThatIsNotPlainTextIsAPageThatDidNotComeUp(t *testing.T) {
+	first := previewAddress + "\n"
+	for _, form := range []struct {
+		name    string
+		content []byte
+	}{
+		{"too-large", []byte(first + strings.Repeat("a", previewBytes))},
+		{"not-utf8", []byte(first + "\xff\xfe\n")},
+		{"nul", []byte(first + "before\x00after\n")},
+		{"esc", []byte(first + "\x1b[31mred\x1b[0m\n")},
+		{"soh", []byte(first + "\x01\n")},
+		{"del", []byte(first + "a\x7fb\n")},
+		{"control-on-the-first-line", []byte(previewAddress + "\x1b\n")},
+		{"tab-on-the-first-line", []byte(previewAddress + "\t\n")},
+		{"zero-width-space-on-the-first-line", []byte(previewAddress + "\u200b\n")},
+		{"right-to-left-override-on-the-first-line", []byte(previewAddress + "\u202e\n")},
+		{"right-to-left-override-in-the-words", []byte(first + "\u202e" + "reversed\n")},
+		{"isolate-in-the-words", []byte(first + "\u2066" + "isolated\u2069\n")},
+		{"right-form", []byte(previewAddress + "\r\n" + previewUntil + "\r\n")},
+		{"tab-in-the-words", []byte(first + "変更:\tボタンの色\n")},
+		{"japanese-and-emoji-in-the-words", []byte(first + "確認してください \U0001F468\u200d\U0001F469\u200d\U0001F467 \u2705\n")},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			cfg := previewStagesConfig(t)
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			directory, p := previewJob(t, cfg)
+			source := filepath.Join(t.TempDir(), "address")
+			if err := os.WriteFile(source, form.content, 0600); err != nil {
+				t.Fatal(err)
+			}
+			p = withPreviewScript(p, `cat > /dev/null; mkdir -p "$(dirname "$TASK_PREVIEW")"; cp '`+source+`' "$TASK_PREVIEW"`, 0)
+			state := chain.State{Request: noticeRequest, History: []chain.Result{{Role: "confirm_change", Speaker: "reader", Output: "Read."}}}
+			note, instruction := p.up(context.Background(), "preview_up", state)
+			record := readPreviewFile(t, filepath.Join(directory, previewFile))
+			if wants, up := map[string]string{"right-form": previewUntil, "tab-in-the-words": "変更:\tボタンの色",
+				"japanese-and-emoji-in-the-words": "確認してください \U0001F468\u200d\U0001F469\u200d\U0001F467 \u2705"}[form.name]; up {
+				want := "確認用の画面: " + previewAddress + "\n" + wants
+				if instruction != previewPostedInstruction(previewAddress) || record.State != "up" || fixture.count(want) != 1 {
+					t.Fatalf("a file in the right form did not come up as %q: %q %+v %q", want, instruction, record, fixture.all())
+				}
+				return
+			}
+			if instruction != previewFailedInstruction || !strings.HasPrefix(note, "確認用の画面を用意できなかった") || record.State != "failed" {
+				t.Fatalf("the file was taken for a page that came up: %q %q %+v", instruction, note, record)
+			}
+			if posted := fixture.all(); len(posted) != 0 {
+				t.Fatalf("a file that is not plain text was posted: %q", posted)
 			}
 		})
 	}
@@ -496,6 +567,64 @@ func TestThePagesAddressAndTheWatchersRetryDoNotPostTwice(t *testing.T) {
 	}
 }
 
+// Each request's notices are said one at a time and no request waits for
+// another's: two notices of one request take the time of two posts, also on
+// an installation without the preview setting, and notices of two requests
+// take the time of one.
+func TestNoticesOfOneRequestAreSaidOneAtATime(t *testing.T) {
+	const delay = 400 * time.Millisecond
+	for _, scene := range []string{"one-request", "one-request-without-the-setting", "two-requests"} {
+		t.Run(scene, func(t *testing.T) {
+			cfg := previewStagesConfig(t)
+			if scene == "one-request-without-the-setting" {
+				cfg.Workflow.Preview = nil
+			}
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			slow := http.DefaultTransport
+			useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodPost {
+					time.Sleep(delay)
+				}
+				return slow.RoundTrip(r)
+			})
+			root, first := noticeJob(t, chain.State{})
+			second := first
+			if scene == "two-requests" {
+				second = filepath.Join(root, "jobs", "52")
+				if err := os.MkdirAll(second, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var group sync.WaitGroup
+			began := time.Now()
+			for i, directory := range []string{first, second} {
+				group.Add(1)
+				go func(i int, directory string) {
+					defer group.Done()
+					n := requestNotices(cfg, sourceIssue{ID: 51, Key: "EXAMPLE-51"}, directory)
+					text := fmt.Sprintf("notice %d of %s", i, scene)
+					if err := n.say(context.Background(), resumeNotice, text, "", time.Now().UTC(), func(noticeLog, time.Time) bool { return true }, strconv.Itoa(i)); err != nil {
+						t.Errorf("notice %d: %v", i, err)
+					}
+				}(i, directory)
+			}
+			group.Wait()
+			took := time.Since(began)
+			if posted := len(fixture.all()); posted != 2 {
+				t.Fatalf("%d notices were posted", posted)
+			}
+			if scene == "two-requests" {
+				if took >= 2*delay-50*time.Millisecond {
+					t.Fatalf("notices of two requests waited for each other: %v for two posts of %v", took, delay)
+				}
+			} else if took < 2*delay {
+				t.Fatalf("two notices of one request were said at once: %v for two posts of %v", took, delay)
+			}
+		})
+	}
+}
+
 // Only the preview role's process is told where to write the address, and
 // the operator cannot name that variable for it. A configuration without the
 // setting binds exactly as before and has no kind of notice for it.
@@ -542,9 +671,11 @@ func TestOnlyThePreviewRoleIsToldWhereToWriteTheAddress(t *testing.T) {
 	}
 }
 
-// The preview roles run commands, not models, neither is the role that
-// reports a stop, and the role that puts the page up has one process, whose
-// file is the one read back.
+// The preview roles run commands, not models, each process of theirs has a
+// time limit (a take-down without one could hold every later take-down), and
+// neither is the role that reports a stop; the role that puts the page up has
+// one process, whose file is the one read back, and the hold for taking the
+// page down, when it is written, is a whole number of hours, 1 or more.
 func TestThePreviewRolesAreCommandsAndTheUpRoleHasOneProcess(t *testing.T) {
 	check := func(cfg config) error {
 		data, err := json.Marshal(cfg)
@@ -557,11 +688,17 @@ func TestThePreviewRolesAreCommandsAndTheUpRoleHasOneProcess(t *testing.T) {
 		}
 		return run(context.Background(), []string{"--check", "--config", path}, io.Discard, io.Discard)
 	}
-	if err := check(previewStagesConfig(t)); err != nil {
-		t.Fatalf("a valid setting was refused: %v", err)
+	for _, hours := range []*int{nil, func() *int { one := 1; return &one }()} {
+		cfg := previewStagesConfig(t)
+		cfg.Workflow.Preview.HoldHours = hours
+		if err := check(cfg); err != nil {
+			t.Fatalf("a valid setting was refused (hold %v): %v", hours, err)
+		}
 	}
 	for _, variant := range []struct{ name, want string }{{"up-launches-a-model", "model"}, {"down-launches-a-model", "model"}, {"up-has-two-processes", "one process"},
-		{"up-is-the-stop-report", "intake.stop_report_role"}, {"down-is-the-stop-report", "intake.stop_report_role"}} {
+		{"up-is-the-stop-report", "intake.stop_report_role"}, {"down-is-the-stop-report", "intake.stop_report_role"},
+		{"up-without-a-time-limit", "timeout_minutes"}, {"down-without-a-time-limit", "timeout_minutes"},
+		{"zero-hold", "hold_hours is 0"}, {"negative-hold", "hold_hours is -1"}, {"too-long-hold", "from 1 to 2562047"}} {
 		t.Run(variant.name, func(t *testing.T) {
 			cfg := previewStagesConfig(t)
 			switch variant.name {
@@ -570,18 +707,25 @@ func TestThePreviewRolesAreCommandsAndTheUpRoleHasOneProcess(t *testing.T) {
 			case "down-launches-a-model":
 				cfg.Roles[5].Processes[0].ModelEnv = "MODEL"
 			case "up-has-two-processes":
-				cfg.Roles[4].Processes = append(cfg.Roles[4].Processes, chain.Process{Name: "second", Command: []string{"/bin/sh", "-c", "exit 0"}})
+				cfg.Roles[4].Processes = append(cfg.Roles[4].Processes, chain.Process{Name: "second", TimeoutMinutes: 1, Command: []string{"/bin/sh", "-c", "exit 0"}})
+			case "up-without-a-time-limit":
+				cfg.Roles[4].Processes[0].TimeoutMinutes = 0
+			case "down-without-a-time-limit":
+				cfg.Roles[5].Processes[0].TimeoutMinutes = 0
 			case "up-is-the-stop-report":
 				cfg.Intake.StopReportRole = "preview_up"
 			case "down-is-the-stop-report":
 				cfg.Intake.StopReportRole = "preview_down"
+			case "zero-hold", "negative-hold", "too-long-hold":
+				hours := map[string]int{"zero-hold": 0, "negative-hold": -1, "too-long-hold": 1000000000000}[variant.name]
+				cfg.Workflow.Preview.HoldHours = &hours
 			}
 			err := check(cfg)
 			if err == nil || !strings.Contains(err.Error(), variant.want) {
 				t.Fatalf("the setting was not refused: %v", err)
 			}
-			// The refusal says where: the setting and the role it names.
-			if !strings.Contains(err.Error(), "workflow.preview.") || !strings.Contains(err.Error(), "roles[") {
+			// The refusal says where: the setting, and the role it names.
+			if !strings.Contains(err.Error(), "workflow.preview.") || !strings.Contains(variant.name, "hold") && !strings.Contains(err.Error(), "roles[") {
 				t.Fatalf("the refusal does not say where: %v", err)
 			}
 		})
