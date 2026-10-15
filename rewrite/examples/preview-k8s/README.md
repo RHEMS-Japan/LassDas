@@ -66,9 +66,10 @@ as before, in words, with one line saying so.
    the router must answer with 403; (c) the signed URL with the password,
    which must answer 302 and set the cookie `__Host-preview`; (d)
    `PREVIEW_READY_PATH` with the password and the cookie, which the
-   application must answer with 200 to 399. The router's answers when it has
-   nothing to forward to (404, 502, 503) and an unreachable address are
-   waited out for 60 seconds.
+   application must answer with 200 to 399. What the router and the load
+   balancer answer when they have nothing to forward to yet (404, 502, 503,
+   504), and an unreachable address, are waited out for 60 seconds, in (a) as
+   in (d).
 7. Writes three lines to `TASK_PREVIEW`:
 
    ```text
