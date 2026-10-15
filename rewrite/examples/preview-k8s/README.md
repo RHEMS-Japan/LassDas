@@ -146,7 +146,7 @@ Set in the role's `env`. The engine reads none of them.
 
 | Setting | Example | Required | Meaning |
 | --- | --- | --- | --- |
-| `PREVIEW_NAME` | `sample` | yes | This installation's short name, the first part of every preview's name and host. 1 to 20 lowercase letters, digits and hyphens, starting with a letter. Two installations sharing a namespace need different names: GitHub request numbers are digits only. |
+| `PREVIEW_NAME` | `sample` | yes | This installation's short name, the first part of every preview's name and host. 1 to 20 lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen. Two installations sharing a namespace need different names: GitHub request numbers are digits only. |
 | `PREVIEW_START` | `python3 -m http.server "$PORT" --bind 0.0.0.0 --directory site` | yes (up) | The command that starts the application, run with `sh -c` in the checkout (`/src`). `PORT` is set. |
 | `PREVIEW_PORT` | `8080` | yes (up) | The port the application listens on. |
 | `PREVIEW_READY_PATH` | `/` | yes (up) | The path that answers once the application is up. It is the readiness probe and the path of the public check. |
