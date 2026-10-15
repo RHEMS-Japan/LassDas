@@ -19,7 +19,8 @@ removes the Deployment and the Service and reads back that they are gone.
 
 Exit status: 0 when the preview is up (up) or gone (down); 1 otherwise, the
 reason on the last line of the output; 2 for a wrong command line. Nothing
-is removed after a failure, except a Deployment whose dependency step failed:
+is removed after a failure, except a Deployment whose dependency step failed,
+or whose Pod had not reached its last rules container when the wait ended:
 the cleanup and down remove the rest.
 
 Credentials. The engine passes PREVIEW_K8S_TOKEN (and, to up,
@@ -80,6 +81,10 @@ RECEIVE = "tar -x -o -f - -C /src && : > /signal/received"
 ENV_FILE_LIMIT = 64 * 1024
 ARCHIVE_LIMIT = 1 << 30  # the checkout's emptyDir holds 1 GiB
 POLL = 1.0  # the install step is looked at at most this long plus one call apart
+# How much longer than the dependency step the wait has to be (r7-2): the
+# command has to be still looking when a late step fails, to remove its
+# Deployment before the kubelet runs the step again.
+INSTALL_MARGIN = 180
 CHECK_SECONDS = 60.0
 JAPAN = datetime.timezone(datetime.timedelta(hours=9))
 # What the router answers itself when it has nothing to forward to (and what
@@ -167,7 +172,11 @@ def read_settings(environment, command):
     # Checked also without PREVIEW_INSTALL: a wrong value is a wrong setting.
     # 0 would mean "no limit" to timeout, so it is refused like any value
     # outside 1 to 480.
-    install_seconds = number(environment, "PREVIEW_INSTALL_SECONDS", 1, 480, default=300)
+    install_seconds = number(environment, "PREVIEW_INSTALL_SECONDS", 1, 480, default=240)
+    if install is not None and wait_seconds < install_seconds + INSTALL_MARGIN:
+        raise Failure("PREVIEW_WAIT_SECONDS (%d) must be at least PREVIEW_INSTALL_SECONDS (%d) + %d, so that the "
+                      "command still watches the dependency step when it ends; raise the first or lower the second"
+                      % (wait_seconds, install_seconds, INSTALL_MARGIN))
     env_file = environment.get("PREVIEW_ENV_FILE") or None
     if env_file is not None:
         parts = env_file.split("/")
@@ -563,6 +572,18 @@ def stuck(pod):
     return None
 
 
+def past_the_last_rules(pod):
+    """Whether the Pod has reached its last rules container (net) or gone
+    past it: from then on no dependency step can run in it any more."""
+    if pod is None:
+        return False
+    state = statuses(pod, "initContainerStatuses").get("net", {}).get("state") or {}
+    if "running" in state or "terminated" in state:
+        return True
+    return any("running" in (entry.get("state") or {}) or "terminated" in (entry.get("state") or {})
+               for entry in statuses(pod, "containerStatuses").values())
+
+
 def describe(pod):
     if pod is None:
         return "no Pod of this change exists yet"
@@ -628,8 +649,16 @@ def wait_until_ready(cluster, settings, names, change, archive):
         if progressed:
             continue
         if time.monotonic() >= deadline:
-            raise Failure("the preview was not ready within PREVIEW_WAIT_SECONDS (%d): %s"
-                          % (settings.wait_seconds, describe(pod)))
+            reason = "the preview was not ready within PREVIEW_WAIT_SECONDS (%d): %s" % (
+                settings.wait_seconds, describe(pod))
+            if past_the_last_rules(pod):
+                raise Failure(reason)
+            # Short of net the Pod may still run, or run again, its
+            # dependency step with public addresses open, and nobody would be
+            # looking any more: the Deployment goes now.
+            problem = cluster.remove("deployment", names.name)
+            raise Failure(reason + ("; the Deployment was removed, as its Pod had not reached its last rules"
+                                    if problem is None else "; removing the Deployment failed: " + problem))
         time.sleep(POLL)
 
 

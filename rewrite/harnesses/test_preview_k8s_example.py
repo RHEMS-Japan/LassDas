@@ -67,7 +67,10 @@ POD_POLICY_REFUSAL = ("pods \"pv-sample-12-6d4cf-x2v9p\" is forbidden: Validatin
 #   apply_block  true      apply never returns
 #   pod          name      what the Pod does once the checkout has arrived:
 #                          ready, never_ready, crash, install_fails,
-#                          install_restarts; failed_create makes no Pod at all
+#                          install_restarts, install_slow (install never
+#                          ends); failed_create makes no Pod at all
+#   start        starting  the Pod stays in its first rules container
+#                          (net-hold) and never asks for the checkout
 #   delete_stuck true      delete leaves everything in place
 FAKE_CLUSTER = r'''
 import json
@@ -79,7 +82,8 @@ import time
 
 HERE = Path(__file__).resolve().parent
 OUTCOME = {"ready": "ready", "never_ready": "unready", "crash": "crashing",
-           "install_fails": "install_failed", "install_restarts": "install_restarted"}
+           "install_fails": "install_failed", "install_restarts": "install_restarted",
+           "install_slow": "installing"}
 
 
 def parent_environment():
@@ -114,10 +118,18 @@ def pod_object(deployment, pod):
     statuses = []
     for index, name in enumerate(names):
         status = {"name": name, "restartCount": 0, "state": {"waiting": {"reason": "PodInitializing"}}}
-        if phase == "receiving":
+        if phase == "starting":
+            if name == "net-hold":
+                status["state"] = {"running": {}}
+        elif phase == "receiving":
             if name == "net-hold":
                 status["state"] = done
             elif name == "receive":
+                status["state"] = {"running": {}}
+        elif phase == "installing":
+            if index < names.index("install"):
+                status["state"] = done
+            elif name == "install":
                 status["state"] = {"running": {}}
         elif phase in ("install_failed", "install_restarted"):
             if index < names.index("install"):
@@ -215,7 +227,8 @@ def apply(scenario, state, data):
             change = item["spec"]["template"]["metadata"]["annotations"]["preview-change"]
             pod = state["pods"].get(name)
             if pod is None or pod["change"] != change:
-                phase = "failed_create" if scenario.get("pod") == "failed_create" else "receiving"
+                phase = "failed_create" if scenario.get("pod") == "failed_create" else (
+                    scenario.get("start") or "receiving")
                 state["pods"][name] = {"change": change, "phase": phase}
         elif item["kind"] == "Service":
             state["services"][name] = item
@@ -617,7 +630,7 @@ class PreviewExampleTests(unittest.TestCase):
         status, output = self.up(PREVIEW_INSTALL="npm ci")
         self.assertEqual(status, 0, output)
         install = self.applied_deployments()[-1]["spec"]["template"]["spec"]["initContainers"][3]
-        self.assertEqual(install["command"][:4], ["timeout", "-s", "KILL", "300"], "the default limit is 300 seconds")
+        self.assertEqual(install["command"][:4], ["timeout", "-s", "KILL", "240"], "the default limit is 240 seconds")
 
     def test_a_bad_install_time_limit_ends_before_anything_reaches_the_cluster(self):
         for value in ("0", "481", "30s", "", "-5", "1e2", " 30", "3.5"):
@@ -627,11 +640,60 @@ class PreviewExampleTests(unittest.TestCase):
                 self.assertEqual(status, 1, output)
                 self.assertEqual(self.calls(), [], "the cluster was called")
                 self.assertIn("PREVIEW_INSTALL_SECONDS", output.strip().splitlines()[-1])
-        for value in ("1", "480"):
+        for value, wait in (("1", None), ("480", "660")):
             with self.subTest(value=value):
                 self.reset_cluster()
-                status, output = self.up(PREVIEW_INSTALL="npm ci", PREVIEW_INSTALL_SECONDS=value)
+                status, output = self.up(PREVIEW_INSTALL="npm ci", PREVIEW_INSTALL_SECONDS=value,
+                                         PREVIEW_WAIT_SECONDS=wait)
                 self.assertEqual(status, 0, output)
+
+    def test_the_wait_has_to_outlast_the_install_step(self):
+        """r7-2: the command has to outlive the dependency step, so that a
+        step that fails late still has someone to remove its Deployment."""
+        for install, wait, passes in (("300", None, False), ("240", None, True), ("480", "659", False),
+                                      ("480", "660", True), ("60", "239", False)):
+            with self.subTest(install=install, wait=wait):
+                self.reset_cluster()
+                status, output = self.up(PREVIEW_INSTALL="npm ci", PREVIEW_INSTALL_SECONDS=install,
+                                         PREVIEW_WAIT_SECONDS=wait)
+                if passes:
+                    self.assertEqual(status, 0, output)
+                    continue
+                self.assertEqual(status, 1, output)
+                self.assertEqual(self.calls(), [], "the cluster was called")
+                last = output.strip().splitlines()[-1]
+                self.assertIn("PREVIEW_WAIT_SECONDS", last)
+                self.assertIn("PREVIEW_INSTALL_SECONDS", last)
+        self.reset_cluster()
+        status, output = self.up(PREVIEW_INSTALL_SECONDS="300")
+        self.assertEqual(status, 0, "without a dependency step its limit leaves the wait alone: " + output)
+
+    def test_a_wait_that_ends_before_the_last_rules_removes_the_deployment(self):
+        """r7-2: when the wait ends with the Pod short of net (in net-hold,
+        receive, net-install or install) the Deployment goes; past net it
+        stays (the control)."""
+        self.tool.INSTALL_MARGIN = 0  # lets a 3 second wait cover a 1 second step
+        for scenario, changes, removed in (
+                ({"start": "starting"}, {}, True),
+                ({"pod": "install_slow"}, {"PREVIEW_INSTALL": "npm ci", "PREVIEW_INSTALL_SECONDS": "1"}, True),
+                ({"pod": "never_ready"}, {}, False),
+                ({"pod": "never_ready"}, {"PREVIEW_INSTALL": "npm ci", "PREVIEW_INSTALL_SECONDS": "1"}, False)):
+            with self.subTest(scenario=scenario, install=bool(changes)):
+                self.reset_cluster()
+                self.scenario(scenario)
+                status, output = self.up(PREVIEW_WAIT_SECONDS="3", **changes)
+                self.assertEqual(status, 1, output)
+                deletes = [call["argv"] for call in self.calls() if call["verb"] == "delete"]
+                last = output.strip().splitlines()[-1]
+                self.assertIn("PREVIEW_WAIT_SECONDS", last)
+                if removed:
+                    self.assertEqual(len(deletes), 1, output)
+                    self.assertIn("preview=pv-sample-12", deletes[0])
+                    self.assertNotIn("pv-sample-12", self.state()["deployments"])
+                    self.assertIn("removed", last)
+                else:
+                    self.assertEqual(deletes, [], "a Pod past its last rules was removed")
+                    self.assertIn("pv-sample-12", self.state()["deployments"])
 
     def test_settings_are_checked_before_anything_reaches_the_cluster(self):
         for name, value in (("PREVIEW_PORT", "0"), ("PREVIEW_PORT", "http"), ("PREVIEW_READY_PATH", "health"),
@@ -751,7 +813,7 @@ class PreviewExampleTests(unittest.TestCase):
                 self.scenario({"pod": scenario})
                 started = time.monotonic()
                 status, output = self.up(PREVIEW_INSTALL="npm ci", PREVIEW_INSTALL_SECONDS="60",
-                                         PREVIEW_WAIT_SECONDS="20")
+                                         PREVIEW_WAIT_SECONDS="240")
                 self.assertEqual(status, 1, output)
                 self.assertLess(time.monotonic() - started, 30)
                 deletes = [call["argv"] for call in self.calls() if call["verb"] == "delete"]
