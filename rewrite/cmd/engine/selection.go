@@ -35,6 +35,8 @@ type selectionConfig struct {
 // without capabilities or prices, so it narrows the eligible set and never
 // replaces the public catalog the judge reads. The prefix is a route to the
 // same model, not a different model and not a judgement about its answer.
+// The list may name a model with its publisher or without it; routes reads
+// both, so the operator writes the prefix and nothing about the shape.
 type gatewayConfig struct {
 	ModelsURL string `json:"models_url"`
 	KeyEnv    string `json:"key_env"`
@@ -47,9 +49,10 @@ func (s selectionConfig) fixedModel() string {
 	return strings.TrimSpace(s.Fixed)
 }
 
-// invocationPrefix is prepended when reaching the chosen model, and nowhere
-// else: eligibility, the judge's choices and the recorded model keep the
-// catalog id. An empty prefix leaves invocation exactly as configured.
+// invocationPrefix is prepended when reaching the operator's fixed model,
+// which is named as the catalog names it, and nowhere else: a selected model
+// is reached by the route its selection found. An empty prefix leaves
+// invocation exactly as configured.
 func (s selectionConfig) invocationPrefix() string {
 	if s.Gateway == nil {
 		return ""
@@ -167,12 +170,10 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 	if err != nil {
 		return "", "", err
 	}
-	excluded := map[string]bool{}
-	for _, model := range selected {
-		author, _, _ := strings.Cut(model, "/")
-		excluded[author] = true
-	}
 	choices := map[string]string{}
+	// The catalog's order is kept: of two publishers' ids that a gateway
+	// serves by one id, the first listed is the one offered.
+	var eligible []string
 	for _, raw := range snapshot.Data {
 		var model struct {
 			ID           string   `json:"id"`
@@ -185,7 +186,7 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 			return "", "", fmt.Errorf("read catalog capabilities: %w", err)
 		}
 		author, _, ok := strings.Cut(model.ID, "/")
-		if !ok || excluded[author] || !slices.Contains(s.Authors, author) || !slices.Contains(model.Supported, "tools") || !slices.Contains(model.Architecture.Output, "text") {
+		if !ok || !slices.Contains(s.Authors, author) || !slices.Contains(model.Supported, "tools") || !slices.Contains(model.Architecture.Output, "text") {
 			continue
 		}
 		var fields map[string]json.RawMessage
@@ -210,21 +211,38 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 		if err != nil {
 			return "", "", err
 		}
+		if _, listed := choices[model.ID]; !listed {
+			eligible = append(eligible, model.ID)
+		}
 		choices[model.ID] = string(data)
 	}
-	if s.Gateway != nil {
-		// Keep only ids this gateway actually serves, using a list fetched for
-		// this attempt. A failure here leaves the attempt unavailable: falling
-		// back to the bare id would invoke the account being moved away from,
-		// and an earlier list would claim availability nobody observed.
-		served, err := gatewayModelIDs(ctx, *s.Gateway)
-		if err != nil {
-			return "", "", err
-		}
-		for id := range choices {
-			if !served[s.Gateway.Prefix+id] {
-				delete(choices, id)
+	routes, err := s.routes(ctx, eligible)
+	if err != nil {
+		return "", "", err
+	}
+	// Peers are separated by the catalog's publishers. An earlier choice made
+	// by an id a gateway lists without the publisher is read back to the
+	// catalog id it stood for in this attempt; any other is read as it is.
+	standsFor := make(map[string]string, len(routes))
+	for _, id := range eligible {
+		if route, served := routes[id]; served {
+			if _, taken := standsFor[route.model]; !taken {
+				standsFor[route.model] = id
 			}
+		}
+	}
+	excluded := map[string]bool{}
+	for _, model := range selected {
+		if id, known := standsFor[model]; known {
+			model = id
+		}
+		author, _, _ := strings.Cut(model, "/")
+		excluded[author] = true
+	}
+	for id := range choices {
+		author, _, _ := strings.Cut(id, "/")
+		if _, served := routes[id]; !served || excluded[author] {
+			delete(choices, id)
 		}
 	}
 	if len(choices) == 0 {
@@ -243,7 +261,50 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 	if _, exists := choices[model]; !exists {
 		return "", "", errors.New("model selector did not choose an eligible endpoint from the current catalog")
 	}
-	return model, s.invocationPrefix(), nil
+	route := routes[model]
+	return route.model, route.prefix, nil
+}
+
+// modelRoute is how a launch reaches one catalog model: the id it records,
+// and the prefix added to that id when it is invoked.
+type modelRoute struct{ model, prefix string }
+
+// routes says how each eligible catalog id is reached, and leaves out every
+// id the configured gateway does not serve. A gateway lists a model either
+// with its publisher, prefix + "z-ai/glm-5.3", or without it, prefix +
+// "glm-5.3". The first shape is reached as it always was: the catalog id is
+// recorded and the prefix added when invoking. The second is recorded and
+// invoked as the gateway lists it, and serves only the first of the eligible
+// ids that share its name, so the judge is not offered one model twice.
+func (s selectionConfig) routes(ctx context.Context, eligible []string) (map[string]modelRoute, error) {
+	routes := make(map[string]modelRoute, len(eligible))
+	if s.Gateway == nil {
+		for _, id := range eligible {
+			routes[id] = modelRoute{model: id}
+		}
+		return routes, nil
+	}
+	// Keep only ids this gateway actually serves, using a list fetched for
+	// this attempt. A failure here leaves the attempt unavailable: falling
+	// back to the bare id would invoke the account being moved away from,
+	// and an earlier list would claim availability nobody observed.
+	served, err := gatewayModelIDs(ctx, *s.Gateway)
+	if err != nil {
+		return nil, err
+	}
+	prefix := s.Gateway.Prefix
+	taken := map[string]bool{}
+	for _, id := range eligible {
+		_, name, _ := strings.Cut(id, "/")
+		switch {
+		case served[prefix+id]:
+			routes[id] = modelRoute{model: id, prefix: prefix}
+		case served[prefix+name] && !taken[prefix+name]:
+			taken[prefix+name] = true
+			routes[id] = modelRoute{model: prefix + name}
+		}
+	}
+	return routes, nil
 }
 
 // selectionFailures and selectionErrorLimit bound what the judge reads of

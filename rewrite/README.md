@@ -1602,7 +1602,8 @@ second comment), and when it resumes after the requester's answer (a stop writte
 waits is not an answer and is not announced as one); a stage whose `announce` sentence the
 operator wrote in `workflow.stages` is announced once when it first begins.
 That sentence carries the model the launch beginning the stage chose, as
-`（モデル: <catalog id>）` without any gateway prefix; a stage that launches no
+`（モデル: <catalog id>）` without any gateway prefix, or as the gateway's own id
+when the gateway lists that model without its publisher; a stage that launches no
 model, a runtime that selects none, and a launch that could not choose one at
 all, say it as the operator wrote it. Once the request is delivered, one
 further comment lists every launch that used a model, one line per stage in
@@ -2031,7 +2032,9 @@ figure. When it is set, the remaining balance on the key named by
 `router.decision.key_env` is read before a request is launched and on every
 tick of a running one. `model_credit_url` defaults to the OpenRouter key
 endpoint above and may point at a gateway instead; it must be an HTTPS URL
-without credentials or a query. The answer's `limit_remaining` is read as the
+without credentials or a query. Where the account paying for the models has no
+such balance endpoint, leave `min_model_credit` out: there is nothing for the
+floor to read. The answer's `limit_remaining` is read as the
 balance, and a null there means the key has no limit, which never pauses
 anything. Below the floor, the running role is stopped exactly as an authorized
 stop stops it, no work is launched, and the requester is told once:
@@ -2326,11 +2329,24 @@ unavailable, that selection attempt is unavailable and returns to the existing
 recovery loop; nothing falls back to invoking the un-prefixed id, which would
 bill the account the operator is moving away from.
 
+A gateway lists a catalog model in one of two shapes, and both are read with
+no further setting: with its publisher, as `prefix` + `z-ai/glm-5.3`, or
+without it, as `prefix` + `glm-5.3`, which is how a provider that serves models
+under their own names is listed. A model listed with its publisher is reached
+as described here, and that shape wins when a gateway lists both. A model
+listed only without its publisher is invoked, recorded as `model` and named to
+the requester by the gateway's id, `tokenhub/glm-5.3` for the prefix
+`tokenhub/`, with no `model_prefix` beside it. When two publishers' catalog ids
+share that name, only the one listed first in the catalog is offered, so the
+judge never sees one gateway model twice. A catalog model the gateway lists in
+neither shape is not offered.
+
 `prefix + id` is a route to the same model, not a different model and not a
 mark of quality. The judge is offered bare catalog ids, publisher separation in
 a parallel review group still compares publishers rather than the gateway name,
 and the runtime history records the chosen id as `model` with the route beside
-it as `model_prefix`. A gateway configured without `models_url`, `key_env` or
+it as `model_prefix` (the gateway's own id alone, for a model it lists without
+its publisher). A gateway configured without `models_url`, `key_env` or
 `prefix` is refused before any request is accepted, because a half-configured
 one would quietly keep invoking the account being moved away from. Without
 `model_selection.gateway`, none of this applies and invocation is unchanged.

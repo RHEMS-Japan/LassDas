@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -609,5 +610,294 @@ func TestFixedModelWithoutAPublisherIsRefusedBeforeIntake(t *testing.T) {
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatal("refused configuration created the queue")
+	}
+}
+
+// tokenhubSelector reaches the catalog's models through a gateway that lists
+// them without the publisher: "tokenhub/glm-5.3" for the catalog's
+// "z-ai/glm-5.3".
+func tokenhubSelector(t *testing.T) selectionConfig {
+	t.Helper()
+	selector := gatewaySelector(t)
+	selector.Authors = []string{"deepseek", "z-ai"}
+	selector.Gateway.Prefix = "tokenhub/"
+	return selector
+}
+
+// gatewayHosts answers the public catalog with catalog, in that order, the
+// gateway list with served, and the judge with the first of prefer it was
+// offered. Every offer is kept, sorted, in the order the judge was asked.
+func gatewayHosts(t *testing.T, catalog, served, prefer []string, offers *[][]string) roundTripFunc {
+	t.Helper()
+	return func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Host {
+		case "openrouter.ai":
+			var data []any
+			for _, id := range catalog {
+				data = append(data, selectionModel(id))
+			}
+			return selectionReply(request, 200, map[string]any{"data": data}), nil
+		case "gateway.example":
+			var data []any
+			for _, id := range served {
+				data = append(data, gatewayEntry(id))
+			}
+			return selectionReply(request, 200, map[string]any{"data": data}), nil
+		case "selection.example":
+			offered := offeredChoices(t, request)
+			*offers = append(*offers, offered)
+			for _, id := range prefer {
+				if slices.Contains(offered, id) {
+					return selectionReply(request, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": id}}}), nil
+				}
+			}
+			return catalogReply(request, 503, "none of the preferred models was offered"), nil
+		}
+		return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
+	}
+}
+
+// runRoleOnce runs one request that the router sends to role once and then
+// finishes, and returns its saved history, as read and as stored.
+func runRoleOnce(t *testing.T, selector selectionConfig, role chain.Role, hosts roundTripFunc) (chain.State, string, error) {
+	t.Helper()
+	routes := 0
+	useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host != "routing.example" {
+			return hosts(request)
+		}
+		routes++
+		choice := role.Name
+		if routes > 1 {
+			choice = "done"
+		}
+		return selectionReply(request, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
+	})
+	var cfg config
+	cfg.Router.Mode = "jev"
+	cfg.Router.Decision = chain.Jev{URL: "https://routing.example/decisions", Model: "router", KeyEnv: "SELECTION_TEST_KEY"}
+	cfg.ModelSelection = &selector
+	cfg.Roles = []chain.Role{role}
+	dir := t.TempDir()
+	configPath, requestPath := filepath.Join(dir, "operator.json"), filepath.Join(dir, "request.txt")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(requestPath, []byte("original request"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var log bytes.Buffer
+	runDir := filepath.Join(dir, "run")
+	runErr := run(ctx, []string{"--config", configPath, "--request", requestPath, "--run-dir", runDir}, io.Discard, &log)
+	if runErr != nil {
+		runErr = fmt.Errorf("%w\n%s", runErr, &log)
+	}
+	raw, err := os.ReadFile(filepath.Join(runDir, "history.json"))
+	if err != nil {
+		t.Fatalf("no history (%v): %v", runErr, err)
+	}
+	var state chain.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	return state, string(raw), runErr
+}
+
+// A gateway that lists its models without the publisher, as "tokenhub/glm-5.3"
+// for the catalog's "z-ai/glm-5.3", served nothing before: every candidate was
+// looked for as "tokenhub/z-ai/glm-5.3", none was found, and no role could
+// start. The catalog still decides what is eligible and is what the judge
+// reads; the launch is invoked and recorded by the id the gateway lists.
+func TestAGatewayThatListsModelsWithoutThePublisherServesThem(t *testing.T) {
+	var offers [][]string
+	worker := chain.Process{Name: "worker", ModelEnv: "CHOSEN_MODEL", Command: []string{"/bin/sh", "-c", `test -z "$GATEWAY_TEST_KEY" || exit 9; printf '%s' "$CHOSEN_MODEL"`}}
+	state, raw, err := runRoleOnce(t, tokenhubSelector(t), chain.Role{Name: "implement", Purpose: "implement", Processes: []chain.Process{worker}},
+		gatewayHosts(t, []string{"deepseek/deepseek-v4-pro", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"},
+			[]string{"tokenhub/deepseek-v4-pro", "tokenhub/glm-5.3", "tokenhub/kling-video-v3"}, []string{"z-ai/glm-5.3"}, &offers))
+	if want := [][]string{{"deepseek/deepseek-v4-pro", "z-ai/glm-5.3"}}; !reflect.DeepEqual(offers, want) {
+		t.Fatalf("the judge was offered %v, want %v; history %+v", offers, want, state.History)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.History) != 1 {
+		t.Fatalf("unexpected history: %+v", state.History)
+	}
+	if record := state.History[0]; record.Output != "tokenhub/glm-5.3" || record.Model != "tokenhub/glm-5.3" || record.ModelPrefix != "" {
+		t.Fatalf("invoked with %q, recorded model=%q prefix=%q", record.Output, record.Model, record.ModelPrefix)
+	}
+	if strings.Contains(raw, "synthetic-gateway-only") {
+		t.Fatal("stored history exposed the gateway credential")
+	}
+}
+
+// Routing is invoked the same way, by the id the gateway lists, and the log
+// names that id once rather than the prefix twice.
+func TestRoutingReachesAModelByTheIDAGatewayListsWithoutThePublisher(t *testing.T) {
+	selector := tokenhubSelector(t)
+	var observed []string
+	selector.observe = func(message string) { observed = append(observed, message) }
+	var offers [][]string
+	hosts := gatewayHosts(t, []string{"z-ai/glm-5.3"}, []string{"tokenhub/glm-5.3"}, []string{"z-ai/glm-5.3"}, &offers)
+	chats := 0
+	useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host != "routing.example" {
+			return hosts(request)
+		}
+		chats++
+		var input struct{ Model string }
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			return nil, err
+		}
+		if input.Model != "tokenhub/glm-5.3" {
+			t.Errorf("routing reached %q, not the id the gateway lists", input.Model)
+		}
+		return routingSelectionReply(request, chain.Assignment{Role: "review", Instruction: "Inspect the work."}), nil
+	})
+	router := selectedChatRouter{selection: selector, chat: chain.ChatRouter{
+		Service: chain.Jev{URL: "https://routing.example/chat", Model: "never-use-pinned", KeyEnv: "SELECTION_TEST_KEY"},
+		Roles:   map[string]string{"review": "Independent review"},
+	}}
+	assignment, err := router.Next(context.Background(), chain.State{Request: "original request"})
+	if err != nil || assignment.Role != "review" || chats != 1 {
+		t.Fatalf("assignment=%+v err=%v chats=%d offers=%v", assignment, err, chats, offers)
+	}
+	if len(observed) != 1 || !strings.Contains(observed[0], "tokenhub/glm-5.3") || strings.Contains(observed[0], "tokenhub/tokenhub/") {
+		t.Fatalf("routing log: %v", observed)
+	}
+}
+
+// A gateway that lists a model both ways is reached the way the catalog names
+// it, as it always was, so an operator whose gateway lists the publisher sees
+// nothing change.
+func TestAGatewayListingBothShapesKeepsThePublisherShape(t *testing.T) {
+	selector := gatewaySelector(t)
+	selector.Authors = []string{"z-ai"}
+	selector.Gateway.Prefix = "gatewayprov/"
+	var offers [][]string
+	worker := chain.Process{Name: "worker", ModelEnv: "CHOSEN_MODEL", Command: []string{"/bin/sh", "-c", `printf '%s' "$CHOSEN_MODEL"`}}
+	state, _, err := runRoleOnce(t, selector, chain.Role{Name: "implement", Purpose: "implement", Processes: []chain.Process{worker}},
+		gatewayHosts(t, []string{"z-ai/glm-5.3"}, []string{"gatewayprov/glm-5.3", "gatewayprov/z-ai/glm-5.3"}, []string{"z-ai/glm-5.3"}, &offers))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(offers, [][]string{{"z-ai/glm-5.3"}}) || len(state.History) != 1 {
+		t.Fatalf("offers=%v history=%+v", offers, state.History)
+	}
+	if record := state.History[0]; record.Output != "gatewayprov/z-ai/glm-5.3" || record.Model != "z-ai/glm-5.3" || record.ModelPrefix != "gatewayprov/" {
+		t.Fatalf("invoked with %q, recorded model=%q prefix=%q", record.Output, record.Model, record.ModelPrefix)
+	}
+}
+
+// Peers in a review group run on different publishers. Behind an id without
+// the publisher the publisher is the catalog's: the second reviewer must not
+// run another z-ai model because the first one's id begins with "tokenhub".
+func TestPeersReachedByIDsWithoutThePublisherStillDifferInPublisher(t *testing.T) {
+	var offers [][]string
+	worker := chain.Process{ModelEnv: "CHOSEN_MODEL", Command: []string{"/bin/sh", "-c", `printf '%s' "$CHOSEN_MODEL"`}}
+	first, second := worker, worker
+	first.Name, second.Name = "reviewer-a", "reviewer-b"
+	catalog := []string{"deepseek/deepseek-v4-pro", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"}
+	served := []string{"tokenhub/deepseek-v4-pro", "tokenhub/glm-5.3", "tokenhub/glm-5.3-flash"}
+	state, _, err := runRoleOnce(t, tokenhubSelector(t), chain.Role{Name: "review", Purpose: "independent review", Processes: []chain.Process{first, second}},
+		gatewayHosts(t, catalog, served, []string{"z-ai/glm-5.3", "z-ai/glm-5.3-flash", "deepseek/deepseek-v4-pro"}, &offers))
+	if want := [][]string{catalog, {"deepseek/deepseek-v4-pro"}}; !reflect.DeepEqual(offers, want) {
+		t.Fatalf("the judge was offered %v, want %v; history %+v", offers, want, state.History)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var invoked []string
+	for _, record := range state.History {
+		invoked = append(invoked, record.Speaker+"="+record.Output)
+	}
+	if want := []string{"reviewer-a=tokenhub/glm-5.3", "reviewer-b=tokenhub/deepseek-v4-pro"}; !reflect.DeepEqual(invoked, want) {
+		t.Fatalf("peers ran %v, want %v", invoked, want)
+	}
+}
+
+// An earlier choice that names no model in this catalog, such as one the
+// gateway or the catalog has since withdrawn, says nothing about a publisher
+// and excludes none.
+func TestAGatewayIDThatNamesNoCatalogModelExcludesNoPublisher(t *testing.T) {
+	var offers [][]string
+	selector := tokenhubSelector(t)
+	catalog := []string{"deepseek/deepseek-v4-pro", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"}
+	useCatalogTransport(t, gatewayHosts(t, catalog, []string{"tokenhub/deepseek-v4-pro", "tokenhub/glm-5.3", "tokenhub/glm-5.3-flash"}, []string{"z-ai/glm-5.3"}, &offers))
+	model, prefix, err := selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, []string{"tokenhub/unknown"})
+	if err != nil || model != "tokenhub/glm-5.3" || prefix != "" {
+		t.Fatalf("model=%q prefix=%q err=%v offers=%v", model, prefix, err, offers)
+	}
+	if !reflect.DeepEqual(offers, [][]string{catalog}) {
+		t.Fatalf("the judge was offered %v, want %v", offers, catalog)
+	}
+}
+
+// Two publishers can list a model under the same name, and a gateway that
+// lists ids without the publisher serves both by one id. The judge is offered
+// that id once, as the publisher first in the catalog lists it, and the next
+// peer is not offered it again under the other publisher.
+func TestOneGatewayIDIsOfferedOnceWhenTwoPublishersShareItsName(t *testing.T) {
+	selector := tokenhubSelector(t)
+	selector.Authors = []string{"maker-one", "maker-two"}
+	var offers [][]string
+	worker := chain.Process{ModelEnv: "CHOSEN_MODEL", Command: []string{"/bin/sh", "-c", `printf '%s' "$CHOSEN_MODEL"`}}
+	first, second := worker, worker
+	first.Name, second.Name = "reviewer-a", "reviewer-b"
+	// maker-two comes first in the catalog, so it holds the shared name.
+	catalog := []string{"maker-two/shared", "maker-one/shared", "maker-one/other"}
+	state, _, err := runRoleOnce(t, selector, chain.Role{Name: "review", Purpose: "independent review", Processes: []chain.Process{first, second}},
+		gatewayHosts(t, catalog, []string{"tokenhub/shared", "tokenhub/other"}, []string{"maker-one/shared", "maker-two/shared", "maker-one/other"}, &offers))
+	if want := [][]string{{"maker-one/other", "maker-two/shared"}, {"maker-one/other"}}; !reflect.DeepEqual(offers, want) {
+		t.Fatalf("the judge was offered %v, want %v; history %+v", offers, want, state.History)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var invoked []string
+	for _, record := range state.History {
+		invoked = append(invoked, record.Speaker+"="+record.Output)
+	}
+	if want := []string{"reviewer-a=tokenhub/shared", "reviewer-b=tokenhub/other"}; !reflect.DeepEqual(invoked, want) {
+		t.Fatalf("peers ran %v, want %v", invoked, want)
+	}
+}
+
+// The requester is told the model by the id its launch was invoked with,
+// through the queue, as the stage is declared.
+func TestTheDeclaredModelIsTheIDAGatewayListsWithoutThePublisher(t *testing.T) {
+	cfg := declaringRun(t, `printf '%s' "$MODEL" > invoked`)
+	selector := tokenhubSelector(t)
+	cfg.ModelSelection = &selector
+	lookEvery(t, 20*time.Millisecond)
+	var offers [][]string
+	hosts := gatewayHosts(t, []string{"z-ai/glm-5.3"}, []string{"tokenhub/glm-5.3"}, []string{"z-ai/glm-5.3"}, &offers)
+	fixture := &noticeTracker{}
+	fixture.install(t, func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Host {
+		case "openrouter.ai", "gateway.example", "selection.example":
+			return hosts(request)
+		}
+		return alwaysChoose("done")(request)
+	})
+	root, directory := noticeJob(t, chain.State{})
+	startStopQueue(t, cfg, root, time.Minute, io.Discard)
+	waitFor(t, func() bool { return len(loadJobState(t, directory).History) > 0 })
+	if record := loadJobState(t, directory).History[0]; record.Model != "tokenhub/glm-5.3" || record.ModelPrefix != "" {
+		t.Fatalf("the first launch was recorded as %+v", record)
+	}
+	if invoked, err := os.ReadFile(filepath.Join(directory, "workspace", "invoked")); err != nil || string(invoked) != "tokenhub/glm-5.3" {
+		t.Fatalf("the work was invoked with %q (%v)", invoked, err)
+	}
+	const want = "作業を始めます。（モデル: tokenhub/glm-5.3）"
+	waitFor(t, func() bool { return fixture.count(want) > 0 })
+	if got := fixture.all(); len(got) != 1 || got[0] != want {
+		t.Fatalf("the requester was told %q", got)
 	}
 }
