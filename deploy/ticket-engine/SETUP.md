@@ -1381,8 +1381,13 @@ First finish the settings and run the engine's `--check` (section 4). Then
 the following read-only GET checks can be run in the prepared runtime. They
 make no inference or tracker writes; the gateway may have its own policy for
 catalogue access. They compare current tool/text models from configured
-publishers with the gateway's **exact prefixed ids**, and compare configured
-fallback and reviewer ids with that same current served list. They do not prove that a
+publishers with the gateway's ids the way the engine does, and list the ids the
+engine would invoke: `prefix` + publisher/model, or else `prefix` + the model
+name alone, with upper and lower case not told apart. A name alone counts only
+when its `owned_by` names that publisher among `model_selection.authors`, or
+names none of them and no other catalog id ends in that name. They also compare
+configured fallback and reviewer ids, exactly as written, with that same
+current served list. They do not prove that a
 model can actually answer, that the account has credit, or that enough
 independent publishers are available for all your simultaneous roles.
 
@@ -1421,14 +1426,35 @@ def get(address, key=""):
 key = os.environ.get(gateway["key_env"], "")
 if not key or "\r" in key or "\n" in key:
     sys.exit("gateway credential is unavailable")
-served = {row["id"] for row in get(gateway["models_url"], key)}
+rows = get(gateway["models_url"], key)
+served = {row["id"] for row in rows}
+listed = {}
+for row in rows:
+    listed.setdefault(row["id"].lower(), row)
 public = get("https://openrouter.ai/api/v1/models?output_modalities=all")
-prefix = gateway["prefix"]
-matches = sorted(prefix + row["id"] for row in public
-                 if row["id"].split("/", 1)[0] in selection["authors"]
+prefix = gateway["prefix"].lower()
+authors = [author.lower() for author in selection["authors"]]
+named = {}
+for row in public:
+    if "/" in row["id"]:
+        named.setdefault(row["id"].split("/", 1)[1].lower(), set()).add(row["id"].lower())
+def invoked(model):
+    found = listed.get(prefix + model.lower())
+    if found:
+        return found["id"]
+    author, name = model.lower().split("/", 1)
+    found = listed.get(prefix + name)
+    if not found:
+        return None
+    owner = found.get("owned_by")
+    owner = owner.strip().lower() if isinstance(owner, str) else ""
+    if owner in authors:
+        return found["id"] if owner == author else None
+    return found["id"] if len(named[name]) == 1 else None
+matches = sorted(filter(None, (invoked(row["id"]) for row in public
+                 if "/" in row["id"] and row["id"].split("/", 1)[0] in selection["authors"]
                  and "tools" in row.get("supported_parameters", [])
-                 and "text" in row.get("architecture", {}).get("output_modalities", [])
-                 and prefix + row["id"] in served)
+                 and "text" in row.get("architecture", {}).get("output_modalities", []))))
 print(json.dumps({"served": len(served), "tool_text_matches": len(matches), "first_20_matches": matches[:20]}))
 if not matches:
     sys.exit("no current matching models; check the prefix and eligible publishers")
