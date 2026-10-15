@@ -85,11 +85,11 @@ type Processes struct {
 	// Chosen, when set, is told which model this launch will use: the model
 	// as its selection named it, without the invocation prefix, right after
 	// the selection succeeded and before the child starts. It is how the
-	// runtime can say at the start
-	// of a stage which model is working on it, which the history cannot
-	// answer because it is saved only once the launch has returned. It runs
-	// in the launching goroutine, so it must not be slow, and it judges
-	// nothing: a failed selection launches nothing and tells it nothing.
+	// runtime can say at the start of a stage which model is working on it,
+	// which the history cannot answer because it is saved only once the
+	// launch has returned. It runs in the launching goroutine, so it must not
+	// be slow, and it judges nothing: a failed selection launches nothing and
+	// tells it nothing.
 	// Launch tells one launch of the role from the next: it is how many
 	// records the history held when this launch began, which every process
 	// of the launch shares and every launch adds to.
