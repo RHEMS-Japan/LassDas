@@ -14,14 +14,17 @@ instead.
 ## What the requester sees
 
 Before the question that asks whether to deliver a change that alters what
-people see, the engine posts one comment with the preview's address, for
-example `https://sample-12.preview.example.com/`, and until when it can be
-opened. The requester opens it in a browser, phone included, signs in with
-the shared user name and password they were given when the installation was
-set up, and answers the question. When the request is delivered or stopped
-the preview is removed, and the address shows a page that says the preview
-has ended and how to ask for it again. When no preview could be made the
-question is asked as before, in words, with one line saying so.
+people see, the engine posts one comment with the preview's signed URL, for
+example `https://sample-12.preview.example.invalid/_preview/open?t=1800000000.Ml7L…`,
+and until when it can be opened. The requester opens it in a browser, phone
+included, and signs in with the shared user name and password they were
+given when the installation was set up; the address bar then shows the
+preview's own `/`. The URL opens this request's preview only, and only
+until its end (see [The signed URL](#the-signed-url)). The requester
+answers the question. When the request is delivered or stopped the preview
+is removed, and the address shows a page that says the preview has ended and
+how to ask for it again. When no preview could be made the question is asked
+as before, in words, with one line saying so.
 
 ## What runs where
 
@@ -52,15 +55,20 @@ question is asked as before, in words, with one line saying so.
    A ReplicaSet the cluster refused to create a Pod for (a policy, the quota)
    ends it at once too, with the cluster's reason.
 5. Waits until the Pod is ready and the Service has a ready endpoint.
-6. Opens the public address of `PREVIEW_READY_PATH` twice, as the requester
-   would: without credentials, which must answer 401, and as the check user
-   (`PREVIEW_CHECK_AUTH`), which must answer 200 to 399. The router's own
-   answers (404, 502, 503) and an unreachable address are waited out for 60
-   seconds.
+6. Makes the signed URL for the preview's end, and opens the public address
+   as the requester would: (a) `PREVIEW_READY_PATH` without the password,
+   which the router must answer with 401; (b) the same with the check user's
+   password (`PREVIEW_CHECK_AUTH`) but without the signed URL's cookie, which
+   the router must answer with 403; (c) the signed URL with the password,
+   which must answer 302 and set the cookie `__Host-preview`; (d)
+   `PREVIEW_READY_PATH` with the password and the cookie, which the
+   application must answer with 200 to 399. The router's answers when it has
+   nothing to forward to (404, 502, 503) and an unreachable address are
+   waited out for 60 seconds.
 7. Writes three lines to `TASK_PREVIEW`:
 
    ```text
-   https://sample-12.preview.example.com/
+   https://sample-12.preview.example.invalid/_preview/open?t=1800000000.Ml7L0aF-Nfihd1zfYSG9eFn5rnEHt8KkUXtD7fqN4bA
    この画面は 2026-10-17 18:00 (日本時間) まで開けます
    動いている変更の識別子: 3f9c0a1b2d4e
    ```
@@ -209,11 +217,12 @@ setting. As the engine's design writes it:
                   "--network", "inherit", "--", "/opt/ticket-automation/operator/preview.py", "up"],
       "env": { "PREVIEW_NAME": "sample", "PREVIEW_START": "python3 -m http.server \"$PORT\" --bind 0.0.0.0 --directory site",
                "PREVIEW_PORT": "8080", "PREVIEW_READY_PATH": "/", "PREVIEW_LIFETIME_HOURS": "72",
-               "PREVIEW_IMAGE": "python:3.12-slim", "PREVIEW_DOMAIN": "preview.example.com",
+               "PREVIEW_IMAGE": "python:3.12-slim", "PREVIEW_DOMAIN": "preview.example.invalid",
                "PREVIEW_NAMESPACE": "preview-apps", "PREVIEW_K8S_SERVER": "https://<api-server>",
                "PREVIEW_K8S_CA_FILE": "/opt/ticket-automation/operator/preview-k8s-ca.crt",
                "PREVIEW_NET_IMAGE": "<rules-image>@sha256:<digest>" },
-      "secrets": { "PREVIEW_K8S_TOKEN": "PREVIEW_K8S_TOKEN", "PREVIEW_CHECK_AUTH": "PREVIEW_CHECK_AUTH" },
+      "secrets": { "PREVIEW_K8S_TOKEN": "PREVIEW_K8S_TOKEN", "PREVIEW_CHECK_AUTH": "PREVIEW_CHECK_AUTH",
+                   "PREVIEW_SIGNING_KEY": "PREVIEW_SIGNING_KEY" },
       "timeout_minutes": 10 } ] },
   { "name": "preview_down", "purpose": "Remove the request's preview.",
     "processes": [ { "name": "preview-down",
@@ -259,7 +268,7 @@ Set in the role's `env`. The engine reads none of them.
 | `PREVIEW_INSTALL_SECONDS` | `300` | no (`300`) | The step's time limit: digits only, 1 to 480. Anything else ends `up` before the cluster is called. |
 | `PREVIEW_ENV_FILE` | `.env.preview` | no | A file in the checkout, relative to it, of `KEY=VALUE` lines for the application's environment. No secrets: the file is in the branch. At most 64 KiB; a line that is not `KEY=VALUE` (blank lines and `#` lines aside) ends `up`. `PORT` is always the script's. |
 | `PREVIEW_WAIT_SECONDS` | `420` | no (420 for up, 60 for down) | How long to wait for the Pod to be ready (up) or for the objects to be gone (down). |
-| `PREVIEW_DOMAIN` | `preview.example.com` | yes (up) | The domain under which every preview gets one label: `sample-12.preview.example.com`. The same for every installation using the router. |
+| `PREVIEW_DOMAIN` | `preview.example.invalid` | yes (up) | The domain under which every preview gets one label: `sample-12.preview.example.invalid`. The same for every installation using the router. |
 | `PREVIEW_NAMESPACE` | `preview-apps` | yes | The preview namespace. |
 | `PREVIEW_K8S_SERVER` | `https://<api-server>` | yes | The cluster's API server address. |
 | `PREVIEW_K8S_CA_FILE` | `/opt/ticket-automation/operator/preview-k8s-ca.crt` | yes | The cluster's CA certificate (not a secret), by its absolute path. |
@@ -281,12 +290,13 @@ hash, so two long request numbers never share a preview.
 | --- | --- | --- |
 | `PREVIEW_K8S_TOKEN` | The token of the ServiceAccount that may manage Deployments and Services in the preview namespace, and nothing outside it. | up and down |
 | `PREVIEW_CHECK_AUTH` | `user:password` of the router's second user, kept for this check. The requesters' user is a different one and is never given to the engine. | up |
+| `PREVIEW_SIGNING_KEY` | The key the signed URLs are signed with, the same value the router holds (at least 32 characters; `openssl rand -base64 32` makes 44). | up |
 
 What the command does with them:
 
 - Before anything else it removes every name listed in
-  `TASK_CREDENTIAL_NAMES` (and these two, listed or not) from its
-  environment, writes the two values into a pipe and starts itself again
+  `TASK_CREDENTIAL_NAMES` (and these three, listed or not) from its
+  environment, writes the values into a pipe and starts itself again
   without them, reading them from the pipe. `/proc/self/environ` shows the
   environment a program started with, so removing a value is not enough;
   after the restart the running program's environment holds none.
@@ -298,7 +308,35 @@ What the command does with them:
   time limit. It is never written under `TASK_HOME`, which outlives the
   launch.
 - Every line it prints has the credential values (and the encoded check
-  header) replaced by `[credential]`. The engine replaces them as well.
+  header) replaced by `[credential]`. The engine replaces them as well. It
+  never prints the signed URL: that goes to `TASK_PREVIEW` only.
+- The signing key is used in memory only, to sign; it is written nowhere.
+
+## The signed URL
+
+Every preview's address carries a signature, so knowing the domain (and the
+shared password) is not enough to open another request's preview, and an
+address stops opening at the preview's end.
+
+- **Token:** `<end>.<signature>`. `<end>` is the preview's end in Unix
+  seconds, the same moment as the lifetime the Deployment carries.
+  `<signature>` is HMAC-SHA256 with `PREVIEW_SIGNING_KEY` over the host, a
+  newline and `<end>` (`sample-12.preview.example.invalid\n1800000000`),
+  written in base64url **without `=` padding**: 43 characters of
+  `A-Z a-z 0-9 - _`. The host is lowercase and has no port, as nginx's
+  `$host` is.
+- **URL:** `https://<host>/_preview/open?t=<token>`, written by `up` as the
+  first line of `TASK_PREVIEW`. A lifetime extended (the same change brought
+  up again) gets a new URL with the new end; the old one stops at the old
+  end.
+- **The router** checks it after the password: the signature made again
+  from the request's `Host` and `<end>` has to match (compared in constant
+  time), and `<end>` has to be later than now. Then it sets the cookie
+  `__Host-preview` (Secure, HttpOnly, SameSite=Lax, Path=/, no Domain, until
+  the end) and answers 302 to `/`, with `Referrer-Policy: no-referrer`.
+  Every other path needs the password and that cookie; without them it
+  answers 401 and 403. Paths under `/_preview/` belong to the router and
+  never reach the application.
 
 ## Exit status and output
 
@@ -518,6 +556,12 @@ handed to them again outside the tracker.
   holder chooses the image, whose `timeout` need not be real, and can make the
   Deployment again. What stays bounded for them is the policy: no privilege,
   no private address, the quota.
+- The signed URL is posted on the tracker: whoever can read the request and
+  knows the shared password can open that request's preview until its end.
+  It also stays in the requester's browser history, and a load balancer
+  access log records it if one is turned on. Changing the signing key is the
+  only way to stop a URL before its end, and it stops every open preview.
+- An application cannot use paths under `/_preview/`: the router keeps them.
 - One password file for every installation the router serves: a requester of
   one installation can open another's previews.
 - Nothing stops other Pods of the cluster from connecting to a preview: the

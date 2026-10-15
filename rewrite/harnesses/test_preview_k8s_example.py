@@ -11,6 +11,8 @@ import contextlib
 import datetime
 import http.server
 import importlib.util
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -25,6 +27,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "preview-k8s"
 TOOL = EXAMPLE / "preview.py"
@@ -34,7 +37,21 @@ TOKEN = "fake-cluster-token-4b1e9d0c"
 CHECK_PASSWORD = "fake-check-password-93a7"
 CHECK_AUTH = "preview-check:" + CHECK_PASSWORD
 CHECK_HEADER = base64.b64encode(CHECK_AUTH.encode()).decode()
-LEAKS = (TOKEN, CHECK_PASSWORD, CHECK_HEADER)
+SIGNING_KEY = "fake-signing-key-5f0e9d8c7b6a5948372615f4e3d2c1b0"
+LEAKS = (TOKEN, CHECK_PASSWORD, CHECK_HEADER, SIGNING_KEY)
+# Signatures the router's njs computes (njs 1.0.1, crypto.createHmac sha256,
+# digest base64url: no "=" padding) for these keys, hosts and ends. The
+# script has to produce the same text, or the router refuses its URLs.
+SIGNATURES = [
+    ("vector-key-0123456789abcdef0123456789abcdef", "sample-12.preview.example.invalid", "1800000000",
+     "Ml7L0aF-Nfihd1zfYSG9eFn5rnEHt8KkUXtD7fqN4bA"),
+    ("vector-key-0123456789abcdef0123456789abcdef", "demo-proj-81.preview.example.invalid", "1800003600",
+     "DBxLHYZ_7VNgI87baVhEmKrXT0xxMld7Y67Vjjw3rQA"),
+    ("another-vector-key-fedcba9876543210fedcba98", "sample-12.preview.example.invalid", "1800000000",
+     "rEio7QRcTkiaN0I-tMhQpaS6kRJW_E942gqzeIJlYmQ"),
+    ("vector-key-0123456789abcdef0123456789abcdef", "sample-12.preview.example.invalid", "1800000001",
+     "dTPicOyJ_MYBv1dwHQwXwCrnDp-mH4-lFF3Gp8O6Ooc"),
+]
 NET_IMAGE = "registry.example.com/net@sha256:" + "0" * 64
 POD_POLICY_REFUSAL = ("pods \"pv-sample-12-6d4cf-x2v9p\" is forbidden: ValidatingAdmissionPolicy "
                       "'preview-pod-shape' with binding 'preview-pod-shape' denied request: "
@@ -341,8 +358,9 @@ class PreviewExampleTests(unittest.TestCase):
         self.git("add", "-A")
         # A file outside the checkout that holds the token: what a link to
         # /proc/self/environ or to another secret would let a reader see.
-        (self.outside / "environ").write_text("PREVIEW_K8S_TOKEN=%s\n" % TOKEN)
-        (self.outside / "inner.txt").write_text("LEAKED=%s\n" % TOKEN)
+        (self.outside / "environ").write_text("PREVIEW_K8S_TOKEN=%s\nPREVIEW_SIGNING_KEY=%s\n"
+                                              % (TOKEN, SIGNING_KEY))
+        (self.outside / "inner.txt").write_text("LEAKED=%s %s\n" % (TOKEN, SIGNING_KEY))
         self.ca = self.base / "ca.crt"
         self.ca.write_text("fake certificate authority for these tests\n")
         self.write_fake("kubectl", FAKE_CLUSTER.replace("@REFUSAL@", repr(POD_POLICY_REFUSAL)))
@@ -380,7 +398,7 @@ class PreviewExampleTests(unittest.TestCase):
             "PREVIEW_NAME": "sample",
             "PREVIEW_START": 'python3 -m http.server "$PORT" --bind 0.0.0.0 --directory site',
             "PREVIEW_PORT": "8080", "PREVIEW_READY_PATH": "/", "PREVIEW_LIFETIME_HOURS": "72",
-            "PREVIEW_IMAGE": "python:3.12-slim", "PREVIEW_DOMAIN": "preview.example.com",
+            "PREVIEW_IMAGE": "python:3.12-slim", "PREVIEW_DOMAIN": "preview.example.invalid",
             "PREVIEW_NAMESPACE": "preview-apps", "PREVIEW_K8S_SERVER": "https://cluster.example.com",
             "PREVIEW_K8S_CA_FILE": str(self.ca), "PREVIEW_NET_IMAGE": NET_IMAGE,
         }
@@ -389,22 +407,24 @@ class PreviewExampleTests(unittest.TestCase):
 
     def with_credentials(self, environment):
         return dict(environment, PREVIEW_K8S_TOKEN=TOKEN, PREVIEW_CHECK_AUTH=CHECK_AUTH,
-                    TASK_CREDENTIAL_NAMES="PREVIEW_CHECK_AUTH:PREVIEW_K8S_TOKEN")
+                    PREVIEW_SIGNING_KEY=SIGNING_KEY,
+                    TASK_CREDENTIAL_NAMES="PREVIEW_CHECK_AUTH:PREVIEW_K8S_TOKEN:PREVIEW_SIGNING_KEY")
 
     def credentials(self):
-        return {"PREVIEW_K8S_TOKEN": TOKEN, "PREVIEW_CHECK_AUTH": CHECK_AUTH}
+        return {"PREVIEW_K8S_TOKEN": TOKEN, "PREVIEW_CHECK_AUTH": CHECK_AUTH, "PREVIEW_SIGNING_KEY": SIGNING_KEY}
 
-    def passing_check(self, url, auth, **_):
-        self.checks.append((url, auth))
+    def passing_check(self, url, auth, signed=None, **_):
+        self.checks.append((url, auth, signed))
         return "401 without credentials, 200 with them"
 
-    def up(self, tool=None, check=None, **changes):
+    def up(self, tool=None, check=None, credentials=None, **changes):
         """The up command in this process, its credentials handed over as
         after the restart without them."""
         tool = tool or self.tool
         output = io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-            status = tool.up(self.environment(**changes), self.credentials(), check=check or self.passing_check)
+            status = tool.up(self.environment(**changes), credentials or self.credentials(),
+                             check=check or self.passing_check)
         return status, output.getvalue()
 
     def down(self, **changes):
@@ -475,15 +495,18 @@ class PreviewExampleTests(unittest.TestCase):
     # -- names -----------------------------------------------------------
 
     def test_names_come_from_the_site_and_the_request_number(self):
-        names = self.tool.preview_names("sample", "12", "preview.example.com")
+        names = self.tool.preview_names("sample", "12", "preview.example.invalid")
         self.assertEqual((names.name, names.host, names.url),
-                         ("pv-sample-12", "sample-12.preview.example.com", "https://sample-12.preview.example.com/"))
-        self.assertEqual(self.tool.preview_names("demo", "PROJ-81", "preview.example.com").name, "pv-demo-proj-81")
-        self.assertEqual(self.tool.preview_names("demo", "Proj_81 x", "preview.example.com").name, "pv-demo-proj-81-x")
+                         ("pv-sample-12", "sample-12.preview.example.invalid", "https://sample-12.preview.example.invalid/"))
+        upper = self.tool.preview_names("demo", "PROJ-81", "preview.example.invalid")
+        self.assertEqual(upper.name, "pv-demo-proj-81")
+        self.assertEqual(upper.host, "demo-proj-81.preview.example.invalid",
+                         "the router signs the lowercase host it is given ($host): so has the script")
+        self.assertEqual(self.tool.preview_names("demo", "Proj_81 x", "preview.example.invalid").name, "pv-demo-proj-81-x")
         label = re.compile(r"[a-z]([-a-z0-9]*[a-z0-9])?")
         long_issue = "VERYLONGPROJECTKEY" * 4 + "-1234"
-        first = self.tool.preview_names("sample", long_issue, "preview.example.com")
-        second = self.tool.preview_names("sample", long_issue[:-1] + "5", "preview.example.com")
+        first = self.tool.preview_names("sample", long_issue, "preview.example.invalid")
+        second = self.tool.preview_names("sample", long_issue[:-1] + "5", "preview.example.invalid")
         for names in (first, second):
             self.assertLessEqual(len(names.name), 63)
             self.assertLessEqual(len(names.host.split(".")[0]), 63)
@@ -491,11 +514,11 @@ class PreviewExampleTests(unittest.TestCase):
             self.assertTrue(label.fullmatch(names.name))
             self.assertEqual(names.name, "pv-" + names.host.split(".")[0])
         self.assertNotEqual(first.name, second.name, "two long request numbers that differ at the end collide")
-        self.assertEqual(first, self.tool.preview_names("sample", long_issue, "preview.example.com"))
+        self.assertEqual(first, self.tool.preview_names("sample", long_issue, "preview.example.invalid"))
         for site, issue in (("Sample", "1"), ("9sample", "1"), ("sample-", "1"), ("sam_ple", "1"),
                             ("sample", "---"), ("sample", "")):
             with self.subTest(site=site, issue=issue), self.assertRaises(self.tool.Failure):
-                self.tool.preview_names(site, issue, "preview.example.com")
+                self.tool.preview_names(site, issue, "preview.example.invalid")
 
     # -- what up builds --------------------------------------------------
 
@@ -614,7 +637,7 @@ class PreviewExampleTests(unittest.TestCase):
         for name, value in (("PREVIEW_PORT", "0"), ("PREVIEW_PORT", "http"), ("PREVIEW_READY_PATH", "health"),
                             ("PREVIEW_READY_PATH", "/a b"), ("PREVIEW_LIFETIME_HOURS", "0"),
                             ("PREVIEW_NET_IMAGE", "registry.example.com/net:latest"), ("PREVIEW_MEMORY", "lots"),
-                            ("PREVIEW_DOMAIN", "Preview.Example.com"), ("PREVIEW_K8S_SERVER", "http://cluster.example.com"),
+                            ("PREVIEW_DOMAIN", "Preview.Example.invalid"), ("PREVIEW_K8S_SERVER", "http://cluster.example.com"),
                             ("PREVIEW_ENV_FILE", "../outside/environ"), ("PREVIEW_ENV_FILE", "/etc/hosts"),
                             ("PREVIEW_START", None), ("PREVIEW_IMAGE", None), ("TASK_PREVIEW", None),
                             ("PREVIEW_K8S_CA_FILE", str(self.base / "missing.crt"))):
@@ -663,7 +686,9 @@ class PreviewExampleTests(unittest.TestCase):
         self.assertEqual(status, 0, output)
         lines = (self.home / "task-preview.txt").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 3)
-        self.assertEqual(lines[0], "https://sample-12.preview.example.com/")
+        opened = re.fullmatch(r"https://sample-12\.preview\.example\.invalid/_preview/open\?t=([0-9]+)\.([A-Za-z0-9_-]{43})",
+                              lines[0])
+        self.assertIsNotNone(opened, lines[0])
         self.assertRegex(lines[1], r"^この画面は \d{4}-\d{2}-\d{2} \d{2}:\d{2} \(日本時間\) まで開けます$")
         change = self.applied_deployments()[-1]["spec"]["template"]["metadata"]["annotations"]["preview-change"]
         self.assertEqual(lines[2], "動いている変更の識別子: " + change)
@@ -671,13 +696,41 @@ class PreviewExampleTests(unittest.TestCase):
         local = datetime.datetime.strptime(expires, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=datetime.timezone.utc).astimezone(datetime.timezone(datetime.timedelta(hours=9)))
         self.assertIn(local.strftime("%Y-%m-%d %H:%M"), lines[1])
-        self.assertEqual(self.checks, [("https://sample-12.preview.example.com/", CHECK_AUTH)])
+        self.assertEqual(int(opened.group(1)), int(datetime.datetime.strptime(expires, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc).timestamp()), "the URL has to end with the preview's lifetime")
+        digest = hmac.new(SIGNING_KEY.encode(), ("sample-12.preview.example.invalid\n" + opened.group(1)).encode(),
+                          hashlib.sha256).digest()
+        self.assertEqual(opened.group(2), base64.urlsafe_b64encode(digest).rstrip(b"=").decode())
+        self.assertEqual(self.checks, [("https://sample-12.preview.example.invalid/", CHECK_AUTH, lines[0])])
         self.assertNoLeak((self.home / "task-preview.txt").read_text(), "the result file")
 
     def test_the_check_uses_the_ready_path_on_the_public_url(self):
         status, output = self.up(PREVIEW_READY_PATH="/health?full=1")
         self.assertEqual(status, 0, output)
-        self.assertEqual(self.checks, [("https://sample-12.preview.example.com/health?full=1", CHECK_AUTH)])
+        self.assertEqual(len(self.checks), 1)
+        self.assertEqual(self.checks[0][:2], ("https://sample-12.preview.example.invalid/health?full=1", CHECK_AUTH))
+        self.assertTrue(self.checks[0][2].startswith("https://sample-12.preview.example.invalid/_preview/open?t="))
+
+    def test_signatures_are_the_ones_the_router_computes(self):
+        for key, host, end, signature in SIGNATURES:
+            with self.subTest(host=host, end=end):
+                self.assertEqual(self.tool.sign(key, host, end), signature)
+                self.assertEqual(self.tool.sign(key, host, int(end)), signature)
+        self.assertEqual(len({entry[3] for entry in SIGNATURES}), len(SIGNATURES))
+
+    def test_a_missing_or_short_signing_key_ends_before_the_cluster(self):
+        for key in (None, "", "too-short-key"):
+            with self.subTest(key=key):
+                self.reset_cluster()
+                credentials = self.credentials()
+                if key is None:
+                    del credentials["PREVIEW_SIGNING_KEY"]
+                else:
+                    credentials["PREVIEW_SIGNING_KEY"] = key
+                status, output = self.up(credentials=credentials)
+                self.assertEqual(status, 1, output)
+                self.assertEqual(self.calls(), [])
+                self.assertIn("PREVIEW_SIGNING_KEY", output.strip().splitlines()[-1])
 
     # -- failures --------------------------------------------------------
 
@@ -797,6 +850,7 @@ class PreviewExampleTests(unittest.TestCase):
         deployments = self.applied_deployments()
         self.assertEqual(len(deployments), 1, "the control did not get as far as the cluster")
         self.assertIn(TOKEN, json.dumps(deployments[0]), "the control read nothing through the link")
+        self.assertIn(SIGNING_KEY, json.dumps(deployments[0]), "the control read nothing through the link")
 
     # -- the checkout ----------------------------------------------------
 
@@ -842,7 +896,9 @@ class PreviewExampleTests(unittest.TestCase):
         self.assertNotIn(TOKEN.encode(), destination.read_bytes())
         following = load_tool(self.mutated([("os.O_NOFOLLOW", "0"), ("follow_symlinks=False", "follow_symlinks=True")],
                                            "following"), "following")
-        self.assertIn(TOKEN.encode(), archive(following).read_bytes(), "the control read nothing through the links")
+        followed = archive(following).read_bytes()
+        self.assertIn(TOKEN.encode(), followed, "the control read nothing through the links")
+        self.assertIn(SIGNING_KEY.encode(), followed, "the control read nothing through the links")
 
     def test_the_same_checkout_gives_the_same_archive(self):
         paths = self.tool.checkout_paths(str(self.checkout), self.environment())
@@ -896,6 +952,8 @@ class PreviewExampleTests(unittest.TestCase):
         self.assertEqual(status, 1, output)
         self.assertTrue(any(TOKEN in call["parent"] for call in self.git_calls()),
                         "the control's environment showed no token")
+        self.assertTrue(any(SIGNING_KEY in call["parent"] for call in self.git_calls()),
+                        "the control's environment showed no signing key")
 
     def test_the_kubeconfig_never_reaches_the_home_directory_even_when_killed(self):
         """9.2: kill the launch during apply, as the engine's time limit does.
@@ -917,61 +975,55 @@ class PreviewExampleTests(unittest.TestCase):
         killed(TOOL)
         self.assertTrue(self.files_holding(self.tmp, TOKEN), "no kubeconfig had been written before apply")
         self.assertEqual(self.files_holding(self.home, TOKEN), [])
+        # The signing key is never written to a file, by this script or by
+        # the control: the home directory must not hold it either.
+        self.assertEqual(self.files_holding(self.home, SIGNING_KEY), [])
+        self.assertEqual(self.files_holding(self.tmp, SIGNING_KEY), [])
         killed(self.mutated([('environment.get("TMPDIR") or "/tmp"', 'environment["TASK_HOME"]')], "homeward"))
         self.assertTrue(self.files_holding(self.home, TOKEN), "the control left nothing in the home directory")
 
     # -- the public check ------------------------------------------------
 
-    def serve(self, anonymous, authorized):
-        """A local stand-in for the router: one status without credentials,
-        another with the check user's."""
+    TOKEN_IN_URL = "1800000000.c2lnbmF0dXJlLWZvci10aGUtc3RhbmQtaW4tcm91dGVy"
+
+    def router(self, anonymous=401, unsigned=403, opened=None, answers=(200,), refuse_user=False):
+        """A local stand-in for the router: the password on every path,
+        /_preview/open?t= turning the expected token into the cookie, and
+        the cookie required on every other path. answers are the
+        application's statuses, one per request, the last one repeated."""
         expected = "Basic " + CHECK_HEADER
+        token = self.TOKEN_IN_URL
+        pending = list(answers)
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                code = authorized if self.headers.get("Authorization") == expected else anonymous
-                self.send_response(code)
-                if 300 <= code < 400:
-                    self.send_header("Location", "http://127.0.0.1:9/elsewhere")
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-
-            def log_message(self, *arguments):
-                pass
-
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
-        return "http://127.0.0.1:%d/" % server.server_address[1]
-
-    def test_the_public_check_needs_401_without_and_an_answer_with_credentials(self):
-        for anonymous, authorized, passes, word in (
-                (401, 200, True, ""), (401, 204, True, ""), (401, 302, True, ""),
-                (200, 200, False, "without credentials"), (403, 200, False, "without credentials"),
-                (401, 404, False, "404"), (401, 502, False, "502"), (401, 503, False, "503"),
-                (401, 401, False, "PREVIEW_CHECK_AUTH"), (401, 500, False, "500")):
-            with self.subTest(anonymous=anonymous, authorized=authorized):
-                url = self.serve(anonymous, authorized)
-                if passes:
-                    self.tool.check_public_url(url, CHECK_AUTH, seconds=0.5, pause=0.05)
-                    continue
-                with self.assertRaises(self.tool.Failure) as caught:
-                    self.tool.check_public_url(url, CHECK_AUTH, seconds=0.5, pause=0.05)
-                self.assertIn(word, str(caught.exception))
-                self.assertNoLeak(str(caught.exception), "the check's reason")
-
-    def test_the_public_check_waits_for_the_router_to_find_the_application(self):
-        answers = [502, 503, 200]
-        expected = "Basic " + CHECK_HEADER
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                if self.headers.get("Authorization") != expected:
-                    self.send_response(401)
+                headers = {}
+                given = self.headers.get("Authorization")
+                if given is None:
+                    code = anonymous
+                elif given != expected or refuse_user:
+                    code = 401
+                elif self.path.startswith("/_preview/open?"):
+                    query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                    if opened == "no cookie":
+                        code, headers["Location"] = 302, "/"
+                    elif opened is not None:
+                        code = opened
+                    elif query.get("t") == [token]:
+                        code, headers["Location"] = 302, "/"
+                        headers["Set-Cookie"] = ("__Host-preview=%s; Path=/; Max-Age=3600; Secure; HttpOnly; "
+                                                 "SameSite=Lax" % token)
+                    else:
+                        code = 403
+                elif "__Host-preview=%s" % token in (self.headers.get("Cookie") or ""):
+                    code = pending.pop(0) if len(pending) > 1 else pending[0]
+                    if 300 <= code < 400:
+                        headers["Location"] = "http://127.0.0.1:9/elsewhere"
                 else:
-                    self.send_response(answers.pop(0) if len(answers) > 1 else answers[0])
+                    code = unsigned
+                self.send_response(code)
+                for name, value in headers.items():
+                    self.send_header(name, value)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
@@ -982,9 +1034,47 @@ class PreviewExampleTests(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        self.tool.check_public_url("http://127.0.0.1:%d/" % server.server_address[1], CHECK_AUTH,
-                                   seconds=10, pause=0.05)
-        self.assertEqual(answers, [200])
+        base = "http://127.0.0.1:%d/" % server.server_address[1]
+        return base + "ready", base + "_preview/open?t=" + token, pending
+
+    def test_the_public_check_needs_the_password_and_the_signed_url(self):
+        """5.5 step 6: (a) 401 without the password, (b) 403 with it but
+        without the signed URL's cookie, (c) the signed URL answers 302 with
+        the cookie, (d) the application answers 200 to 399 with both."""
+        cases = (
+            ({}, True, ""),
+            ({"answers": (204,)}, True, ""),
+            ({"answers": (302,)}, True, ""),
+            ({"anonymous": 200}, False, "without credentials"),
+            ({"anonymous": 403}, False, "without credentials"),
+            ({"unsigned": 200}, False, "without the signed URL"),
+            ({"unsigned": 502}, False, "without the signed URL"),
+            ({"opened": 403}, False, "refused the signed URL"),
+            ({"opened": "no cookie"}, False, "__Host-preview"),
+            ({"answers": (404,)}, False, "404"),
+            ({"answers": (502,)}, False, "502"),
+            ({"answers": (503,)}, False, "503"),
+            ({"answers": (401,)}, False, "401"),
+            ({"answers": (403,)}, False, "403"),
+            ({"answers": (500,)}, False, "500"),
+            ({"refuse_user": True}, False, "PREVIEW_CHECK_AUTH"),
+        )
+        for options, passes, word in cases:
+            with self.subTest(options=options):
+                ready, signed, _ = self.router(**options)
+                if passes:
+                    self.tool.check_public_url(ready, CHECK_AUTH, signed=signed, seconds=0.5, pause=0.05)
+                    continue
+                with self.assertRaises(self.tool.Failure) as caught:
+                    self.tool.check_public_url(ready, CHECK_AUTH, signed=signed, seconds=0.5, pause=0.05)
+                self.assertIn(word, str(caught.exception))
+                self.assertNoLeak(str(caught.exception), "the check's reason")
+                self.assertNotIn(self.TOKEN_IN_URL, str(caught.exception), "the reason carries the signed URL")
+
+    def test_the_public_check_waits_for_the_router_to_find_the_application(self):
+        ready, signed, pending = self.router(answers=(502, 503, 200))
+        self.tool.check_public_url(ready, CHECK_AUTH, signed=signed, seconds=10, pause=0.05)
+        self.assertEqual(pending, [200])
 
     # -- down and the exit statuses --------------------------------------
 
@@ -1027,6 +1117,8 @@ class PreviewExampleTests(unittest.TestCase):
             ("up without the cluster token", ["up"], dict(self.with_credentials(self.environment()), PREVIEW_K8S_TOKEN=""), 1),
             ("up without the check user", ["up"], {key: value for key, value in self.with_credentials(
                 self.environment()).items() if key != "PREVIEW_CHECK_AUTH"}, 1),
+            ("up without the signing key", ["up"], {key: value for key, value in self.with_credentials(
+                self.environment()).items() if key != "PREVIEW_SIGNING_KEY"}, 1),
             ("up refused by the cluster", ["up"], None, 1),
             ("down", ["down"], None, 0),
             ("down again", ["down"], None, 0),
