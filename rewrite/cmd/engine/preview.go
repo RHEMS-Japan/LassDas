@@ -202,8 +202,9 @@ func (p previewer) post(ctx context.Context, address, words, event string) error
 }
 
 // previewOutcome reads what one launch of the up role left: every process
-// exited 0, and the first line of its file is an https address without
-// spaces. Otherwise the reason it did not come up, in a line.
+// exited 0, its file is text without control characters other than line
+// breaks, and the first line is an https address without spaces. Otherwise
+// the reason it did not come up, in a line.
 func previewOutcome(results []chain.Result, file string, secrets []string) (address, words, reason string) {
 	if len(results) == 0 {
 		return "", "", "the launch returned no result"
@@ -217,12 +218,17 @@ func previewOutcome(results []chain.Result, file string, secrets []string) (addr
 	if reason != "" {
 		return "", "", reason
 	}
-	text := string(data)
+	// The words go to the requester as they are, so the file is text for a
+	// person: Windows line ends are read as line breaks, and any other
+	// control character, on any line, is a file that is not.
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	if strings.ContainsFunc(text, func(r rune) bool { return r != '\n' && unicode.IsControl(r) }) {
+		return "", "", "the address file holds a control character other than a line break"
+	}
 	for _, secret := range secrets {
 		text = strings.ReplaceAll(text, secret, "[credential]")
 	}
 	first, rest, _ := strings.Cut(text, "\n")
-	first = strings.TrimSuffix(first, "\r")
 	if !previewAddressLine(first) {
 		return "", "", "the first line the role wrote is not an https:// address without spaces"
 	}

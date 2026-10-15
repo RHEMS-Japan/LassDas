@@ -299,6 +299,58 @@ func TestAPageThatDidNotComeUpLeavesTheQuestionInWords(t *testing.T) {
 	}
 }
 
+// The address file is read as text for a person: no more than 16 KiB, in
+// UTF-8, and without control characters other than the line breaks, on any
+// of its lines. A file that is not is a page that did not come up: the
+// question is told so and nothing is posted. The same lines in the right
+// form, with Windows line ends, come up, and what is posted holds no
+// carriage return.
+func TestAnAddressFileThatIsNotPlainTextIsAPageThatDidNotComeUp(t *testing.T) {
+	first := previewAddress + "\n"
+	for _, form := range []struct {
+		name    string
+		content []byte
+	}{
+		{"too-large", []byte(first + strings.Repeat("a", previewBytes))},
+		{"not-utf8", []byte(first + "\xff\xfe\n")},
+		{"nul", []byte(first + "before\x00after\n")},
+		{"esc", []byte(first + "\x1b[31mred\x1b[0m\n")},
+		{"soh", []byte(first + "\x01\n")},
+		{"tab", []byte(first + "a\tb\n")},
+		{"del", []byte(first + "a\x7fb\n")},
+		{"control-on-the-first-line", []byte(previewAddress + "\x1b\n")},
+		{"right-form", []byte(previewAddress + "\r\n" + previewUntil + "\r\n")},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			cfg := previewStagesConfig(t)
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			directory, p := previewJob(t, cfg)
+			source := filepath.Join(t.TempDir(), "address")
+			if err := os.WriteFile(source, form.content, 0600); err != nil {
+				t.Fatal(err)
+			}
+			p = withPreviewScript(p, `cat > /dev/null; mkdir -p "$(dirname "$TASK_PREVIEW")"; cp '`+source+`' "$TASK_PREVIEW"`, 0)
+			state := chain.State{Request: noticeRequest, History: []chain.Result{{Role: "confirm_change", Speaker: "reader", Output: "Read."}}}
+			note, instruction := p.up(context.Background(), "preview_up", state)
+			record := readPreviewFile(t, filepath.Join(directory, previewFile))
+			if form.name == "right-form" {
+				want := "確認用の画面: " + previewAddress + "\n" + previewUntil
+				if instruction != previewPostedInstruction(previewAddress) || record.State != "up" || fixture.count(want) != 1 {
+					t.Fatalf("a file in the right form did not come up as %q: %q %+v %q", want, instruction, record, fixture.all())
+				}
+				return
+			}
+			if instruction != previewFailedInstruction || !strings.HasPrefix(note, "確認用の画面を用意できなかった") || record.State != "failed" {
+				t.Fatalf("the file was taken for a page that came up: %q %q %+v", instruction, note, record)
+			}
+			if posted := fixture.all(); len(posted) != 0 {
+				t.Fatalf("a file that is not plain text was posted: %q", posted)
+			}
+		})
+	}
+}
+
 // The address is posted once each time the page is put up for a question.
 // The runtime may be restarted after posting and before its record was
 // saved, which asks the decision again and puts the page up again at the same

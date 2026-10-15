@@ -1363,7 +1363,9 @@ page's address and the lines after it are words for the requester, such as how
 long the page stays open. The page came up when every process exited 0 and
 the first line is an `https://` address without spaces. The file is read as
 `TASK_ACTIVITY` is: an ordinary file with one name and at most 16 KiB, without
-following a link or waiting on a pipe, in UTF-8. Every credential value the
+following a link or waiting on a pipe, in UTF-8, and with no control character
+on any line other than the line breaks (a Windows line end counts as one); a
+file that is not counts as a page that did not come up. Every credential value the
 engine can name is replaced with `[credential]` before anything is used.
 `preview.json` then says `"up"` with the address, or `"failed"` with the
 reason; a failed launch may still have made part of a page.
