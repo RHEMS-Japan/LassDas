@@ -73,18 +73,19 @@ type Processes struct {
 	// HistoryPath names this run's existing checkpoint. It grants no parent
 	// directory: a confined launcher exposes only this file, read-only.
 	HistoryPath string
-	SelectModel func(context.Context, Role, Process, State, []string) (string, error)
-	// ModelPrefix reaches the selected model through a gateway that lists it
-	// under a prefixed id. Only the value handed to the harness changes; the
-	// selection, the peer separation and the recorded model keep the catalog
-	// id, and the prefix is recorded beside it.
-	ModelPrefix string
+	// SelectModel names the model of one launch and the prefix that reaches
+	// it through a gateway that lists it under a prefixed id; the prefix is
+	// empty when the model is reached as named. Only the value handed to the
+	// harness carries the prefix: the peer separation and the recorded model
+	// keep the model as named, and the prefix is recorded beside it.
+	SelectModel func(context.Context, Role, Process, State, []string) (model, prefix string, err error)
 	// Prepare attaches launch-scoped resources. Release runs after the child
 	// returns, including cancellation. It must not evaluate the child's answer.
 	Prepare func(context.Context, Process) (Process, func(), error)
-	// Chosen, when set, is told which model this launch will use: the catalog
-	// id, without the invocation prefix, right after the selection succeeded
-	// and before the child starts. It is how the runtime can say at the start
+	// Chosen, when set, is told which model this launch will use: the model
+	// as its selection named it, without the invocation prefix, right after
+	// the selection succeeded and before the child starts. It is how the
+	// runtime can say at the start
 	// of a stage which model is working on it, which the history cannot
 	// answer because it is saved only once the launch has returned. It runs
 	// in the launching goroutine, so it must not be slow, and it judges
@@ -121,7 +122,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 			} else if _, secret := process.Credentials[process.ModelEnv]; secret {
 				err = fmt.Errorf("model environment variable overlaps a controller credential")
 			} else {
-				model, err = p.SelectModel(ctx, role, process, state, append([]string(nil), selected...))
+				model, prefix, err = p.SelectModel(ctx, role, process, state, append([]string(nil), selected...))
 			}
 			if err != nil {
 				results[index] = Result{Role: name, Speaker: process.Name, Instruction: assignment.Instruction,
@@ -132,7 +133,6 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 			if p.Chosen != nil {
 				p.Chosen(name, process.Name, model, len(state.History))
 			}
-			prefix = p.ModelPrefix
 			// Do not mutate configured maps shared by this role's next launch.
 			environment := make(map[string]string, len(process.Env)+1)
 			for name, value := range process.Env {

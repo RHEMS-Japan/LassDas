@@ -63,12 +63,12 @@ func TestProcessesUseFreshChoicesWithoutMutatingConfigOrSharingReports(t *testin
 	processes := Processes{Roles: map[string]Role{"review": {Name: "review", Processes: []Process{
 		{Name: "a", ModelEnv: "MODEL", Env: initial, Command: []string{"/bin/sh", "-c", `printf '%s\n' "$MODEL"; cat; printf '\nanswer-a'`}},
 		{Name: "b", ModelEnv: "MODEL", Env: initial, Command: []string{"/bin/sh", "-c", `printf '%s\n' "$MODEL"; cat; printf '\nanswer-b'`}},
-	}}}, SelectModel: func(ctx context.Context, role Role, process Process, state State, selected []string) (string, error) {
+	}}}, SelectModel: func(ctx context.Context, role Role, process Process, state State, selected []string) (string, string, error) {
 		if role.Name != "review" || state.Request != "original" {
 			t.Error("selection got another responsibility/request")
 		}
 		exclusions = append(exclusions, append([]string(nil), selected...))
-		return "publisher-" + process.Name + "/current", nil
+		return "publisher-" + process.Name + "/current", "", nil
 	}}
 	results := processes.Execute(context.Background(), Assignment{Role: "review"}, State{Request: "original"})
 	if initial["MODEL"] != "old/configured" || !reflect.DeepEqual(exclusions, [][]string{nil, {"publisher-a/current"}}) {
@@ -87,8 +87,8 @@ func TestProcessesUseFreshChoicesWithoutMutatingConfigOrSharingReports(t *testin
 
 func TestSelectionFailureDoesNotLaunchPinnedProcess(t *testing.T) {
 	process := Process{Name: "worker", ModelEnv: "MODEL", Env: map[string]string{"MODEL": "old/pinned"}, Command: []string{"/bin/sh", "-c", "printf 'must not run'"}}
-	processes := Processes{Roles: map[string]Role{"implement": {Name: "implement", Processes: []Process{process}}}, SelectModel: func(context.Context, Role, Process, State, []string) (string, error) {
-		return "", errors.New("catalog HTTP 503: actual reason")
+	processes := Processes{Roles: map[string]Role{"implement": {Name: "implement", Processes: []Process{process}}}, SelectModel: func(context.Context, Role, Process, State, []string) (string, string, error) {
+		return "", "", errors.New("catalog HTTP 503: actual reason")
 	}}
 	result := processes.Execute(context.Background(), Assignment{Role: "implement"}, State{Request: "original"})[0]
 	if result.Output != "" || result.Model != "" || !strings.Contains(result.Error, "catalog HTTP 503: actual reason") || result.FinishedAt.IsZero() {
@@ -103,9 +103,9 @@ func TestSelectionFailureDoesNotLaunchPinnedProcess(t *testing.T) {
 func TestModelSelectionCannotReplaceASecretAndHonorsStop(t *testing.T) {
 	process := Process{Name: "worker", ModelEnv: "MODEL", Secrets: map[string]string{"MODEL": "PRIVATE_KEY_SOURCE"}, Command: []string{"/bin/sh", "-c", "printf 'must not run'"}}
 	called := false
-	processes := Processes{Roles: map[string]Role{"implement": {Name: "implement", Processes: []Process{process}}}, SelectModel: func(context.Context, Role, Process, State, []string) (string, error) {
+	processes := Processes{Roles: map[string]Role{"implement": {Name: "implement", Processes: []Process{process}}}, SelectModel: func(context.Context, Role, Process, State, []string) (string, string, error) {
 		called = true
-		return "maker/current", nil
+		return "maker/current", "", nil
 	}}
 	result := processes.Execute(context.Background(), Assignment{Role: "implement"}, State{})[0]
 	if called || result.Output != "" || !strings.Contains(result.Error, "overlaps a credential") {
@@ -113,9 +113,9 @@ func TestModelSelectionCannotReplaceASecretAndHonorsStop(t *testing.T) {
 	}
 	process.Secrets = nil
 	processes.Roles["implement"] = Role{Name: "implement", Processes: []Process{process}}
-	processes.SelectModel = func(ctx context.Context, _ Role, _ Process, _ State, _ []string) (string, error) {
+	processes.SelectModel = func(ctx context.Context, _ Role, _ Process, _ State, _ []string) (string, string, error) {
 		<-ctx.Done()
-		return "", ctx.Err()
+		return "", "", ctx.Err()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
@@ -373,9 +373,9 @@ func TestControllerInterruptionDuringSelectionAndPreparationIsRecorded(t *testin
 			p := Processes{}
 			if phase == "selection" {
 				process.ModelEnv = "MODEL"
-				p.SelectModel = func(context.Context, Role, Process, State, []string) (string, error) {
+				p.SelectModel = func(context.Context, Role, Process, State, []string) (string, string, error) {
 					cancel()
-					return "", ctx.Err()
+					return "", "", ctx.Err()
 				}
 			} else {
 				p.Prepare = func(context.Context, Process) (Process, func(), error) {
@@ -531,9 +531,9 @@ func TestHistoryBindingCannotBeReplacedBeforeSelectionOrAfterPreparation(t *test
 				}
 				selected, released := 0, 0
 				executor := Processes{Roles: map[string]Role{"r": {Name: "r", Processes: []Process{process}}}, HistoryPath: "/trusted/history.json",
-					SelectModel: func(context.Context, Role, Process, State, []string) (string, error) {
+					SelectModel: func(context.Context, Role, Process, State, []string) (string, string, error) {
 						selected++
-						return "chosen", nil
+						return "chosen", "", nil
 					},
 					Prepare: func(_ context.Context, p Process) (Process, func(), error) {
 						if prepared {
@@ -647,9 +647,8 @@ func TestTheChosenModelIsHandedOverBeforeTheChildRuns(t *testing.T) {
 			{Name: "worker", Directory: directory, ModelEnv: "MODEL",
 				Command: []string{"/bin/sh", "-c", `printf '%s' "$MODEL" > ran.txt`}},
 		}}},
-		ModelPrefix: "gateway/",
-		SelectModel: func(context.Context, Role, Process, State, []string) (string, error) {
-			return "maker/current", nil
+		SelectModel: func(context.Context, Role, Process, State, []string) (string, string, error) {
+			return "maker/current", "gateway/", nil
 		},
 		Chosen: func(role, process, model string, launch int) {
 			told = append(told, fmt.Sprintf("%s %s %s %d", role, process, model, launch))
@@ -680,8 +679,8 @@ func TestTheChosenModelIsHandedOverBeforeTheChildRuns(t *testing.T) {
 	if len(told) != 1 || told[0] != "work worker maker/current 3" {
 		t.Fatalf("a later launch was handed over as %v", told)
 	}
-	processes.SelectModel = func(context.Context, Role, Process, State, []string) (string, error) {
-		return "", errors.New("catalog HTTP 503: actual reason")
+	processes.SelectModel = func(context.Context, Role, Process, State, []string) (string, string, error) {
+		return "", "", errors.New("catalog HTTP 503: actual reason")
 	}
 	told = nil
 	if result := processes.Execute(context.Background(), Assignment{Role: "work"}, State{})[0]; result.Error == "" || len(told) != 0 {

@@ -102,15 +102,15 @@ func TestSelectionFetchesPerProcessAndUsesCurrentIndependentPublishers(t *testin
 		}
 	})
 	role := chain.Role{Name: "review", Purpose: "independent review"}
-	first, err := selector.choose(context.Background(), role, chain.Process{Name: "a"}, state, nil)
+	first, _, err := selector.choose(context.Background(), role, chain.Process{Name: "a"}, state, nil)
 	if err != nil || first != "maker-one/current-1" {
 		t.Fatalf("first=%q error=%v", first, err)
 	}
-	second, err := selector.choose(context.Background(), role, chain.Process{Name: "b"}, state, []string{first})
+	second, _, err := selector.choose(context.Background(), role, chain.Process{Name: "b"}, state, []string{first})
 	if err != nil || second != "maker-two/current-2" {
 		t.Fatalf("second=%q error=%v", second, err)
 	}
-	third, err := selector.choose(context.Background(), role, chain.Process{Name: "a"}, state, nil)
+	third, _, err := selector.choose(context.Background(), role, chain.Process{Name: "a"}, state, nil)
 	if err != nil || third != "maker-one/current-3" || catalogCalls != 3 || decisions != 3 {
 		t.Fatalf("next launch reused a selection: %q %v catalogs=%d decisions=%d", third, err, catalogCalls, decisions)
 	}
@@ -139,14 +139,14 @@ func TestSelectionFailureNeverUsesPinnedOrEarlierModel(t *testing.T) {
 				return selectionReply(request, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
 			})
 			role := chain.Role{Name: "implement"}
-			if _, err := selector.choose(context.Background(), role, chain.Process{}, chain.State{Request: "original"}, nil); err != nil {
+			if _, _, err := selector.choose(context.Background(), role, chain.Process{}, chain.State{Request: "original"}, nil); err != nil {
 				t.Fatal(err)
 			}
 			var selected []string
 			if failure == "no-independent-model" {
 				selected = []string{"maker-one/any-version"}
 			}
-			model, err := selector.choose(context.Background(), role, chain.Process{}, chain.State{Request: "original"}, selected)
+			model, _, err := selector.choose(context.Background(), role, chain.Process{}, chain.State{Request: "original"}, selected)
 			if err == nil || model != "" || calls != 2 {
 				t.Fatalf("failure substituted model %q, error=%v calls=%d", model, err, calls)
 			}
@@ -266,7 +266,7 @@ func TestSelectionFallbackRefreshesCatalogKeepsIndependenceAndShowsPrimaryReason
 		}
 		return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
 	})
-	model, err := selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, []string{"maker-one/already-selected"})
+	model, _, err := selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, []string{"maker-one/already-selected"})
 	if err != nil || model != "maker-two/current" || catalogs != 2 || primary != 1 || alternative != 1 {
 		t.Fatalf("model=%q error=%v catalogs=%d primary=%d alternative=%d", model, err, catalogs, primary, alternative)
 	}
@@ -293,7 +293,7 @@ func TestWithoutADecisionServiceTheChatAlternativeChoosesAlone(t *testing.T) {
 		}
 		return nil, fmt.Errorf("a decision service was asked although none is configured: %s", request.URL.Host)
 	})
-	model, err := selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, []string{"maker-one/already-selected"})
+	model, _, err := selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, []string{"maker-one/already-selected"})
 	if err != nil || model != "maker-two/current" || catalogs != 1 || chats != 1 || len(observed) != 0 {
 		t.Fatalf("model=%q error=%v catalogs=%d chats=%d observed=%v", model, err, catalogs, chats, observed)
 	}
@@ -314,7 +314,7 @@ func TestWithoutADecisionServiceTheChatAlternativeChoosesAlone(t *testing.T) {
 	// A blank url is no judge either.
 	selector.Judge = chain.Jev{URL: "  "}
 	catalogs, chats = 0, 0
-	model, err = selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, nil)
+	model, _, err = selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, nil)
 	if err != nil || model != "maker-two/current" || chats != 1 || len(observed) != 0 {
 		t.Fatalf("a blank judge url fell back to the decision path: model=%q error=%v chats=%d observed=%v", model, err, chats, observed)
 	}
@@ -356,7 +356,7 @@ func TestSelectionFallbackRetainsBothReasonsAndDoesNotRetryOnStop(t *testing.T) 
 				chats++
 				return catalogReply(request, 429, "alternative cause"), nil
 			})
-			model, err := selector.choose(ctx, chain.Role{Name: "implement"}, chain.Process{}, chain.State{}, nil)
+			model, _, err := selector.choose(ctx, chain.Role{Name: "implement"}, chain.Process{}, chain.State{}, nil)
 			if err == nil || model != "" {
 				t.Fatalf("failure was hidden: %q %v", model, err)
 			}

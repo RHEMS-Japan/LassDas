@@ -99,7 +99,7 @@ type selectedChatRouter struct {
 }
 
 func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.Assignment, error) {
-	model, err := r.selection.choose(ctx,
+	model, prefix, err := r.selection.choose(ctx,
 		chain.Role{Name: "router", Purpose: "Choose the next responsible role from the original request and independent reports; resolve remaining work before delivery or completion"},
 		chain.Process{Name: "routing"}, state, nil)
 	if err != nil {
@@ -108,7 +108,7 @@ func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.
 	chat := r.chat
 	// Routing is an invocation too: it reaches the same model by the same
 	// route as the working roles. The chosen id itself is unchanged.
-	endpoint := r.selection.invocationPrefix() + model
+	endpoint := prefix + model
 	chat.Service.Model = endpoint
 	if r.selection.observe != nil {
 		notice := "routing with freshly selected model: " + model
@@ -127,12 +127,14 @@ func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.
 	return next, nil
 }
 
-func (s selectionConfig) choose(ctx context.Context, role chain.Role, process chain.Process, state chain.State, selected []string) (string, error) {
+// choose names the model one launch records, and the prefix that reaches it
+// through the configured gateway: empty when the model is reached as named.
+func (s selectionConfig) choose(ctx context.Context, role chain.Role, process chain.Process, state chain.State, selected []string) (model, prefix string, err error) {
 	// The operator named the model, so there is nothing to look up or judge:
 	// no catalog, no gateway list and no selector call. Peer separation cannot
 	// exclude a fixed model, so a parallel review group runs the same one.
 	if fixed := s.fixedModel(); fixed != "" {
-		return fixed, nil
+		return fixed, s.invocationPrefix(), nil
 	}
 	// With no decision service named, the chat service configured as the
 	// alternative makes every choice by itself: nothing is tried first and
@@ -141,29 +143,29 @@ func (s selectionConfig) choose(ctx context.Context, role chain.Role, process ch
 	if strings.TrimSpace(s.Judge.URL) == "" && s.Fallback != nil {
 		return s.selectWith(ctx, chain.ChatJudge{Service: *s.Fallback}, role, process, state, selected)
 	}
-	model, err := s.selectWith(ctx, s.Judge, role, process, state, selected)
+	model, prefix, err = s.selectWith(ctx, s.Judge, role, process, state, selected)
 	if err == nil || ctx.Err() != nil || s.Fallback == nil {
-		return model, err
+		return model, prefix, err
 	}
 	if s.observe != nil {
 		s.observe("model selector unavailable; using configured chat alternative: " + err.Error())
 	}
 	// This is a new selection attempt, so selectWith fetches a new catalog
 	// rather than letting the alternative decide from an earlier snapshot.
-	model, alternativeError := s.selectWith(ctx, chain.ChatJudge{Service: *s.Fallback}, role, process, state, selected)
+	model, prefix, alternativeError := s.selectWith(ctx, chain.ChatJudge{Service: *s.Fallback}, role, process, state, selected)
 	if alternativeError != nil {
-		return "", errors.Join(err, fmt.Errorf("alternative model selector: %w", alternativeError))
+		return "", "", errors.Join(err, fmt.Errorf("alternative model selector: %w", alternativeError))
 	}
-	return model, nil
+	return model, prefix, nil
 }
 
-func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role chain.Role, process chain.Process, state chain.State, selected []string) (string, error) {
+func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role chain.Role, process chain.Process, state chain.State, selected []string) (string, string, error) {
 	if len(s.Authors) == 0 {
-		return "", errors.New("configure eligible model publishers; none were supplied")
+		return "", "", errors.New("configure eligible model publishers; none were supplied")
 	}
 	snapshot, err := currentModelList(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	excluded := map[string]bool{}
 	for _, model := range selected {
@@ -180,7 +182,7 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 			} `json:"architecture"`
 		}
 		if err := json.Unmarshal(raw, &model); err != nil {
-			return "", fmt.Errorf("read catalog capabilities: %w", err)
+			return "", "", fmt.Errorf("read catalog capabilities: %w", err)
 		}
 		author, _, ok := strings.Cut(model.ID, "/")
 		if !ok || excluded[author] || !slices.Contains(s.Authors, author) || !slices.Contains(model.Supported, "tools") || !slices.Contains(model.Architecture.Output, "text") {
@@ -188,7 +190,7 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &fields); err != nil {
-			return "", err
+			return "", "", err
 		}
 		// Only the selection input is summarized. --list-models still exposes
 		// every provider field, and no working report is trimmed or decoded.
@@ -206,7 +208,7 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 		}
 		data, err := json.Marshal(metadata)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		choices[model.ID] = string(data)
 	}
@@ -217,7 +219,7 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 		// and an earlier list would claim availability nobody observed.
 		served, err := gatewayModelIDs(ctx, *s.Gateway)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		for id := range choices {
 			if !served[s.Gateway.Prefix+id] {
@@ -226,7 +228,7 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 		}
 	}
 	if len(choices) == 0 {
-		return "", errors.New("fresh catalog has no eligible independent model; no earlier selection was reused")
+		return "", "", errors.New("fresh catalog has no eligible independent model; no earlier selection was reused")
 	}
 	// Runtime failures inform recovery without copying every previous work
 	// report into the model-selection query. Those reports remain unchanged
@@ -236,12 +238,12 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 		"Responsibility: " + role.Purpose + "\nProcess: " + process.Name + "\nCatalog observation: " + snapshot.FetchedAt.String() + "\n" + s.Instructions
 	model, err := judge.Choose(ctx, input, instructions, choices)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if _, exists := choices[model]; !exists {
-		return "", errors.New("model selector did not choose an eligible endpoint from the current catalog")
+		return "", "", errors.New("model selector did not choose an eligible endpoint from the current catalog")
 	}
-	return model, nil
+	return model, s.invocationPrefix(), nil
 }
 
 // selectionFailures and selectionErrorLimit bound what the judge reads of

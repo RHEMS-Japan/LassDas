@@ -235,10 +235,10 @@ func TestGatewayListFailureLeavesTheAttemptUnavailableWithoutBareInvocation(t *t
 				return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
 			})
 			role, state := chain.Role{Name: "implement"}, chain.State{Request: "original request"}
-			if model, err := selector.choose(context.Background(), role, chain.Process{}, state, nil); err != nil || model != "a/x" {
+			if model, _, err := selector.choose(context.Background(), role, chain.Process{}, state, nil); err != nil || model != "a/x" {
 				t.Fatalf("healthy attempt: model=%q err=%v", model, err)
 			}
-			model, err := selector.choose(context.Background(), role, chain.Process{}, state, nil)
+			model, _, err := selector.choose(context.Background(), role, chain.Process{}, state, nil)
 			if err == nil || model != "" {
 				t.Fatalf("failing gateway list produced %q (%v)", model, err)
 			}
@@ -277,11 +277,11 @@ func TestGatewayListIsFetchedForEveryAttempt(t *testing.T) {
 		return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
 	})
 	role, state := chain.Role{Name: "implement"}, chain.State{Request: "original request"}
-	first, err := selector.choose(context.Background(), role, chain.Process{}, state, nil)
+	first, _, err := selector.choose(context.Background(), role, chain.Process{}, state, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := selector.choose(context.Background(), role, chain.Process{}, state, nil)
+	second, _, err := selector.choose(context.Background(), role, chain.Process{}, state, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestGatewayNarrowsTheAlternativeSelectorToo(t *testing.T) {
 		}
 		return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
 	})
-	model, err := selector.choose(context.Background(), chain.Role{Name: "implement"}, chain.Process{}, chain.State{Request: "original request"}, nil)
+	model, _, err := selector.choose(context.Background(), chain.Role{Name: "implement"}, chain.Process{}, chain.State{Request: "original request"}, nil)
 	if err != nil || model != "a/z" || lists != 2 || primary != 1 || alternative != 1 {
 		t.Fatalf("model=%q err=%v gateway lists=%d primary=%d alternative=%d", model, err, lists, primary, alternative)
 	}
@@ -565,7 +565,7 @@ func TestFixedModelOverridesPublishersAndBlankReadsAsAbsent(t *testing.T) {
 				}
 				return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
 			})
-			model, err := selector.choose(context.Background(), chain.Role{Name: "implement"}, chain.Process{}, chain.State{Request: "original request"}, nil)
+			model, _, err := selector.choose(context.Background(), chain.Role{Name: "implement"}, chain.Process{}, chain.State{Request: "original request"}, nil)
 			wantModel, wantCalls := "publisher/one-strong-model", 0
 			if name == "blank" {
 				wantModel, wantCalls = "a/x", 1
