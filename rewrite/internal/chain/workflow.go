@@ -55,13 +55,15 @@ type Workflow struct {
 // Preview is the operator's pair of roles for a page where the requester
 // sees the change before the question that confirms it. Neither is a stage
 // or the question role: what they return satisfies, fails or repeats no
-// stage, and the runtime only records it.
+// stage, and the runtime only records it. An accepted request's copy keeps
+// only Up, the one role its own run launches.
 type Preview struct {
 	// Up is launched once each time the decision after a stage that confirms
 	// the change chooses the question, right before the question.
 	Up string `json:"up"`
-	// Down is launched once the request is delivered or stopped.
-	Down string `json:"down"`
+	// Down is launched once the request is delivered or stopped. The queue
+	// reads it from the operator's current setting, not from the copy.
+	Down string `json:"down,omitempty"`
 }
 
 func (w *Workflow) Validate(roles map[string]string) error {
@@ -150,8 +152,9 @@ func (w *Workflow) clone() *Workflow {
 		Stages: slices.Clone(w.Stages), Question: w.Question, EntranceReworkLimit: w.EntranceReworkLimit,
 		ConfirmationReworkLimit: w.ConfirmationReworkLimit, EnvironmentPauseLimit: w.EnvironmentPauseLimit}
 	if w.Preview != nil {
-		preview := *w.Preview
-		copy.Preview = &preview
+		// The run launches only the up role; the queue takes the page down
+		// with the operator's current setting.
+		copy.Preview = &Preview{Up: w.Preview.Up}
 	}
 	if w.LaunchLimit != nil {
 		copy.LaunchLimit = make(map[string]int, len(w.LaunchLimit))

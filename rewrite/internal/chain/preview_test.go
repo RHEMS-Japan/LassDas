@@ -226,9 +226,11 @@ func TestNoPreviewWhereNoConfirmationQuestionIsChosen(t *testing.T) {
 	}
 }
 
-// A request accepted after the setting keeps its own copy of it: the copy is
-// saved with the request, and changing the operator's setting afterwards does
-// not reach it.
+// A request accepted after the setting keeps the role that puts its page up:
+// the role is saved with the request, and naming another one in the
+// operator's setting afterwards does not change which role puts its page up.
+// Nothing else of the setting is kept; the queue takes pages down with the
+// operator's current setting.
 func TestTheAcceptedRunKeepsItsOwnCopyOfThePreviewRoles(t *testing.T) {
 	flow := previewFlow(t)
 	store := &memoryStore{state: State{Request: "Show the item count on the list screen."}}
@@ -246,15 +248,33 @@ func TestTheAcceptedRunKeepsItsOwnCopyOfThePreviewRoles(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved := store.state.Workflow
-	if saved == nil || saved.Preview == nil || *saved.Preview != (Preview{Up: "preview_up", Down: "preview_down"}) {
-		t.Fatalf("the accepted run has no copy of the preview roles: %+v", saved)
-	}
-	flow.Preview.Up = "changed_later"
-	if saved.Preview.Up != "preview_up" {
-		t.Fatal("the accepted run shares the operator's setting instead of keeping a copy")
+	if saved == nil || saved.Preview == nil || *saved.Preview != (Preview{Up: "preview_up"}) {
+		t.Fatalf("the accepted run does not keep the up role, and only it: %+v", saved)
 	}
 	if clone := confirmFlow(t).clone(); clone.Preview != nil {
 		t.Fatal("a run without the setting gained one in its copy")
+	}
+	// The operator names another up role; the accepted run goes on to its
+	// question with the one it was accepted with.
+	flow.Preview.Up = "changed_later"
+	var decisions []confirmDecision
+	var roles []string
+	engine.Router = StageRouter{Entrance: DecisionRouter{Judge: askAfterConfirmation(&decisions), Roles: previewPurposes()}}
+	engine.Executor = testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+		return []Result{{Role: a.Role, Speaker: "fixture", Output: "Ordinary prose about " + a.Role + "."}}
+	})
+	engine.WaitAfter = "ask_requester"
+	engine.PreviewUp = func(_ context.Context, role string, _ State) (string, string) {
+		roles = append(roles, role)
+		return "put up", "posted\n"
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := engine.Run(ctx); !errors.Is(err, ErrWaiting) {
+		t.Fatalf("the accepted run did not reach its question: %v", err)
+	}
+	if len(roles) != 1 || roles[0] != "preview_up" || saved.Preview.Up != "preview_up" {
+		t.Fatalf("the accepted run put its page up with %v, not the role it was accepted with", roles)
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -315,7 +314,7 @@ func TestThePagesAddressIsPostedOncePerPutUp(t *testing.T) {
 	want := "確認用の画面: " + previewAddress + "\n" + previewUntil + "\ntoken [credential]"
 	// A post recorded and then cut off before it was submitted.
 	n := requestNotices(cfg, sourceIssue{ID: 51, Key: "EXAMPLE-51"}, directory)
-	if err := n.save(noticeLog{Notices: []noticeRecord{{Kind: previewNotice, Text: want, Event: strconv.Itoa(len(state.History)), WrittenAt: time.Now().UTC()}}}); err != nil {
+	if err := n.save(noticeLog{Notices: []noticeRecord{{Kind: previewNotice, Text: want, Event: previewPoint(state.History), WrittenAt: time.Now().UTC()}}}); err != nil {
 		t.Fatal(err)
 	}
 	for attempt := 0; attempt < 2; attempt++ {
@@ -364,10 +363,19 @@ func TestAnAddressThatCouldNotBePostedIsGivenByTheQuestion(t *testing.T) {
 }
 
 // previewRouter asks the requester after the change was read, as the
-// decision service does in these tests.
-type previewRouter struct{}
+// decision service does in these tests. With unavailableOnce, the first
+// decision after the runtime was lost fails once before it asks.
+type previewRouter struct {
+	store           *crashBeforeQuestion
+	unavailableOnce bool
+	failed          bool
+}
 
-func (previewRouter) Next(context.Context, chain.State) (chain.Assignment, error) {
+func (r *previewRouter) Next(context.Context, chain.State) (chain.Assignment, error) {
+	if r.unavailableOnce && r.store.crashed && !r.failed {
+		r.failed = true
+		return chain.Assignment{}, errors.New("the decision service is unavailable once")
+	}
 	return chain.Assignment{Role: "ask_requester"}, nil
 }
 
@@ -396,8 +404,16 @@ func (s *crashBeforeQuestion) Save(state chain.State) error {
 // The runtime is lost right after the page went up and its address was
 // posted, before the record of either was saved. The next start finds the
 // question not yet chosen, decides again and puts the page up again: the
-// address is not posted a second time, and the question is told it was.
+// address is not posted a second time, and the question is told it was. That
+// holds too when the first decision after the restart was unavailable and
+// left the runtime's record of that failure before the question was chosen.
 func TestARestartAfterTheAddressWasPostedDoesNotPostItAgain(t *testing.T) {
+	for _, decision := range []string{"available", "unavailable-once"} {
+		t.Run(decision, func(t *testing.T) { testRestartAfterTheAddressWasPosted(t, decision == "unavailable-once") })
+	}
+}
+
+func testRestartAfterTheAddressWasPosted(t *testing.T, unavailableOnce bool) {
 	cfg := previewStagesConfig(t)
 	fixture := &noticeTracker{}
 	fixture.install(t, alwaysChoose("done"))
@@ -407,7 +423,8 @@ func TestARestartAfterTheAddressWasPostedDoesNotPostItAgain(t *testing.T) {
 	store := &crashBeforeQuestion{state: chain.State{Request: noticeRequest, Workflow: &workflow, Step: "confirm_change",
 		History: []chain.Result{{Role: "elicit", Speaker: "requirements", Output: "Settled."}, {Role: "confirm_change", Speaker: "reader", Output: "The list screen gains a count line."}}}}
 	var asked []string
-	engine := chain.Chain{Router: previewRouter{}, Store: store, WaitAfter: "ask_requester", RetryDelay: time.Millisecond, PreviewUp: p.up,
+	router := &previewRouter{store: store, unavailableOnce: unavailableOnce}
+	engine := chain.Chain{Router: router, Store: store, WaitAfter: "ask_requester", RetryDelay: time.Millisecond, PreviewUp: p.up,
 		Executor: questionStandIn(func(a chain.Assignment) { asked = append(asked, a.Instruction) })}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	store.stop = cancel
@@ -430,6 +447,9 @@ func TestARestartAfterTheAddressWasPostedDoesNotPostItAgain(t *testing.T) {
 	}
 	if len(asked) != 1 || !strings.Contains(asked[0], chainPreviewPosted(previewAddress)) {
 		t.Fatalf("the question was not told the address was posted: %q", asked)
+	}
+	if router.failed != unavailableOnce {
+		t.Fatalf("the decision after the restart failed=%v, want %v", router.failed, unavailableOnce)
 	}
 }
 
@@ -522,8 +542,9 @@ func TestOnlyThePreviewRoleIsToldWhereToWriteTheAddress(t *testing.T) {
 	}
 }
 
-// The preview roles run commands, not models, and the role that puts the
-// page up has one process, whose file is the one read back.
+// The preview roles run commands, not models, neither is the role that
+// reports a stop, and the role that puts the page up has one process, whose
+// file is the one read back.
 func TestThePreviewRolesAreCommandsAndTheUpRoleHasOneProcess(t *testing.T) {
 	check := func(cfg config) error {
 		data, err := json.Marshal(cfg)
@@ -539,7 +560,8 @@ func TestThePreviewRolesAreCommandsAndTheUpRoleHasOneProcess(t *testing.T) {
 	if err := check(previewStagesConfig(t)); err != nil {
 		t.Fatalf("a valid setting was refused: %v", err)
 	}
-	for _, variant := range []struct{ name, want string }{{"up-launches-a-model", "model"}, {"down-launches-a-model", "model"}, {"up-has-two-processes", "one process"}} {
+	for _, variant := range []struct{ name, want string }{{"up-launches-a-model", "model"}, {"down-launches-a-model", "model"}, {"up-has-two-processes", "one process"},
+		{"up-is-the-stop-report", "intake.stop_report_role"}, {"down-is-the-stop-report", "intake.stop_report_role"}} {
 		t.Run(variant.name, func(t *testing.T) {
 			cfg := previewStagesConfig(t)
 			switch variant.name {
@@ -549,6 +571,10 @@ func TestThePreviewRolesAreCommandsAndTheUpRoleHasOneProcess(t *testing.T) {
 				cfg.Roles[5].Processes[0].ModelEnv = "MODEL"
 			case "up-has-two-processes":
 				cfg.Roles[4].Processes = append(cfg.Roles[4].Processes, chain.Process{Name: "second", Command: []string{"/bin/sh", "-c", "exit 0"}})
+			case "up-is-the-stop-report":
+				cfg.Intake.StopReportRole = "preview_up"
+			case "down-is-the-stop-report":
+				cfg.Intake.StopReportRole = "preview_down"
 			}
 			err := check(cfg)
 			if err == nil || !strings.Contains(err.Error(), variant.want) {

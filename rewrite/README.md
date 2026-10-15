@@ -1342,7 +1342,9 @@ model. The up role has exactly one process. The setting needs an ordered run
 with a stage marked `"confirm": true`; anything else is refused before work is
 accepted. Without the setting nothing changes. A request keeps the copy of the
 workflow it was accepted with, so adding the setting does not reach requests
-accepted before it.
+accepted before it. Of the setting, that copy keeps only the up role: naming
+another one later does not change which role puts an accepted request's page
+up.
 
 **When the page goes up.** Only when the decision after the stage that
 confirms the change chooses the question role, and right before the question

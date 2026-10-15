@@ -122,7 +122,7 @@ func (p previewer) up(ctx context.Context, role string, state chain.State) (stri
 	}
 	record.State, record.URL = "up", address
 	p.keep(record)
-	if err := p.post(ctx, address, words, strconv.Itoa(len(state.History))); err != nil {
+	if err := p.post(ctx, address, words, previewPoint(state.History)); err != nil {
 		reason := textclip.Clip(firstInstructionLine(scrubCredentials(p.cfg, err.Error())), 300)
 		return "確認用の画面を用意した: " + address + "。アドレスを知らせる本体のコメントは投稿を確かめられなかった: " + reason,
 			previewUnconfirmedInstruction(address)
@@ -136,6 +136,21 @@ func (p previewer) keep(record previewRecord) {
 	if err := writePreviewRecord(p.job, record); err != nil && p.observe != nil {
 		p.observe("the record of the page put up for the requester was not updated: " + err.Error())
 	}
+}
+
+// previewPoint names the point of the record where the question was chosen:
+// how many records it holds that are not the runtime's own notes about its
+// decisions. A decision that was unavailable, after a restart that cut a
+// put-up short, adds such a note and does not move the point; the work and
+// the requester's words that come before a later question do.
+func previewPoint(history []chain.Result) string {
+	count := 0
+	for _, record := range history {
+		if record.Role != "router" {
+			count++
+		}
+	}
+	return strconv.Itoa(count)
 }
 
 // post says the address once for this point of the record, in the runtime's
@@ -280,6 +295,9 @@ func validatePreview(cfg config) error {
 			if process.ModelEnv != "" {
 				return fmt.Errorf("%s names %q, whose process %q (roles[%d].processes[%d]) sets model_env: the preview roles run the operator's commands and launch no model", setting, role.Name, process.Name, i, j)
 			}
+		}
+		if cfg.Intake != nil && role.Name == cfg.Intake.StopReportRole {
+			return fmt.Errorf("%s names %q (roles[%d]), which is also intake.stop_report_role: the report after a stop and the take-down would run the same commands twice", setting, role.Name, i)
 		}
 		if role.Name == preview.Up && len(role.Processes) != 1 {
 			return fmt.Errorf("workflow.preview.up names %q (roles[%d]), which has %d processes and needs exactly one process: that process's own file is where the address is read back", role.Name, i, len(role.Processes))
