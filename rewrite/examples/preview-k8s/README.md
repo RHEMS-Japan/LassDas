@@ -32,7 +32,8 @@ as before, in words, with one line saying so.
 | --- | --- |
 | The engine's Pod | `preview.py up` and `preview.py down`, each started through the role launcher ([linux_role.py](../../harnesses/linux_role.py)) with `--network inherit`, the checkout read-only. |
 | The preview namespace | One Deployment and one Service per request, named `pv-<PREVIEW_NAME>-<request number>`. Nothing else is created there by the commands. |
-| The router namespace | The password check and the router that sends `<label>.<PREVIEW_DOMAIN>` to the Service `pv-<label>`, set up once by a person. |
+| The router namespace | The password check and the router that sends `<label>.<PREVIEW_DOMAIN>` to the Service `pv-<label>`, the identities, and the cleanup that removes what is past its lifetime, set up once by a person ([What a person sets up once](#what-a-person-sets-up-once)). |
+| The cluster | An admission policy that lets only the shape below into the preview namespace. |
 
 `up` does, in order:
 
@@ -79,6 +80,149 @@ as before, in words, with one line saying so.
 
 `down` removes the request's Deployment and Service by their label and reads
 back that neither is left. It reads nothing of the checkout.
+
+## What a person sets up once
+
+Everything here is done once per cluster, by someone allowed to change it,
+and is shared by every installation that uses the same preview namespace.
+None of it is done by the engine or the preview commands. Steps 3 to 7 change
+the cluster, and step 5 restarts the engine: do each only with the go-ahead
+of whoever owns them.
+
+The files beside this README hold `<placeholder>`s: copy each, replace every
+placeholder (see [Values a person fills in](#values-a-person-fills-in)), and
+keep the filled copies with your installation's private notes, not in a
+public repository.
+
+| File | What |
+| --- | --- |
+| [namespaces.yaml.example](namespaces.yaml.example) | The preview namespace and the router namespace. |
+| [preview-namespace.yaml.example](preview-namespace.yaml.example) | The quota (five previews, 3 GiB of memory between them), the default limits and the egress rules `preview-egress`. Nothing else is ever put there by a person. |
+| [admission-policy.yaml.example](admission-policy.yaml.example) | The admission policies for Deployments, Pods and Services in the preview namespace, and their bindings. |
+| [router.yaml.example](router.yaml.example) | The router (nginx with the password check and the signed URL's check), its egress rules, its Service and the one Ingress for `*.<preview-domain>`. |
+| [preview-router.js](preview-router.js) | The router's check of the signed URLs, for nginx's njs module (see [The signed URL](#the-signed-url)). |
+| [access.yaml.example](access.yaml.example) | The ServiceAccount of the preview commands with its token and Role, and the cleanup's ServiceAccount and Role. |
+| [cleanup.yaml.example](cleanup.yaml.example) and [cleanup.sh](cleanup.sh) | The CronJob that removes what is past its lifetime, never got ready, or whose dependency step restarted, every ten minutes. |
+| [dry_run.py](dry_run.py) | The check of the policy, with dry runs only (see [Checking the policy](#checking-the-policy)). |
+
+Example values used below: the domain `preview.example.invalid`, the namespaces
+`preview-apps` (previews) and `preview-router` (router), five previews at
+once, a lifetime of 72 hours, 3 GiB of memory in all.
+
+1. **A certificate and a DNS name for `*.<preview-domain>`.** Every preview
+   is one label under the domain (`sample-12.preview.example.invalid`), so one
+   wildcard certificate and one wildcard DNS record serve them all and no
+   request ever creates a DNS record. A certificate for `*.example.invalid` does
+   not cover `sample-12.preview.example.invalid`: a wildcard covers one label.
+   Choose a domain whose name says nothing internal (the address is posted on
+   the tracker) and whose registrable part runs nothing else of yours, as
+   `example.invalid` in these examples: a preview runs a branch's code in the
+   requester's browser. Under a domain your other services share, its
+   JavaScript could set cookies for that whole domain, would receive the
+   cookies those services set for it, and would send them requests that count
+   as same-site. With AWS Certificate Manager, in the load balancer's region:
+
+   ```sh
+   aws acm request-certificate --region <region> \
+     --domain-name '*.<preview-domain>' --validation-method DNS
+   ```
+
+   Create the validation CNAME record ACM names in the public zone that holds
+   the domain, wait until the certificate is `ISSUED` (the load balancer
+   controller's documentation says validation can take up to 30 minutes), and
+   keep the record: ACM renews a DNS-validated certificate with it. The
+   certificate's ARN is `<certificate-arn>`.
+2. **The policy first.** Apply the namespaces, then the preview namespace's
+   objects and the admission policy, before anything else runs there:
+
+   ```sh
+   kubectl apply -f namespaces.yaml
+   kubectl apply -f preview-namespace.yaml
+   kubectl apply -f admission-policy.yaml
+   ```
+
+3. **The router.** Make the password file with two users: one for the
+   requesters, whose password you hand to them outside the tracker, and one
+   for the preview command's check (`PREVIEW_CHECK_AUTH`), which only the
+   engine gets. Each line is `user:hash`. `openssl passwd -6` makes a SHA-512
+   crypt hash, which nginx checks with the C library's crypt: glibc and musl,
+   the C libraries of Linux nginx images, read it. (`openssl passwd -apr1`
+   makes a weaker hash nginx reads by itself everywhere.)
+
+   Then the signing key of the signed URLs, and the router's script. The key
+   goes to the router here and to the engine in step 5; keep the file only
+   until then:
+
+   ```sh
+   printf '%s:%s\n' requester "$(openssl passwd -6)" > htpasswd
+   printf '%s:%s\n' preview-check "$(openssl passwd -6)" >> htpasswd
+   kubectl -n <router-namespace> create secret generic preview-router-auth --from-file=htpasswd
+   rm htpasswd
+   openssl rand -base64 32 | tr -d '\n' > signing-key
+   kubectl -n <router-namespace> create secret generic preview-router-signing --from-file=key=signing-key
+   kubectl -n <router-namespace> create configmap preview-router-js --from-file=preview-router.js
+   kubectl apply -f router.yaml
+   ```
+
+   The nginx image needs the njs module (loaded from
+   `/etc/nginx/modules/ngx_http_js_module.so`) and the auth_request module;
+   the official images have both. If the image has njs built in, drop the
+   `load_module` line.
+
+   The Ingress makes one internet-facing load balancer (it costs while it
+   exists). When it has an address
+   (`kubectl -n <router-namespace> get ingress preview-router`), create the
+   DNS record `*.<preview-domain>` as an alias (or CNAME) of that address by
+   hand. The Ingress carries no external-dns annotation on purpose: a record
+   external-dns made would not be removed with it.
+4. **The rules image.** The router's init container `net` loads its rules
+   with the same image and the same program as the previews' `net-hold`,
+   `net-install` and `net`. When the router's Pod runs, the program is there
+   and loads a rules file. If `net` fails
+   (`kubectl -n <router-namespace> logs deploy/preview-router -c net`), the
+   program is somewhere else in the image: change the command in
+   [router.yaml.example](router.yaml.example), `NET_COMMANDS` in
+   [preview.py](preview.py) and the two command lists of the policy together
+   (see [The rules image](#the-rules-image)).
+5. **The identities.** Apply [access.yaml.example](access.yaml.example). Put
+   the token of `preview-operator` into the engine's Secret as
+   `PREVIEW_K8S_TOKEN`, the check user's `user:password` as
+   `PREVIEW_CHECK_AUTH` and the content of `signing-key` as
+   `PREVIEW_SIGNING_KEY`, add the three to the StatefulSet's environment the
+   way the other keys are added
+   ([SETUP.md](../../../deploy/ticket-engine/SETUP.md), section 5), remove
+   `signing-key`, and restart the engine: it reads its keys when it starts.
+6. **The cleanup.**
+
+   ```sh
+   kubectl -n <router-namespace> create configmap preview-cleanup --from-file=cleanup.sh
+   kubectl apply -f cleanup.yaml
+   ```
+
+7. **The commands.** Add `preview.py` and the cluster's CA certificate (the
+   file `PREVIEW_K8S_CA_FILE` names) to the operator-scripts ConfigMap, and
+   the two roles and the preview setting to the operator configuration (see
+   [The role configuration](#the-role-configuration)).
+8. **Check.** Run [dry_run.py](dry_run.py) with the token of
+   `preview-operator` (see [Checking the policy](#checking-the-policy)). Then
+   file one request that changes a page of a small project, and open the
+   address the engine posts.
+
+## Values a person fills in
+
+| Placeholder | Where it is used | What it is |
+| --- | --- | --- |
+| `<preview-namespace>` | every file, `PREVIEW_NAMESPACE` | The namespace of the previews, for example `preview-apps`. |
+| `<router-namespace>` | every file but the policy | The namespace of the router, the identities and the cleanup, for example `preview-router`. |
+| `<preview-domain>` | router, `PREVIEW_DOMAIN` | The domain every preview gets one label under, for example `preview.example.invalid`. |
+| `<certificate-arn>` | router | The ARN of the certificate for `*.<preview-domain>` (step 1). |
+| `<cluster-dns-ip>` | preview namespace, router | The cluster DNS Service address: `kubectl -n kube-system get service kube-dns -o jsonpath='{.spec.clusterIP}'`. It has to be the nameserver a Pod's `/etc/resolv.conf` names. |
+| `<service-cidr>` | preview namespace, router | The cluster's Service address range. |
+| `<net-image>` | policy, router, `PREVIEW_NET_IMAGE` | The rules image, by digest (`name@sha256:...`). It needs `iptables-restore` and must run on the preview's nodes. |
+| `<nginx-image>` | router | An nginx image that runs as a user other than root (uid 101), by digest. |
+| `<kubectl-image>` | cleanup | An image with kubectl, a POSIX sh and a `date` that reads `-d @SECONDS`, by digest. |
+| `<region>` | step 1 only | The region of the load balancer. |
+| `<api-server>` | `PREVIEW_K8S_SERVER` | The address of the cluster's API server. The engine's Pod has to reach it. |
 
 ## The role configuration
 
@@ -218,6 +362,10 @@ address stops opening at the preview's end.
   first line of `TASK_PREVIEW`. A lifetime extended (the same change brought
   up again) gets a new URL with the new end; the old one stops at the old
   end.
+- **Checked:** the tests run [preview-router.js](preview-router.js) with the
+  njs command line where one is installed (`PREVIEW_NJS`, or `njs` on
+  `PATH`) and skip it where not; a table of signatures njs made binds
+  `preview.py` to the same text everywhere.
 - **The router** checks it after the password: the signature made again
   from the request's `Host` and `<end>` has to match (compared in constant
   time), and `<end>` has to be later than now. Then it sets the cookie
@@ -226,6 +374,10 @@ address stops opening at the preview's end.
   Every other path needs the password and that cookie; without them it
   answers 401 and 403. Paths under `/_preview/` belong to the router and
   never reach the application.
+- **The application's cookies:** before forwarding, the router removes its
+  own cookie from the `Cookie` header; in the answer, it rewrites the
+  `Domain` of every `Set-Cookie` to the host and drops one of its own name or
+  with a `Domain` that still names something else.
 
 ## Exit status and output
 
@@ -279,16 +431,21 @@ The Deployment `up` sends, and nothing else of it varies but the settings:
   `PreemptLowerPriority`.
 - `net-*` run as root with `NET_ADMIN` only and a read-only root. Every
   other container runs as a user other than root, without privilege
-  escalation and with every capability dropped. Memory, CPU and local
+  escalation and with every capability dropped.
+- `nodeSelector` is `kubernetes.io/arch: amd64`, and the policy accepts no
+  other value (nor `kubernetes.io/os` other than `linux`): a cluster whose
+  general nodes are arm64 changes it in `preview.py` and in the policy
+  together. Memory, CPU and local
   storage are limited in every container.
 - The volumes are emptyDirs (the checkout's holds 1 GiB) and the ConfigMap
   `preview-egress`. No Secret, no projected token, no host path.
 - The Service is a ClusterIP Service from port 80 to `PREVIEW_PORT`, with a
   selector and no annotations.
 
-The cluster's admission policy accepts this shape and refuses the ones that
-would let the token's holder run a privileged Pod, reach the node, take the
-node's network or publish a load balancer.
+[admission-policy.yaml.example](admission-policy.yaml.example) accepts this
+shape and refuses the ones that would let the token's holder run a privileged
+Pod, reach the node, take the node's network or publish a load balancer
+([Checking the policy](#checking-the-policy) lists what it refuses).
 
 ## The rules image
 
@@ -300,6 +457,190 @@ the preview's nodes. These commands are fixed in `NET_COMMANDS` in
 [preview.py](preview.py), and the admission policy accepts exactly them:
 when the program sits elsewhere in a new image, change both together, then
 the digest.
+
+## Checking the policy
+
+[dry_run.py](dry_run.py) sends every shape below to the cluster as a
+server-side dry run (`kubectl apply --server-side --dry-run=server`): it goes
+through admission, policies included, and nothing is stored. It uses only the
+kubeconfig files it is given, never the default one:
+
+```sh
+python3 dry_run.py --kubeconfig preview-operator.kubeconfig --context <context> \
+  --namespace <preview-namespace> --other-namespace <router-namespace> \
+  --net-image '<net-image>' \
+  --admin-kubeconfig admin.kubeconfig --admin-context <admin-context>
+```
+
+`--kubeconfig` holds the token of `preview-operator`, so the Deployments and
+Services are sent with the preview commands' own permissions. The Pod cases
+need an identity that may create Pods (`--admin-kubeconfig`), since
+`preview-operator` may not; they check the Pod policy, the last line, met
+when a ReplicaSet creates a Pod. `--write DIRECTORY` writes every case's
+object as JSON instead, without a cluster. A policy just applied takes a
+moment before it acts (0.6 seconds on the local server below): the command
+first sends one shape only the policy refuses until it is refused, for at
+most `--settle-seconds` (30).
+
+A case passes when what has to pass passes, and what has to be refused is
+refused with `ValidatingAdmissionPolicy '<its policy>'` and the rule's
+message. A refusal for another reason (RBAC, the API's own validation, the
+quota) did not test the policy and fails the case. The command also asks
+`kubectl auth can-i` what `preview-operator` may do: Deployments, Services and
+`pods/exec` in the preview namespace yes; Pods, Ingresses, Secrets,
+ConfigMaps, ServiceAccounts, Roles, ephemeral containers and anything in
+another namespace no. It exits 0 when every check came out as expected.
+
+| Case | Sent as | Expected |
+| --- | --- | --- |
+| preview.py's Deployment without the dependency step | Deployment | passes |
+| preview.py's Deployment with the dependency step | Deployment | passes |
+| preview.py's Service | Service | passes |
+| a privileged container | Deployment | preview-deployment-shape |
+| a hostPath volume | Deployment | preview-deployment-shape |
+| hostNetwork | Deployment | preview-deployment-shape |
+| hostPID | Deployment | preview-deployment-shape |
+| a hostPort | Deployment | preview-deployment-shape |
+| nodeName | Deployment | preview-deployment-shape |
+| a toleration of another taint (an engine-only node pool) | Deployment | preview-deployment-shape |
+| a toleration without a key (tolerates every taint) | Deployment | preview-deployment-shape |
+| affinity | Deployment | preview-deployment-shape |
+| a nodeSelector of another label | Deployment | preview-deployment-shape |
+| nodeSelector kubernetes.io/arch=arm64 | Deployment | preview-deployment-shape |
+| nodeSelector kubernetes.io/os=windows | Deployment | preview-deployment-shape |
+| NET_ADMIN in a container other than the rules containers | Deployment | preview-deployment-shape |
+| net with another image | Deployment | preview-deployment-shape |
+| net with another command | Deployment | preview-deployment-shape |
+| net with args | Deployment | preview-deployment-shape |
+| net-install with net's command | Deployment | preview-deployment-shape |
+| net adding SYS_ADMIN besides NET_ADMIN | Deployment | preview-deployment-shape |
+| net without dropping ALL | Deployment | preview-deployment-shape |
+| the application without dropping ALL | Deployment | preview-deployment-shape |
+| receive dropping only NET_RAW | Deployment | preview-deployment-shape |
+| every rules container reading /policy from the checkout | Deployment | preview-deployment-shape |
+| net alone reading /policy from the checkout | Deployment | preview-deployment-shape |
+| the checkout mounted over /usr/sbin in net | Deployment | preview-deployment-shape |
+| a checkout file mounted over /policy/run.rules in net | Deployment | preview-deployment-shape |
+| an environment variable in net (XTABLES_LIBDIR) | Deployment | preview-deployment-shape |
+| PATH set in net | Deployment | preview-deployment-shape |
+| the rules ConfigMap with install.rules as run.rules | Deployment | preview-deployment-shape |
+| the application mounting the rules volume | Deployment | preview-deployment-shape |
+| the init containers without net | Deployment | preview-deployment-shape |
+| an init container after net | Deployment | preview-deployment-shape |
+| an init container before net-hold | Deployment | preview-deployment-shape |
+| an init container between receive and net | Deployment | preview-deployment-shape |
+| an init container with restartPolicy Always | Deployment | preview-deployment-shape |
+| install without timeout | Deployment | preview-deployment-shape |
+| install without -s KILL | Deployment | preview-deployment-shape |
+| install with -s TERM | Deployment | preview-deployment-shape |
+| install for 0 seconds | Deployment | preview-deployment-shape |
+| install for 481 seconds | Deployment | preview-deployment-shape |
+| install for 30s | Deployment | preview-deployment-shape |
+| install with args | Deployment | preview-deployment-shape |
+| no seccompProfile on the Pod | Deployment | preview-deployment-shape |
+| seccompProfile Unconfined on the Pod | Deployment | preview-deployment-shape |
+| seccompProfile Unconfined on a container | Deployment | preview-deployment-shape |
+| procMount Unmasked | Deployment | preview-deployment-shape |
+| priorityClassName system-node-critical | Deployment | preview-deployment-shape |
+| a priority of 1000000 | Deployment | preview-deployment-shape |
+| no terminationGracePeriodSeconds (30 by default) | Deployment | preview-deployment-shape |
+| terminationGracePeriodSeconds 30 | Deployment | preview-deployment-shape |
+| sysctls | Deployment | preview-deployment-shape |
+| seLinuxOptions | Deployment | preview-deployment-shape |
+| AppArmor Unconfined on the Pod | Deployment | preview-deployment-shape |
+| AppArmor Unconfined on a container | Deployment | preview-deployment-shape |
+| resourceClaims | Deployment | preview-deployment-shape |
+| a projected ServiceAccount token volume | Deployment | preview-deployment-shape |
+| a Secret volume | Deployment | preview-deployment-shape |
+| an environment value from a Secret | Deployment | preview-deployment-shape |
+| an environment from a Secret | Deployment | preview-deployment-shape |
+| no hostUsers | Deployment | preview-deployment-shape |
+| automountServiceAccountToken true | Deployment | preview-deployment-shape |
+| another ServiceAccount | Deployment | preview-deployment-shape |
+| a runtimeClassName | Deployment | preview-deployment-shape |
+| an application container named net-install | Deployment | preview-deployment-shape |
+| an application running as root | Deployment | preview-deployment-shape |
+| a LoadBalancer Service | Service | preview-service-shape |
+| a NodePort Service | Service | preview-service-shape |
+| an ExternalName Service | Service | preview-service-shape |
+| a Service with externalIPs | Service | preview-service-shape |
+| a Service without a selector | Service | preview-service-shape |
+| a Service with an external-dns hostname | Service | preview-service-shape |
+| a Service with a load balancer annotation | Service | preview-service-shape |
+| preview.py's Pod (as a ReplicaSet would create it) | Pod (admin) | passes |
+| a privileged Pod | Pod (admin) | preview-pod-shape |
+| a Pod with an init container before the rules | Pod (admin) | preview-pod-shape |
+| a Pod without seccompProfile | Pod (admin) | preview-pod-shape |
+
+Every one of these came out as expected on a local kube-apiserver v1.36.0
+with this directory's manifests applied. That is not the cluster the
+previews will run on: run it there after applying.
+
+## Checking a running preview
+
+What only a real cluster shows, to try once the setup is applied and a
+preview is up (the name below is an example):
+
+- **No egress while the application runs.** From the application's
+  container, open a TCP connection to a public address by its number, not
+  its name: a name already fails at DNS, which would pass with the TCP rule
+  broken.
+
+  ```sh
+  kubectl -n <preview-namespace> exec deploy/pv-sample-12 -c app -- \
+    python3 -c "import socket; socket.create_connection(('1.1.1.1', 443), 5)"
+  ```
+
+  It has to fail (connection refused or timed out).
+- **The password never reaches the application.** Bring up a checkout whose
+  application answers with the headers it received, open it, and look for
+  `Authorization` and `__Host-preview`: neither may be there.
+- **No token in the router's log.**
+  `kubectl -n <router-namespace> logs deploy/preview-router | grep -c 't='`
+  has to print 0 after a signed URL was opened.
+
+## Replacing the token or the password
+
+The token of `preview-operator` has no expiry: the engine reads its keys when
+it starts, so a token that expired would stop every preview until the engine
+was restarted. Replace it when it may have leaked, when the people who could
+read it change, and at the interval the owner of the installation sets:
+
+1. Make a second token Secret for the same ServiceAccount (a copy of
+   `preview-operator-token` under another name).
+2. Put its token into the engine's Secret as `PREVIEW_K8S_TOKEN`.
+3. Restart the engine. This is a change to the running installation: do it
+   with its owner's go-ahead.
+4. Delete the old token Secret. The old token stops working at once.
+5. Check that the old token is refused: with it,
+   `kubectl -n <preview-namespace> get deployments` has to answer
+   `Unauthorized`.
+
+In a hurry, do step 4 first. Until the engine has the new token every
+preview fails, and the requesters get their questions in words; no request
+stops.
+
+The check user's password the same way: a new `user:hash` line in the
+password file (step 3 of the setup), the Secret `preview-router-auth`
+replaced and the router restarted, the new `user:password` into the engine's
+Secret as `PREVIEW_CHECK_AUTH` and the engine restarted, then the old line
+removed. The requesters' password is changed in the password file alone and
+handed to them again outside the tracker.
+
+The signing key of the signed URLs is held twice, by the router and by the
+engine, and both have to change:
+
+1. Make a new key: `openssl rand -base64 32 | tr -d '\n' > signing-key`.
+2. Replace the router's Secret `preview-router-signing` with it, and restart
+   the router (`kubectl -n <router-namespace> rollout restart deployment/preview-router`):
+   nginx reads the key from its environment when it starts.
+3. Put the same value into the engine's Secret as `PREVIEW_SIGNING_KEY`, and
+   restart the engine (with its owner's go-ahead). Remove `signing-key`.
+4. Every open preview's URL and cookie now answer 403; a requester asks for
+   the preview again, and it is brought up with a new URL.
+
+Between steps 2 and 3 the two keys differ: every preview brought up then
+fails its check with 403 and the requester gets the question in words.
 
 ## Limits
 
@@ -313,7 +654,10 @@ the digest.
   rules for ip6tables.
 - What the dependency step downloads is not checked. During the step the Pod
   can reach any public address, for at most `PREVIEW_INSTALL_SECONDS` per
-  attempt.
+  attempt. That limit holds for the shape `preview.py` sends; the token's
+  holder chooses the image, whose `timeout` need not be real, and can make the
+  Deployment again. What stays bounded for them is the policy: no privilege,
+  no private address, the quota.
 - The signed URL is posted on the tracker: whoever can read the request and
   knows the shared password can open that request's preview until its end.
   It also stays in the engine's own records of the request (its history and
@@ -321,3 +665,29 @@ the digest.
   access log if one is turned on. Changing the signing key is the
   only way to stop a URL before its end, and it stops every open preview.
 - An application cannot use paths under `/_preview/`: the router keeps them.
+- Cookies the application sets in its answers are bound to the preview's
+  host: the router rewrites their `Domain` to the host
+  (`proxy_cookie_domain`) and drops any whose `Domain` still names something
+  else. Cookies its JavaScript writes or sends are not stopped: under a
+  domain other services share, a preview can still set cookies for that
+  domain from the browser.
+- The router's access log writes the path without its query, so tokens stay
+  out of it. Its error log keeps only critical errors for the signed URL's
+  path, so a mistyped password or an unknown user does not write the request
+  line, with its token, there either; such failures are not logged at all.
+- One password file for every installation the router serves: a requester of
+  one installation can open another's previews.
+- Nothing stops other Pods of the cluster from connecting to a preview: the
+  cluster's NetworkPolicy may not be enforced, and a preview holds no
+  credential to take.
+- `kubectl exec` can still run anything in a preview Pod; the policy cannot
+  shape it. Only the preview identity may, and the Pod holds nothing secret.
+- Not yet tried on a real cluster, only on a local API server and in the
+  tests: that the chosen nginx image has the njs and auth_request modules,
+  that the rules image loads the rules inside a Pod with its own user
+  namespace (`hostUsers: false`), that the running rules still let the
+  router and the readiness probe in, that the engine's Pod reaches the API
+  server and the hand-over over `kubectl exec` works from inside the role
+  launcher, and the warnings the cluster writes in each policy's status when
+  it type-checks the expressions (the local server had no controller
+  manager to write them).

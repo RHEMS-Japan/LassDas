@@ -1,0 +1,288 @@
+# The shape of what may run in the preview namespace (README.md, "The shape
+# the cluster accepts"). A ValidatingAdmissionPolicy is a cluster-wide object;
+# the bindings below make these act on <preview-namespace> only. Copy this
+# file, replace every <placeholder>, and apply it before the preview commands
+# run (README.md, "What a person sets up once", step 2).
+#
+# <preview-namespace>  the preview namespace
+# <net-image>          the rules image by digest, the same as PREVIEW_NET_IMAGE
+#
+# Why RBAC is not enough: whoever may create a Deployment may, unless
+# something refuses it, run a privileged Pod on any node; whoever may create
+# a Service may make it a public load balancer with a DNS name. RBAC cannot
+# look inside either. These policies refuse what preview.py never sends.
+#
+# Three policies: Deployments (where the preview commands' requests are
+# refused at once, with the policy's name in the message), Pods (the last
+# line, when a ReplicaSet creates the Pod) and Services. The Deployment and
+# the Pod policies differ only in the variables spec (the Pod template's spec
+# or the Pod's) and checkNodeName (a Pod is only checked for nodeName when it
+# is created: the scheduler sets it later through pods/binding). Every
+# validation after them is the same text in both.
+#
+# Checked with server-side dry runs: dry_run.py beside this file (README.md,
+# "Checking the policy").
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: preview-deployment-shape
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments"]
+  variables:
+    - name: spec
+      expression: "object.spec.template.spec"
+    - name: checkNodeName
+      expression: "true"
+    - name: initContainers
+      expression: "has(variables.spec.initContainers) ? variables.spec.initContainers : []"
+    - name: containers
+      expression: "variables.spec.containers"
+    - name: everyContainer
+      expression: "variables.initContainers + variables.containers"
+    - name: initNames
+      expression: "variables.initContainers.map(c, c.name)"
+    - name: netNames
+      expression: "['net-hold', 'net-install', 'net']"
+    - name: runRules
+      expression: "['iptables-restore', '--wait', '5', '/policy/run.rules']"
+    - name: installRules
+      expression: "['iptables-restore', '--wait', '5', '/policy/install.rules']"
+    - name: netImage
+      expression: "'<net-image>'"
+  validations:
+    - expression: "!(has(variables.spec.hostNetwork) && variables.spec.hostNetwork) && !(has(variables.spec.hostPID) && variables.spec.hostPID) && !(has(variables.spec.hostIPC) && variables.spec.hostIPC)"
+      message: "hostNetwork, hostPID and hostIPC are not allowed"
+    - expression: "!variables.checkNodeName || !has(variables.spec.nodeName)"
+      message: "nodeName is not allowed"
+    - expression: "has(variables.spec.hostUsers) && variables.spec.hostUsers == false"
+      message: "hostUsers must be false"
+    - expression: "has(variables.spec.automountServiceAccountToken) && variables.spec.automountServiceAccountToken == false"
+      message: "automountServiceAccountToken must be false"
+    - expression: "(!has(variables.spec.serviceAccountName) || variables.spec.serviceAccountName == 'default') && (!has(variables.spec.serviceAccount) || variables.spec.serviceAccount == 'default')"
+      message: "only the default ServiceAccount is allowed"
+    - expression: "!has(variables.spec.runtimeClassName)"
+      message: "runtimeClassName is not allowed"
+    - expression: "!has(variables.spec.ephemeralContainers) || size(variables.spec.ephemeralContainers) == 0"
+      message: "ephemeral containers are not allowed"
+    - expression: "!has(variables.spec.tolerations) || variables.spec.tolerations.all(t, has(t.key) && t.key in ['node.kubernetes.io/not-ready', 'node.kubernetes.io/unreachable'])"
+      message: "only the not-ready and unreachable tolerations are allowed"
+    - expression: "(!has(variables.spec.nodeSelector) || variables.spec.nodeSelector.all(k, (k == 'kubernetes.io/arch' && variables.spec.nodeSelector[k] == 'amd64') || (k == 'kubernetes.io/os' && variables.spec.nodeSelector[k] == 'linux'))) && !has(variables.spec.affinity)"
+      message: "nodeSelector may only be kubernetes.io/arch=amd64 and kubernetes.io/os=linux, and affinity is not allowed"
+    - expression: "has(variables.spec.securityContext) && has(variables.spec.securityContext.seccompProfile) && variables.spec.securityContext.seccompProfile.type == 'RuntimeDefault'"
+      message: "the Pod's seccompProfile must be RuntimeDefault"
+    - expression: "!has(variables.spec.securityContext) || ((!has(variables.spec.securityContext.sysctls) || size(variables.spec.securityContext.sysctls) == 0) && !has(variables.spec.securityContext.seLinuxOptions))"
+      message: "sysctls and seLinuxOptions are not allowed"
+    - expression: "!has(variables.spec.securityContext) || !has(variables.spec.securityContext.appArmorProfile) || variables.spec.securityContext.appArmorProfile.type != 'Unconfined'"
+      message: "an Unconfined AppArmor profile is not allowed"
+    - expression: "!has(variables.spec.resourceClaims) || size(variables.spec.resourceClaims) == 0"
+      message: "resourceClaims are not allowed"
+    - expression: "!has(variables.spec.priorityClassName)"
+      message: "priorityClassName is not allowed"
+    - expression: "!has(variables.spec.priority) || variables.spec.priority == 0"
+      message: "a priority other than 0 is not allowed"
+    - expression: "has(variables.spec.terminationGracePeriodSeconds) && variables.spec.terminationGracePeriodSeconds <= 10"
+      message: "terminationGracePeriodSeconds must be set and at most 10"
+    - expression: "!has(variables.spec.volumes) || variables.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && has(v.configMap.name) && v.configMap.name == 'preview-egress'))"
+      message: "only emptyDir volumes and the ConfigMap preview-egress are allowed"
+    - expression: "variables.everyContainer.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || c.securityContext.privileged == false)"
+      message: "privileged containers are not allowed"
+    - expression: "variables.everyContainer.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false)"
+      message: "every container must set allowPrivilegeEscalation to false"
+    - expression: "variables.everyContainer.all(c, has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && 'ALL' in c.securityContext.capabilities.drop)"
+      message: "every container must drop ALL capabilities"
+    - expression: "variables.everyContainer.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))"
+      message: "hostPort is not allowed"
+    - expression: "variables.everyContainer.all(c, (!has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef))) && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef))))"
+      message: "reading a Secret into the environment is not allowed"
+    - expression: "variables.everyContainer.all(c, !has(c.securityContext) || !has(c.securityContext.procMount) || c.securityContext.procMount == 'Default')"
+      message: "procMount must be Default"
+    - expression: "variables.everyContainer.all(c, !has(c.securityContext) || !has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault')"
+      message: "a container's seccompProfile, when set, must be RuntimeDefault"
+    - expression: "variables.everyContainer.all(c, !has(c.securityContext) || !has(c.securityContext.appArmorProfile) || c.securityContext.appArmorProfile.type != 'Unconfined')"
+      message: "an Unconfined AppArmor profile is not allowed"
+    - expression: "variables.initNames == ['net-hold', 'receive', 'net'] || variables.initNames == ['net-hold', 'receive', 'net-install', 'install', 'net']"
+      message: "the init containers must be net-hold, receive, net or net-hold, receive, net-install, install, net"
+    - expression: "variables.initContainers.all(c, !has(c.restartPolicy))"
+      message: "an init container may not set restartPolicy"
+    - expression: "variables.containers.all(c, !(c.name in variables.netNames))"
+      message: "net-hold, net-install and net are init container names only"
+    - expression: "variables.everyContainer.filter(c, !(c.name in variables.netNames)).all(c, has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot == true && (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0))"
+      message: "every container but the rules containers must set runAsNonRoot to true and add no capability"
+    - expression: "variables.initContainers.filter(c, c.name == 'install').all(c, has(c.command) && size(c.command) == 7 && c.command[0] == 'timeout' && c.command[1] == '-s' && c.command[2] == 'KILL' && c.command[3].matches('^[0-9]{1,3}$') && int(c.command[3]) >= 1 && int(c.command[3]) <= 480 && c.command[4] == 'sh' && c.command[5] == '-c' && (!has(c.args) || size(c.args) == 0))"
+      message: "install must run as timeout -s KILL SECONDS sh -c COMMAND, SECONDS from 1 to 480, without args"
+    - expression: "variables.initContainers.filter(c, c.name in variables.netNames).all(c, c.image == variables.netImage && has(c.command) && c.command == (c.name == 'net-install' ? variables.installRules : variables.runRules) && (!has(c.args) || size(c.args) == 0) && has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.add) && c.securityContext.capabilities.add == ['NET_ADMIN'] && has(c.securityContext.capabilities.drop) && 'ALL' in c.securityContext.capabilities.drop)"
+      message: "net-hold, net-install and net must run the rules image's fixed command, without args, adding NET_ADMIN only and dropping ALL"
+    - expression: "variables.initContainers.filter(c, c.name in variables.netNames).all(c, !has(c.env) && !has(c.envFrom) && has(c.volumeMounts) && size(c.volumeMounts) == 2 && c.volumeMounts.exists(m, m.name == 'policy' && m.mountPath == '/policy' && has(m.readOnly) && m.readOnly == true && !has(m.subPath) && !has(m.subPathExpr)) && c.volumeMounts.exists(m, m.name == 'xtables' && m.mountPath == '/run' && !has(m.subPath) && !has(m.subPathExpr)))"
+      message: "net-hold, net-install and net must mount only the rules ConfigMap at /policy and an emptyDir at /run, and set no environment"
+    - expression: "has(variables.spec.volumes) && variables.spec.volumes.exists(v, v.name == 'policy' && has(v.configMap) && v.configMap.name == 'preview-egress' && !has(v.configMap.items)) && variables.spec.volumes.exists(v, v.name == 'xtables' && has(v.emptyDir)) && variables.everyContainer.filter(c, !(c.name in variables.netNames)).all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'xtables' && m.name != 'policy'))"
+      message: "the volume policy must be the ConfigMap preview-egress as a whole and xtables an emptyDir, both for the rules containers only"
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: preview-deployment-shape
+spec:
+  policyName: preview-deployment-shape
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: <preview-namespace>
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: preview-pod-shape
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods", "pods/ephemeralcontainers"]
+  variables:
+    - name: spec
+      expression: "object.spec"
+    - name: checkNodeName
+      expression: "request.operation == 'CREATE'"
+    - name: initContainers
+      expression: "has(variables.spec.initContainers) ? variables.spec.initContainers : []"
+    - name: containers
+      expression: "variables.spec.containers"
+    - name: everyContainer
+      expression: "variables.initContainers + variables.containers"
+    - name: initNames
+      expression: "variables.initContainers.map(c, c.name)"
+    - name: netNames
+      expression: "['net-hold', 'net-install', 'net']"
+    - name: runRules
+      expression: "['iptables-restore', '--wait', '5', '/policy/run.rules']"
+    - name: installRules
+      expression: "['iptables-restore', '--wait', '5', '/policy/install.rules']"
+    - name: netImage
+      expression: "'<net-image>'"
+  validations:
+    - expression: "!(has(variables.spec.hostNetwork) && variables.spec.hostNetwork) && !(has(variables.spec.hostPID) && variables.spec.hostPID) && !(has(variables.spec.hostIPC) && variables.spec.hostIPC)"
+      message: "hostNetwork, hostPID and hostIPC are not allowed"
+    - expression: "!variables.checkNodeName || !has(variables.spec.nodeName)"
+      message: "nodeName is not allowed"
+    - expression: "has(variables.spec.hostUsers) && variables.spec.hostUsers == false"
+      message: "hostUsers must be false"
+    - expression: "has(variables.spec.automountServiceAccountToken) && variables.spec.automountServiceAccountToken == false"
+      message: "automountServiceAccountToken must be false"
+    - expression: "(!has(variables.spec.serviceAccountName) || variables.spec.serviceAccountName == 'default') && (!has(variables.spec.serviceAccount) || variables.spec.serviceAccount == 'default')"
+      message: "only the default ServiceAccount is allowed"
+    - expression: "!has(variables.spec.runtimeClassName)"
+      message: "runtimeClassName is not allowed"
+    - expression: "!has(variables.spec.ephemeralContainers) || size(variables.spec.ephemeralContainers) == 0"
+      message: "ephemeral containers are not allowed"
+    - expression: "!has(variables.spec.tolerations) || variables.spec.tolerations.all(t, has(t.key) && t.key in ['node.kubernetes.io/not-ready', 'node.kubernetes.io/unreachable'])"
+      message: "only the not-ready and unreachable tolerations are allowed"
+    - expression: "(!has(variables.spec.nodeSelector) || variables.spec.nodeSelector.all(k, (k == 'kubernetes.io/arch' && variables.spec.nodeSelector[k] == 'amd64') || (k == 'kubernetes.io/os' && variables.spec.nodeSelector[k] == 'linux'))) && !has(variables.spec.affinity)"
+      message: "nodeSelector may only be kubernetes.io/arch=amd64 and kubernetes.io/os=linux, and affinity is not allowed"
+    - expression: "has(variables.spec.securityContext) && has(variables.spec.securityContext.seccompProfile) && variables.spec.securityContext.seccompProfile.type == 'RuntimeDefault'"
+      message: "the Pod's seccompProfile must be RuntimeDefault"
+    - expression: "!has(variables.spec.securityContext) || ((!has(variables.spec.securityContext.sysctls) || size(variables.spec.securityContext.sysctls) == 0) && !has(variables.spec.securityContext.seLinuxOptions))"
+      message: "sysctls and seLinuxOptions are not allowed"
+    - expression: "!has(variables.spec.securityContext) || !has(variables.spec.securityContext.appArmorProfile) || variables.spec.securityContext.appArmorProfile.type != 'Unconfined'"
+      message: "an Unconfined AppArmor profile is not allowed"
+    - expression: "!has(variables.spec.resourceClaims) || size(variables.spec.resourceClaims) == 0"
+      message: "resourceClaims are not allowed"
+    - expression: "!has(variables.spec.priorityClassName)"
+      message: "priorityClassName is not allowed"
+    - expression: "!has(variables.spec.priority) || variables.spec.priority == 0"
+      message: "a priority other than 0 is not allowed"
+    - expression: "has(variables.spec.terminationGracePeriodSeconds) && variables.spec.terminationGracePeriodSeconds <= 10"
+      message: "terminationGracePeriodSeconds must be set and at most 10"
+    - expression: "!has(variables.spec.volumes) || variables.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && has(v.configMap.name) && v.configMap.name == 'preview-egress'))"
+      message: "only emptyDir volumes and the ConfigMap preview-egress are allowed"
+    - expression: "variables.everyContainer.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || c.securityContext.privileged == false)"
+      message: "privileged containers are not allowed"
+    - expression: "variables.everyContainer.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false)"
+      message: "every container must set allowPrivilegeEscalation to false"
+    - expression: "variables.everyContainer.all(c, has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && 'ALL' in c.securityContext.capabilities.drop)"
+      message: "every container must drop ALL capabilities"
+    - expression: "variables.everyContainer.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))"
+      message: "hostPort is not allowed"
+    - expression: "variables.everyContainer.all(c, (!has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef))) && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef))))"
+      message: "reading a Secret into the environment is not allowed"
+    - expression: "variables.everyContainer.all(c, !has(c.securityContext) || !has(c.securityContext.procMount) || c.securityContext.procMount == 'Default')"
+      message: "procMount must be Default"
+    - expression: "variables.everyContainer.all(c, !has(c.securityContext) || !has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault')"
+      message: "a container's seccompProfile, when set, must be RuntimeDefault"
+    - expression: "variables.everyContainer.all(c, !has(c.securityContext) || !has(c.securityContext.appArmorProfile) || c.securityContext.appArmorProfile.type != 'Unconfined')"
+      message: "an Unconfined AppArmor profile is not allowed"
+    - expression: "variables.initNames == ['net-hold', 'receive', 'net'] || variables.initNames == ['net-hold', 'receive', 'net-install', 'install', 'net']"
+      message: "the init containers must be net-hold, receive, net or net-hold, receive, net-install, install, net"
+    - expression: "variables.initContainers.all(c, !has(c.restartPolicy))"
+      message: "an init container may not set restartPolicy"
+    - expression: "variables.containers.all(c, !(c.name in variables.netNames))"
+      message: "net-hold, net-install and net are init container names only"
+    - expression: "variables.everyContainer.filter(c, !(c.name in variables.netNames)).all(c, has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot == true && (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0))"
+      message: "every container but the rules containers must set runAsNonRoot to true and add no capability"
+    - expression: "variables.initContainers.filter(c, c.name == 'install').all(c, has(c.command) && size(c.command) == 7 && c.command[0] == 'timeout' && c.command[1] == '-s' && c.command[2] == 'KILL' && c.command[3].matches('^[0-9]{1,3}$') && int(c.command[3]) >= 1 && int(c.command[3]) <= 480 && c.command[4] == 'sh' && c.command[5] == '-c' && (!has(c.args) || size(c.args) == 0))"
+      message: "install must run as timeout -s KILL SECONDS sh -c COMMAND, SECONDS from 1 to 480, without args"
+    - expression: "variables.initContainers.filter(c, c.name in variables.netNames).all(c, c.image == variables.netImage && has(c.command) && c.command == (c.name == 'net-install' ? variables.installRules : variables.runRules) && (!has(c.args) || size(c.args) == 0) && has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.add) && c.securityContext.capabilities.add == ['NET_ADMIN'] && has(c.securityContext.capabilities.drop) && 'ALL' in c.securityContext.capabilities.drop)"
+      message: "net-hold, net-install and net must run the rules image's fixed command, without args, adding NET_ADMIN only and dropping ALL"
+    - expression: "variables.initContainers.filter(c, c.name in variables.netNames).all(c, !has(c.env) && !has(c.envFrom) && has(c.volumeMounts) && size(c.volumeMounts) == 2 && c.volumeMounts.exists(m, m.name == 'policy' && m.mountPath == '/policy' && has(m.readOnly) && m.readOnly == true && !has(m.subPath) && !has(m.subPathExpr)) && c.volumeMounts.exists(m, m.name == 'xtables' && m.mountPath == '/run' && !has(m.subPath) && !has(m.subPathExpr)))"
+      message: "net-hold, net-install and net must mount only the rules ConfigMap at /policy and an emptyDir at /run, and set no environment"
+    - expression: "has(variables.spec.volumes) && variables.spec.volumes.exists(v, v.name == 'policy' && has(v.configMap) && v.configMap.name == 'preview-egress' && !has(v.configMap.items)) && variables.spec.volumes.exists(v, v.name == 'xtables' && has(v.emptyDir)) && variables.everyContainer.filter(c, !(c.name in variables.netNames)).all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'xtables' && m.name != 'policy'))"
+      message: "the volume policy must be the ConfigMap preview-egress as a whole and xtables an emptyDir, both for the rules containers only"
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: preview-pod-shape
+spec:
+  policyName: preview-pod-shape
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: <preview-namespace>
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: preview-service-shape
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services"]
+  validations:
+    - expression: "!has(object.spec.type) || object.spec.type == 'ClusterIP'"
+      message: "only ClusterIP Services are allowed"
+    - expression: "!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0"
+      message: "externalIPs are not allowed"
+    - expression: "has(object.spec.selector) && size(object.spec.selector) > 0"
+      message: "a Service must select its Pods"
+    - expression: "!has(object.metadata.annotations) || object.metadata.annotations.all(k, !k.startsWith('external-dns.alpha.kubernetes.io/') && !k.startsWith('service.beta.kubernetes.io/'))"
+      message: "external-dns and load balancer annotations are not allowed"
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: preview-service-shape
+spec:
+  policyName: preview-service-shape
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: <preview-namespace>

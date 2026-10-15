@@ -1,0 +1,18 @@
+# The two namespaces of the preview (README.md, "What a person sets up once").
+# Copy this file, replace every <placeholder>, and apply it before the others.
+#
+# <preview-namespace> holds one Deployment and one Service per request, the
+# egress rules, the quota and nothing else: no Secret is ever put there, since
+# a request's branch runs there and can be reached with kubectl exec.
+# <router-namespace> holds what has to stay out of the preview's reach: the
+# router and its password file, the ServiceAccounts and their token, and the
+# cleanup.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: <preview-namespace>
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: <router-namespace>

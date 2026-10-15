@@ -1,0 +1,58 @@
+# The cleanup of the preview namespace every ten minutes, whether or not the
+# engine is running (README.md, "What a person sets up once", step 6). Copy
+# this file, replace every <placeholder>, create the ConfigMap with the script
+# beside this file:
+#   kubectl -n <router-namespace> create configmap preview-cleanup --from-file=cleanup.sh
+# and apply. The script says what it removes.
+#
+# <kubectl-image>  an image with kubectl, a POSIX sh and a date that reads
+#                  "-d @SECONDS" (an Alpine based kubectl image has all three),
+#                  by digest
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: preview-cleanup
+  namespace: <router-namespace>
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          serviceAccountName: preview-cleanup
+          restartPolicy: Never
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: cleanup
+              image: <kubectl-image>
+              command: ["/bin/sh", "/cleanup/cleanup.sh"]
+              env:
+                - { name: PREVIEW_NAMESPACE, value: <preview-namespace> }
+                - { name: HOME, value: /tmp }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { memory: 128Mi }
+              volumeMounts:
+                - { name: script, mountPath: /cleanup, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: script
+              configMap: { name: preview-cleanup }
+            - name: tmp
+              emptyDir: { sizeLimit: 64Mi }

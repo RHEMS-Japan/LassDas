@@ -1,0 +1,94 @@
+# What a person creates once in the preview namespace: the quota, the limits
+# for containers that state none, and the egress rules every preview Pod
+# loads. The preview commands create nothing here but Deployments and
+# Services (README.md, "What a person sets up once").
+#
+# <cluster-dns-ip>: the cluster DNS Service address, read with
+#   kubectl -n kube-system get service kube-dns -o jsonpath='{.spec.clusterIP}'
+#   It has to be the nameserver a Pod's /etc/resolv.conf names: a node-local
+#   DNS cache can hand Pods a link-local address, which these rules refuse.
+# <service-cidr>: the cluster's Service address range (on EKS,
+#   aws eks describe-cluster ... --query cluster.kubernetesNetworkConfig.serviceIpv4Cidr).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: preview-quota
+  namespace: <preview-namespace>
+spec:
+  # Five previews at once, 3 GiB of memory between them. A preview that does
+  # not fit is refused when its Pod is created, and the requester gets the
+  # question in words.
+  hard:
+    pods: "5"
+    requests.cpu: "1"
+    requests.memory: 3Gi
+    limits.memory: 3Gi
+    count/deployments.apps: "10"
+    services: "10"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: preview-limits
+  namespace: <preview-namespace>
+spec:
+  limits:
+    - type: Container
+      default: { cpu: 500m, memory: 512Mi, ephemeral-storage: 2Gi }
+      defaultRequest: { cpu: 100m, memory: 512Mi, ephemeral-storage: 64Mi }
+      max: { cpu: "1", memory: 2Gi, ephemeral-storage: 2Gi }
+---
+# Loaded by the init containers net-hold, net-install and net with
+# iptables-restore, which replaces the whole filter table each time: the
+# later file replaces the earlier one in the Pod's own network namespace.
+#
+# run.rules, while the checkout arrives and while the application runs:
+# nothing leaves the Pod but loopback and TCP segments that are not a SYN,
+# which are the replies to the router's and the kubelet's connections. No new
+# connection can be opened, to the cluster or to the internet.
+#
+# install.rules, only around PREVIEW_INSTALL: the cluster DNS, then every
+# private, link-local (the node's metadata address included), shared,
+# multicast and reserved range and the Service range are refused, and public
+# addresses are open, for at most PREVIEW_INSTALL_SECONDS per attempt.
+#
+# IPv4 only: a cluster that gives Pods IPv6 needs the same rules for
+# ip6tables-restore.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: preview-egress
+  namespace: <preview-namespace>
+data:
+  run.rules: |
+    *filter
+    :INPUT ACCEPT [0:0]
+    :FORWARD ACCEPT [0:0]
+    :OUTPUT ACCEPT [0:0]
+    -A OUTPUT -o lo -j ACCEPT
+    -A OUTPUT -p tcp ! --syn -j ACCEPT
+    -A OUTPUT -j REJECT
+    COMMIT
+  install.rules: |
+    *filter
+    :INPUT ACCEPT [0:0]
+    :FORWARD ACCEPT [0:0]
+    :OUTPUT ACCEPT [0:0]
+    -A OUTPUT -o lo -j ACCEPT
+    -A OUTPUT -d <cluster-dns-ip> -p udp --dport 53 -j ACCEPT
+    -A OUTPUT -d <cluster-dns-ip> -p tcp --dport 53 -j ACCEPT
+    -A OUTPUT -d <service-cidr> -j REJECT
+    -A OUTPUT -d 0.0.0.0/8 -j REJECT
+    -A OUTPUT -d 10.0.0.0/8 -j REJECT
+    -A OUTPUT -d 100.64.0.0/10 -j REJECT
+    -A OUTPUT -d 127.0.0.0/8 -j REJECT
+    -A OUTPUT -d 169.254.0.0/16 -j REJECT
+    -A OUTPUT -d 172.16.0.0/12 -j REJECT
+    -A OUTPUT -d 192.168.0.0/16 -j REJECT
+    -A OUTPUT -d 198.18.0.0/15 -j REJECT
+    -A OUTPUT -d 224.0.0.0/4 -j REJECT
+    -A OUTPUT -d 240.0.0.0/4 -j REJECT
+    -A OUTPUT -j ACCEPT
+    COMMIT

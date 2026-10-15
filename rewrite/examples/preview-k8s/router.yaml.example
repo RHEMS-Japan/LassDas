@@ -1,0 +1,286 @@
+# The router: one load balancer and one small nginx for every preview, so no
+# request ever creates an Ingress, a load balancer or a DNS record
+# (README.md, "What a person sets up once"). Copy this file, replace every
+# <placeholder>, create the Secrets preview-router-auth and
+# preview-router-signing and the ConfigMap preview-router-js first
+# (README.md, step 3), then apply.
+#
+# <preview-domain>     the domain every preview gets one label under, the
+#                      same as PREVIEW_DOMAIN (example: preview.example.invalid)
+# <preview-namespace>  the preview namespace, the same as PREVIEW_NAMESPACE
+# <router-namespace>   the router namespace
+# <cluster-dns-ip>     the cluster DNS Service address (preview-namespace.yaml.example)
+# <service-cidr>       the cluster's Service address range
+# <net-image>          the rules image by digest, the same as PREVIEW_NET_IMAGE
+# <nginx-image>        an nginx image that runs as a user other than root,
+#                      with the njs module at /etc/nginx/modules and the
+#                      auth_request module (nginxinc/nginx-unprivileged has
+#                      both), by digest
+# <certificate-arn>    the certificate for *.<preview-domain> (README.md, step 1)
+#
+# Requests for <label>.<preview-domain> go to the Service pv-<label> in the
+# preview namespace after two checks, both required: the password (401
+# without it, on every path) and the signed URL (README.md, "The signed URL"):
+# /_preview/open?t=<token> turns a valid token into the cookie __Host-preview,
+# and every other path needs that cookie (403 without it). The Authorization
+# header and the router's own cookie are removed before forwarding, and a
+# Set-Cookie of the same name from the application is dropped: the
+# application never sees the shared password or the token. The Domain of the
+# application's cookies is bound to the preview's host, so its answers cannot
+# set cookies for the parent domain (its JavaScript still can). The access log
+# writes the path without its query, so tokens stay out of it. When there is
+# nothing to forward to (the preview was removed, or is not up yet) the router
+# answers 404, 502 or 503 with the page that says so; the preview command
+# tells these from the application's own answers.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: preview-router
+  namespace: <router-namespace>
+data:
+  nginx.conf: |
+    load_module /etc/nginx/modules/ngx_http_js_module.so;
+    # The signing key, from the Secret preview-router-signing, for njs.
+    env PREVIEW_SIGNING_KEY;
+    worker_processes 1;
+    pid /tmp/nginx.pid;
+    error_log stderr warn;
+    events { worker_connections 1024; }
+    http {
+      # The path without its query: /_preview/open?t=<token> is logged as
+      # /_preview/open. No Referer either.
+      log_format preview '$remote_addr - $remote_user [$time_local] "$request_method $uri $server_protocol" '
+                         '$status $body_bytes_sent "$http_user_agent"';
+      access_log /dev/stdout preview;
+      server_tokens off;
+      client_body_temp_path /tmp/client_body;
+      proxy_temp_path /tmp/proxy;
+      fastcgi_temp_path /tmp/fastcgi;
+      uwsgi_temp_path /tmp/uwsgi;
+      scgi_temp_path /tmp/scgi;
+      client_max_body_size 20m;
+      resolver <cluster-dns-ip> valid=10s ipv6=off;
+      resolver_timeout 5s;
+      map $http_upgrade $connection_upgrade { default upgrade; "" close; }
+      # The first label of the host, when it is one a preview can have.
+      map $host $preview_label { default ""; "~^(?<label>[a-z0-9-]+)\." $label; }
+      js_path /etc/preview-router/js;
+      js_import preview from preview-router.js;
+      js_set $preview_other_cookies preview.otherCookies;
+
+      # Every other host, and the load balancer's health check (which names
+      # the Pod's address as its host).
+      server {
+        listen 8080 default_server;
+        server_name _;
+        location = /healthz { access_log off; default_type text/plain; return 200 "ok\n"; }
+        location / { return 404; }
+        error_page 404 /ended.html;
+        location = /ended.html { internal; root /etc/preview-router/pages; }
+      }
+
+      server {
+        listen 8080;
+        server_name *.<preview-domain>;
+        auth_basic "preview";
+        auth_basic_user_file /etc/preview-router/auth/htpasswd;
+        error_page 404 502 503 /ended.html;
+        error_page 504 =503 /ended.html;
+        error_page 403 /denied.html;
+        location = /ended.html { internal; auth_basic off; root /etc/preview-router/pages; }
+        location = /denied.html { internal; auth_basic off; root /etc/preview-router/pages; }
+        # After the password: a valid token becomes the cookie, 302 to /.
+        # Only critical errors here: a mistyped password would otherwise log the
+        # request line, with its token, at the error level.
+        location = /_preview/open { error_log stderr crit; js_content preview.open; }
+        location = /_preview/check { internal; js_content preview.check; }
+        location ^~ /_preview/ { return 404; }
+        location / {
+          if ($preview_label = "") { return 404; }
+          # The password (auth_basic) is checked first, then the cookie.
+          auth_request /_preview/check;
+          proxy_pass http://pv-$preview_label.<preview-namespace>.svc.cluster.local;
+          proxy_set_header Authorization "";
+          proxy_set_header Cookie $preview_other_cookies;
+          # The Domain of the application's cookies becomes this host; what
+          # still names another domain afterwards is dropped (filterCookies).
+          proxy_cookie_domain ~.+ $host;
+          js_header_filter preview.filterCookies;
+          proxy_set_header Host $host;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto https;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_connect_timeout 5s;
+        }
+      }
+    }
+  ended.html: |
+    <!doctype html>
+    <html lang="ja">
+    <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>確認用の画面</title></head>
+    <body>
+    <p>この確認用の画面は終了したか、まだ用意できていません。</p>
+    <p>もう一度見るには、チケットに「もう一度見たい」と書いてください。確認からやり直すので数分かかります。</p>
+    </body>
+    </html>
+  denied.html: |
+    <!doctype html>
+    <html lang="ja">
+    <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>確認用の画面</title></head>
+    <body>
+    <p>この画面は課題に投稿された URL から開いてください。</p>
+    <p>URL の期限が過ぎていたら、チケットに「もう一度見たい」と書いてください。</p>
+    </body>
+    </html>
+---
+# The router's own egress: the cluster DNS, and port 80 of the Service range,
+# where the previews' Services are. Nothing in the VPC, nothing public: a
+# Service someone pointed elsewhere still leads nowhere from here. Replies of
+# the router's port (no new connection: no SYN) answer the load balancer.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: preview-router-egress
+  namespace: <router-namespace>
+data:
+  router.rules: |
+    *filter
+    :INPUT ACCEPT [0:0]
+    :FORWARD ACCEPT [0:0]
+    :OUTPUT ACCEPT [0:0]
+    -A OUTPUT -o lo -j ACCEPT
+    -A OUTPUT -p tcp --sport 8080 ! --syn -j ACCEPT
+    -A OUTPUT -d <cluster-dns-ip> -p udp --dport 53 -j ACCEPT
+    -A OUTPUT -d <cluster-dns-ip> -p tcp --dport 53 -j ACCEPT
+    -A OUTPUT -d <service-cidr> -p tcp --dport 80 -j ACCEPT
+    -A OUTPUT -j REJECT
+    COMMIT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preview-router
+  namespace: <router-namespace>
+  labels: { app: preview-router }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: preview-router }
+  template:
+    metadata:
+      labels: { app: preview-router }
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: net
+          image: <net-image>
+          command: ["iptables-restore", "--wait", "5", "/policy/router.rules"]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"], add: ["NET_ADMIN"] }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: egress, mountPath: /policy, readOnly: true }
+            - { name: xtables, mountPath: /run }
+      containers:
+        - name: nginx
+          image: <nginx-image>
+          command: ["nginx", "-g", "daemon off;", "-c", "/etc/preview-router/conf/nginx.conf"]
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          env:
+            - name: PREVIEW_SIGNING_KEY
+              valueFrom:
+                secretKeyRef: { name: preview-router-signing, key: key }
+          volumeMounts:
+            - { name: config, mountPath: /etc/preview-router/conf, readOnly: true }
+            - { name: pages, mountPath: /etc/preview-router/pages, readOnly: true }
+            - { name: js, mountPath: /etc/preview-router/js, readOnly: true }
+            - { name: auth, mountPath: /etc/preview-router/auth, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap:
+            name: preview-router
+            items: [{ key: nginx.conf, path: nginx.conf }]
+        - name: pages
+          configMap:
+            name: preview-router
+            items: [{ key: ended.html, path: ended.html }, { key: denied.html, path: denied.html }]
+        - name: js
+          configMap:
+            name: preview-router-js
+        - name: auth
+          secret:
+            secretName: preview-router-auth
+        - name: egress
+          configMap:
+            name: preview-router-egress
+        - name: xtables
+          emptyDir: { sizeLimit: 1Mi }
+        - name: tmp
+          emptyDir: { sizeLimit: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: preview-router
+  namespace: <router-namespace>
+spec:
+  type: ClusterIP
+  selector: { app: preview-router }
+  ports:
+    - { name: http, port: 80, targetPort: 8080, protocol: TCP }
+---
+# One ALB for every preview. The annotations are the ALB's only: no
+# external-dns annotation, since the wildcard DNS record is made by hand once
+# (README.md, step 3) and an external-dns record would not be removed again.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: preview-router
+  namespace: <router-namespace>
+  annotations:
+    alb.ingress.kubernetes.io/certificate-arn: <certificate-arn>
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/target-type: ip
+spec:
+  ingressClassName: alb
+  rules:
+    - host: "*.<preview-domain>"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: preview-router
+                port: { number: 80 }
