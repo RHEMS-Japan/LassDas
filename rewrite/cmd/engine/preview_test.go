@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -362,6 +363,84 @@ func TestAnAddressThatCouldNotBePostedIsGivenByTheQuestion(t *testing.T) {
 	}
 }
 
+// previewRouter asks the requester after the change was read, as the
+// decision service does in these tests.
+type previewRouter struct{}
+
+func (previewRouter) Next(context.Context, chain.State) (chain.Assignment, error) {
+	return chain.Assignment{Role: "ask_requester"}, nil
+}
+
+// crashBeforeQuestion is the request's store, which loses the runtime the
+// first time the question is about to be recorded as pending: right after
+// the page went up and its address was posted, before the record of it was
+// saved.
+type crashBeforeQuestion struct {
+	state   chain.State
+	crashed bool
+	stop    context.CancelFunc
+}
+
+func (s *crashBeforeQuestion) Load() (chain.State, error) { return s.state, nil }
+
+func (s *crashBeforeQuestion) Save(state chain.State) error {
+	if !s.crashed && state.Pending != nil && state.Pending.Role == "ask_requester" {
+		s.crashed = true
+		s.stop()
+		return errors.New("the runtime is gone")
+	}
+	s.state = state
+	return nil
+}
+
+// The runtime is lost right after the page went up and its address was
+// posted, before the record of either was saved. The next start finds the
+// question not yet chosen, decides again and puts the page up again: the
+// address is not posted a second time, and the question is told it was.
+func TestARestartAfterTheAddressWasPostedDoesNotPostItAgain(t *testing.T) {
+	cfg := previewStagesConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, p := previewJob(t, cfg)
+	workflow := *cfg.Workflow
+	workflow.Question = "ask_requester"
+	store := &crashBeforeQuestion{state: chain.State{Request: noticeRequest, Workflow: &workflow, Step: "confirm_change",
+		History: []chain.Result{{Role: "elicit", Speaker: "requirements", Output: "Settled."}, {Role: "confirm_change", Speaker: "reader", Output: "The list screen gains a count line."}}}}
+	var asked []string
+	engine := chain.Chain{Router: previewRouter{}, Store: store, WaitAfter: "ask_requester", RetryDelay: time.Millisecond, PreviewUp: p.up,
+		Executor: questionStandIn(func(a chain.Assignment) { asked = append(asked, a.Instruction) })}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	store.stop = cancel
+	if err := engine.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the runtime was not lost before the question: %v", err)
+	}
+	if posted := fixture.withPrefix("確認用の画面"); len(posted) != 1 || len(asked) != 0 {
+		t.Fatalf("before the loss the address was posted %d times and the question asked %d times", len(posted), len(asked))
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := engine.Run(ctx); !errors.Is(err, chain.ErrWaiting) {
+		t.Fatalf("the restarted run did not ask and wait: %v", err)
+	}
+	if launches := string(readFile(t, filepath.Join(directory, "workspace", "preview-launches.txt"))); launches != "up\nup\n" {
+		t.Fatalf("the page was not put up again after the restart: %q", launches)
+	}
+	if posted := fixture.withPrefix("確認用の画面"); len(posted) != 1 {
+		t.Fatalf("the address was posted %d times across the restart", len(posted))
+	}
+	if len(asked) != 1 || !strings.Contains(asked[0], chainPreviewPosted(previewAddress)) {
+		t.Fatalf("the question was not told the address was posted: %q", asked)
+	}
+}
+
+// questionStandIn is the question role, which only notes what it was told.
+type questionStandIn func(chain.Assignment)
+
+func (q questionStandIn) Execute(_ context.Context, a chain.Assignment, _ chain.State) []chain.Result {
+	q(a)
+	return []chain.Result{{Role: a.Role, Speaker: "questioner", Output: "Asked.", StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC()}}
+}
+
 // The run posts the address while the watcher of the same request may be
 // settling an earlier notice. The two never submit the same notice twice.
 func TestThePagesAddressAndTheWatchersRetryDoNotPostTwice(t *testing.T) {
@@ -471,8 +550,13 @@ func TestThePreviewRolesAreCommandsAndTheUpRoleHasOneProcess(t *testing.T) {
 			case "up-has-two-processes":
 				cfg.Roles[4].Processes = append(cfg.Roles[4].Processes, chain.Process{Name: "second", Command: []string{"/bin/sh", "-c", "exit 0"}})
 			}
-			if err := check(cfg); err == nil || !strings.Contains(err.Error(), variant.want) {
+			err := check(cfg)
+			if err == nil || !strings.Contains(err.Error(), variant.want) {
 				t.Fatalf("the setting was not refused: %v", err)
+			}
+			// The refusal says where: the setting and the role it names.
+			if !strings.Contains(err.Error(), "workflow.preview.") || !strings.Contains(err.Error(), "roles[") {
+				t.Fatalf("the refusal does not say where: %v", err)
 			}
 		})
 	}

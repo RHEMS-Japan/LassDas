@@ -267,17 +267,22 @@ func validatePreview(cfg config) error {
 		return nil
 	}
 	preview := cfg.Workflow.Preview
-	for _, role := range cfg.Roles {
-		if role.Name != preview.Up && role.Name != preview.Down {
+	for i, role := range cfg.Roles {
+		setting := "workflow.preview.up"
+		switch role.Name {
+		case preview.Up:
+		case preview.Down:
+			setting = "workflow.preview.down"
+		default:
 			continue
 		}
-		for _, process := range role.Processes {
+		for j, process := range role.Processes {
 			if process.ModelEnv != "" {
-				return fmt.Errorf("the preview role %q launches a model; the preview roles run the operator's commands", role.Name)
+				return fmt.Errorf("%s names %q, whose process %q (roles[%d].processes[%d]) sets model_env: the preview roles run the operator's commands and launch no model", setting, role.Name, process.Name, i, j)
 			}
 		}
 		if role.Name == preview.Up && len(role.Processes) != 1 {
-			return fmt.Errorf("workflow.preview.up names %q, which needs exactly one process: that process's own file is where the address is read back", role.Name)
+			return fmt.Errorf("workflow.preview.up names %q (roles[%d]), which has %d processes and needs exactly one process: that process's own file is where the address is read back", role.Name, i, len(role.Processes))
 		}
 	}
 	return nil

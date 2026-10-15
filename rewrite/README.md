@@ -1397,8 +1397,9 @@ model does not read it as a failure. No stage is satisfied, failed or run again
 by it, the request is never stopped by it, and the decisions that follow are
 offered what they would be without the setting. Nothing a role prints is read.
 
-This engine does not launch the down role yet: the page stays up until the
-operator's own cleanup removes it.
+This engine does not launch the down role yet: a page it puts up stays up
+until the operator's own cleanup removes it. Do not set `workflow.preview` on
+an installation until the engine also takes the page down.
 
 ### A pull request description from the run's reports
 
