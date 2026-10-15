@@ -25,6 +25,11 @@ EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "preview-k8s"
 # The njs command line, to run the router's script. CI has none, and those
 # tests are skipped there; the README says how they were run.
 NJS = os.environ.get("PREVIEW_NJS") or shutil.which("njs")
+# The commands a test starts get the fake's directory and the programs
+# named only, a kubeconfig naming no real server and an empty home (as-8):
+# test_preview_k8s_example.py has the preparation.
+from test_preview_k8s_example import assert_fake_kubectl, isolated_environment  # noqa: E402
+CLEANUP_TOOLS = ("ps", "mktemp", "rm", "expr", "cut", "grep")
 SIGNING_KEY = "fake-router-signing-key-6a5b4c3d2e1f0a9b8c7d6e5f"
 MANIFESTS = sorted(EXAMPLE.glob("*.yaml.example"))
 PLACEHOLDER = re.compile(r"<([a-z][a-z0-9-]*)>")
@@ -302,6 +307,8 @@ else:
         for path in fake.iterdir():
             path.chmod(0o755)
         self.fake = fake
+        self.isolated = isolated_environment(self.base, fake, CLEANUP_TOOLS)
+        assert_fake_kubectl(self, self.isolated, fake)
 
     def stamp(self, offset):
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.NOW + offset))
@@ -312,8 +319,7 @@ else:
         (self.base / "pods.txt").write_text("".join("|".join(row) + "\n" for row in pods))
         if failing:
             (self.base / "failing.txt").write_text(" ".join(failing))
-        environment = {"PATH": str(self.fake) + os.pathsep + os.environ.get("PATH", os.defpath),
-                       "PREVIEW_NAMESPACE": "preview-apps", "LANG": "C"}
+        environment = dict(self.isolated, PREVIEW_NAMESPACE="preview-apps", LANG="C")
         done = subprocess.run(["/bin/sh", str(EXAMPLE / "cleanup.sh")], env=environment, capture_output=True,
                               text=True, timeout=60)
         deleted = (self.base / "deleted.txt").read_text().split("\n") if (self.base / "deleted.txt").exists() else []
@@ -427,8 +433,10 @@ sys.stdin.read()
 print("yes" if "can-i" in sys.argv else "applied (server dry run)")
 ''')
         (fake / "kubectl").chmod(0o755)
-        environment = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ.get("PATH", ""),
-                           KUBECONFIG=str(self.base / "the-callers-own"))
+        isolated = isolated_environment(self.base, fake)
+        assert_fake_kubectl(self, isolated, fake)
+        # The caller's own KUBECONFIG, which dry_run.py has to leave aside.
+        environment = dict(isolated, KUBECONFIG=str(self.base / "the-callers-own"))
         done = subprocess.run([sys.executable, "-B", str(EXAMPLE / "dry_run.py"), "--kubeconfig",
                                str(self.base / "operator.kubeconfig"), "--context", "preview",
                                "--admin-kubeconfig", str(self.base / "admin.kubeconfig"), "--admin-context", "admin",
@@ -494,7 +502,7 @@ function request(host, args, cookie) {
 }
 var results = [];
 """ + body + "\nconsole.log(JSON.stringify(results));\n")
-        environment = {"PATH": os.environ.get("PATH", os.defpath)}
+        environment = {}  # njs needs no PATH, and this test starts nothing else
         if key is not None:
             environment["PREVIEW_SIGNING_KEY"] = key
         done = subprocess.run([NJS, "-m", "-p", str(EXAMPLE), str(harness)], env=environment, capture_output=True,

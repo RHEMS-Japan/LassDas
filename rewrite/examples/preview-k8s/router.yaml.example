@@ -259,7 +259,7 @@ spec:
 ---
 # One ALB for every preview. The annotations are the ALB's only: no
 # external-dns annotation, since the wildcard DNS record is made by hand once
-# (README.md, step 5) and an external-dns record would not be removed again.
+# (README.md, step 3) and an external-dns record would not be removed again.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
