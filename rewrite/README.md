@@ -1430,8 +1430,9 @@ or whose page never went up, has no `preview.json` and is trimmed and
 reclaimed as before. The down role and `hold_hours` are read from the
 operator's current setting, not from the request's copy: a changed
 `hold_hours` reaches requests already accepted at once, and removing the
-setting leaves their pages to the operator's own cleanup, with nothing held
-for them.
+setting leaves their pages to the operator's own cleanup: when such a request
+is delivered or stopped, nothing is launched or held for its page, and the log
+says so once.
 
 ### A pull request description from the run's reports
 

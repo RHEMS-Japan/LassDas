@@ -374,11 +374,22 @@ type pageDowns struct {
 // whether the request's caches and stopped workspace may now be cleared: the
 // request never put a page up, its page is down, or the hold ran out.
 func (d pageDowns) settle(issue sourceIssue, directory, name string, say func(string)) bool {
-	if d.cfg.Workflow == nil || d.cfg.Workflow.Preview == nil {
-		return true
-	}
+	configured := d.cfg.Workflow != nil && d.cfg.Workflow.Preview != nil
 	record, err := readPreviewRecord(directory)
 	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if !configured {
+		// The operator removed the setting: there is no role to take the
+		// page down, and nothing waits for one.
+		if err == nil && (record.State == "down" || record.State == "unconfirmed") {
+			return true
+		}
+		const unset = "workflow.preview is not set, so the page put up for the requester is not taken down; the operator's own cleanup removes it at the end of its lifetime"
+		if d.trouble[name] != unset {
+			say(unset)
+			d.trouble[name] = unset
+		}
 		return true
 	}
 	if err != nil {

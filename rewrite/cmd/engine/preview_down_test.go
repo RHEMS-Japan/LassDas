@@ -495,6 +495,48 @@ func TestTheTakeDownFollowsTheCurrentSetting(t *testing.T) {
 	}
 }
 
+// The operator removed the setting while a request's page was up. When that
+// request is delivered or stopped there is no role to take its page down, so
+// nothing is launched and nothing waits for it: the trim and the reclaim go
+// on at once, and the log says once that the page is left to the operator's
+// own cleanup.
+func TestAPageWhoseSettingWasRemovedHoldsNothing(t *testing.T) {
+	for _, ending := range []string{"delivered", "stopped"} {
+		t.Run(ending, func(t *testing.T) {
+			cfg, files := previewDownConfig(t)
+			if ending == "stopped" {
+				cfg = withStopReport(cfg, files)
+			}
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			root, directory := pageJob(t, cfg, ending, time.Now().Add(-time.Hour))
+			cfg.Workflow.Preview = nil
+			log := &lockedLog{}
+			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, log)
+			waitFor(t, func() bool {
+				_, reclaimed := os.Stat(filepath.Join(directory, removalFile))
+				return trimmed(directory) && (ending == "delivered" || reclaimed == nil)
+			})
+			waitTicks()
+			finish()
+			for _, line := range files.lines(t) {
+				if strings.HasPrefix(line, "start_") {
+					t.Fatalf("a take-down was launched without the setting: %v", files.lines(t))
+				}
+			}
+			log.mu.Lock()
+			said := strings.Count(log.text.String(), "workflow.preview is not set")
+			log.mu.Unlock()
+			if said != 1 {
+				t.Fatalf("that the page is left to the operator's cleanup was said %d times", said)
+			}
+			if record := pageState(t, directory); record.State != "up" {
+				t.Fatalf("the request's record of its page was changed: %+v", record)
+			}
+		})
+	}
+}
+
 // The reclaim of a stopped workspace also stops at a running take-down, but a
 // request that never put a page up has no such lock and is reclaimed as
 // before, and the three locks it already waited on are read as before.
