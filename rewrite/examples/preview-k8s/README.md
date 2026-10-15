@@ -220,7 +220,7 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
 | `<service-cidr>` | preview namespace, router | The cluster's Service address range. |
 | `<net-image>` | policy, router, `PREVIEW_NET_IMAGE` | The rules image, by digest (`name@sha256:...`). It needs `iptables-restore` and must run on the preview's nodes. |
 | `<nginx-image>` | router | An nginx image that runs as a user other than root (uid 101), by digest. |
-| `<kubectl-image>` | cleanup | An image with kubectl, a POSIX sh and a `date` that reads `-d @SECONDS`, by digest. |
+| `<kubectl-image>` | cleanup | An image with kubectl, a POSIX sh, a `date` that reads `-d @SECONDS`, `expr`, `mktemp`, `cut`, `grep` and `rm`, by digest. Without one of them the cleanup ends 1 and removes nothing. |
 | `<region>` | step 1 only | The region of the load balancer. |
 | `<api-server>` | `PREVIEW_K8S_SERVER` | The address of the cluster's API server. The engine's Pod has to reach it. |
 
@@ -431,12 +431,12 @@ The Deployment `up` sends, and nothing else of it varies but the settings:
   `PreemptLowerPriority`.
 - `net-*` run as root with `NET_ADMIN` only and a read-only root. Every
   other container runs as a user other than root, without privilege
-  escalation and with every capability dropped.
+  escalation and with every capability dropped. Memory, CPU and local
+  storage are limited in every container.
 - `nodeSelector` is `kubernetes.io/arch: amd64`, and the policy accepts no
   other value (nor `kubernetes.io/os` other than `linux`): a cluster whose
   general nodes are arm64 changes it in `preview.py` and in the policy
-  together. Memory, CPU and local
-  storage are limited in every container.
+  together.
 - The volumes are emptyDirs (the checkout's holds 1 GiB) and the ConfigMap
   `preview-egress`. No Secret, no projected token, no host path.
 - The Service is a ClusterIP Service from port 80 to `PREVIEW_PORT`, with a
