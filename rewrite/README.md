@@ -1380,8 +1380,9 @@ corrected change is posted again. The run and the watcher of the same request
 settle and post notices one at a time, so neither submits a notice the other
 is submitting. The question's instruction then says the address was posted,
 asks it to point the requester to it, and tells it not to write that it opened
-the page. A comment that could not be confirmed is retried by the watcher like
-any notice, and the question is told to give the address itself. When the page
+the page. When the comment could not be confirmed, the question is told to
+give the address itself; one that was recorded and not confirmed is retried
+by the watcher like any notice. When the page
 did not come up (an exit status other than 0, the time limit, a first line
 that is not such an address, nothing written, or a file that is not an
 ordinary one), nothing is posted and the question is told to say in one line

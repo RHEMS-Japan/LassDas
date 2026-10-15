@@ -337,6 +337,31 @@ func TestThePagesAddressIsPostedOncePerPutUp(t *testing.T) {
 	}
 }
 
+// A page that came up but whose address could not be confirmed posted still
+// reaches the requester through the question: it is told the address and to
+// give it, not that it was posted. The page is up as far as the request's
+// record goes, and the runtime's note says the comment was not confirmed.
+func TestAnAddressThatCouldNotBePostedIsGivenByTheQuestion(t *testing.T) {
+	cfg := previewStagesConfig(t)
+	fixture := &noticeTracker{postFail: 100}
+	fixture.install(t, alwaysChoose("done"))
+	directory, p := previewJob(t, cfg)
+	state := chain.State{Request: noticeRequest, History: []chain.Result{{Role: "confirm_change", Speaker: "reader", Output: "Read."}}}
+	note, instruction := p.up(context.Background(), "preview_up", state)
+	if instruction != previewUnconfirmedInstruction(previewAddress) || strings.Contains(instruction, "has posted") {
+		t.Fatalf("the question was not told to give the address itself: %q", instruction)
+	}
+	if !strings.Contains(note, previewAddress) || !strings.Contains(note, "投稿を確かめられなかった") {
+		t.Fatalf("the runtime's note does not say the comment was not confirmed: %q", note)
+	}
+	if record := readPreviewFile(t, filepath.Join(directory, previewFile)); record.State != "up" || record.URL != previewAddress {
+		t.Fatalf("a page that came up is not recorded up: %+v", record)
+	}
+	if posted := fixture.all(); len(posted) != 0 || fixture.attempts() == 0 {
+		t.Fatalf("the address was not tried, or a refused post was kept: %q after %d attempts", posted, fixture.attempts())
+	}
+}
+
 // The run posts the address while the watcher of the same request may be
 // settling an earlier notice. The two never submit the same notice twice.
 func TestThePagesAddressAndTheWatchersRetryDoNotPostTwice(t *testing.T) {

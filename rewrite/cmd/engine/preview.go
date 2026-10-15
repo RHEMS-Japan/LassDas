@@ -69,7 +69,7 @@ func previewPostedInstruction(address string) string {
 }
 
 func previewUnconfirmedInstruction(address string) string {
-	return "The runtime has put this change up for the requester to see at " + address + ". Its own comment with that address could not be confirmed posted and is posted again later. Give that address in the question and ask the requester to open it to see the change. Do not write that you opened the page or checked it yourself.\n"
+	return "The runtime has put this change up for the requester to see at " + address + ", but could not confirm that its own comment with that address was posted. Give that address in the question and ask the requester to open it to see the change. Do not write that you opened the page or checked it yourself.\n"
 }
 
 const previewFailedInstruction = "The runtime could not put this change up for the requester to see. Say so in one line of the question, 確認用の画面は用意できなかった, and describe the change in words as before.\n"
@@ -124,7 +124,7 @@ func (p previewer) up(ctx context.Context, role string, state chain.State) (stri
 	p.keep(record)
 	if err := p.post(ctx, address, words, strconv.Itoa(len(state.History))); err != nil {
 		reason := textclip.Clip(firstInstructionLine(scrubCredentials(p.cfg, err.Error())), 300)
-		return "確認用の画面を用意した: " + address + "。アドレスを知らせる本体のコメントは投稿を確かめられず、後で投稿し直す: " + reason,
+		return "確認用の画面を用意した: " + address + "。アドレスを知らせる本体のコメントは投稿を確かめられなかった: " + reason,
 			previewUnconfirmedInstruction(address)
 	}
 	return "確認用の画面を用意し、本体のコメントでアドレスを知らせた: " + address, previewPostedInstruction(address)
