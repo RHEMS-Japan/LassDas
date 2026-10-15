@@ -1,0 +1,116 @@
+# Who may do what (README.md, "What a person sets up once", step 4). Copy this
+# file, replace every <placeholder>, and apply it after the namespaces.
+#
+# preview-operator is the identity of the preview commands. Its token is the
+# engine's PREVIEW_K8S_TOKEN. It can manage Deployments and Services in the
+# preview namespace and read what the commands wait for, and nothing else: no
+# Pod of its own, no Secret, ConfigMap, Ingress, ServiceAccount or Role, and
+# nothing outside the preview namespace. RBAC cannot say which Deployments or
+# Services it may create; admission-policy.yaml.example fixes their shape.
+#
+# preview-cleanup is the identity of the cleanup CronJob (cleanup.yaml.example).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: preview-operator
+  namespace: <router-namespace>
+automountServiceAccountToken: false
+---
+# A token without an expiry, made by the cluster for the ServiceAccount above.
+# The engine reads its keys once, when it starts, so a token that expired
+# would need an engine restart each time. Replace it as README.md, "Replacing
+# the token or the password", says. Read the value with
+#   kubectl -n <router-namespace> get secret preview-operator-token -o jsonpath='{.data.token}' | base64 -d
+# straight into the engine's Secret, never into a file in a repository.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: preview-operator-token
+  namespace: <router-namespace>
+  annotations:
+    kubernetes.io/service-account.name: preview-operator
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: preview-operator
+  namespace: <preview-namespace>
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # kubectl exec, which hands the checkout over. A kube-apiserver v1.36.0
+  # asked a v1.36 kubectl (WebSocket) for "create" here: "get" alone was
+  # refused, "create" alone was enough.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: preview-operator
+  namespace: <preview-namespace>
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: preview-operator
+subjects:
+  - kind: ServiceAccount
+    name: preview-operator
+    namespace: <router-namespace>
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: preview-cleanup
+  namespace: <router-namespace>
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: preview-cleanup
+  namespace: <preview-namespace>
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: preview-cleanup
+  namespace: <preview-namespace>
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: preview-cleanup
+subjects:
+  - kind: ServiceAccount
+    name: preview-cleanup
+    namespace: <router-namespace>
