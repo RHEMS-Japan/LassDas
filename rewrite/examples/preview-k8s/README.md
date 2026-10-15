@@ -487,18 +487,25 @@ Both kubeconfig files have to hold the credential itself: a `token`, or a
 `LANG`, a temporary `HOME` and `KUBECONFIG` only, so a credential plugin
 (`exec`) finds neither its configuration under the home directory nor any
 `AWS_*` variable. The AWS CLI's `aws eks get-token`, which an EKS kubeconfig
-names, is such a plugin: with it every Pod case fails with the plugin's own
-error. (A stand-in plugin that needs its file under `HOME` and
-`AWS_PROFILE` answered kubectl from the caller's shell, and failed for each
-Pod case under this command, on the local server below.) On EKS, write the
-token the plugin would print to a private file, with the same arguments as
-the kubeconfig's `exec` section (role, profile), and name that file as the
-admin user's `tokenFile`. The token is short-lived, so run the command right
-after, and remove the file:
+names, is such a plugin: with it the Pod cases usually fail with the
+plugin's own error. (A machine that gets AWS credentials without either, such
+as one with an instance profile, may get through. A stand-in plugin that
+needs its file under `HOME` and `AWS_PROFILE` answered kubectl from the
+caller's shell, and failed for each Pod case under this command, on the local
+server below.) On EKS, write the token the plugin would print into a new
+private directory outside the repository, with the same arguments as the
+kubeconfig's `exec` section (role, profile), and name the file by its
+absolute path as the admin user's `tokenFile`. The token is short-lived: run
+the command right after, then remove the directory. Do not write the token
+into the checkout, where nothing keeps it out of a commit:
 
 ```sh
-(umask 077; aws eks get-token --region <region> --cluster-name <cluster> \
-  --query status.token --output text > admin-token)
+dir=$(mktemp -d)   # a new directory, mode 0700, outside the checkout
+aws eks get-token --region <region> --cluster-name <cluster> \
+  --query status.token --output text > "$dir/admin-token"
+# the admin user's tokenFile: "$dir/admin-token" (print "$dir" for the path)
+# ... run dry_run.py ...
+rm -rf "$dir"
 ```
 
 A case passes when what has to pass passes, and what has to be refused is
