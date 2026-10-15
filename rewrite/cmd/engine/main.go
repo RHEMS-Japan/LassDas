@@ -420,6 +420,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		selection := *cfg.ModelSelection
 		selection.observe = observe
 		executor.SelectModel = selection.choose
+		executor.ModelPrefix = selection.invocationPrefix()
 		// A stage is announced when it begins, which is before this launch has
 		// returned anything to the history. Write the choice down as it is made
 		// so the announcement can say which model took the work on. A runtime

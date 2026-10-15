@@ -647,8 +647,9 @@ func TestTheChosenModelIsHandedOverBeforeTheChildRuns(t *testing.T) {
 			{Name: "worker", Directory: directory, ModelEnv: "MODEL",
 				Command: []string{"/bin/sh", "-c", `printf '%s' "$MODEL" > ran.txt`}},
 		}}},
+		ModelPrefix: "gateway/",
 		SelectModel: func(context.Context, Role, Process, State, []string) (string, string, error) {
-			return "maker/current", "gateway/", nil
+			return "maker/current", "", nil
 		},
 		Chosen: func(role, process, model string, launch int) {
 			told = append(told, fmt.Sprintf("%s %s %s %d", role, process, model, launch))
@@ -685,5 +686,46 @@ func TestTheChosenModelIsHandedOverBeforeTheChildRuns(t *testing.T) {
 	told = nil
 	if result := processes.Execute(context.Background(), Assignment{Role: "work"}, State{})[0]; result.Error == "" || len(told) != 0 {
 		t.Fatalf("a failed selection handed over %v: %#v", told, result)
+	}
+}
+
+// A gateway can list a model under an id that is not the prefix + the catalog
+// id. The harness is handed the id the selection named, and the record keeps
+// it beside the catalog id and the prefix, which are what the next peer is
+// separated by and what a person is told. An id the prefix and the model
+// already say is not written twice.
+func TestALaunchIsHandedTheIDItsSelectionNamed(t *testing.T) {
+	for _, shape := range []struct{ endpoint, invoked string }{
+		{"p/current", "p/current"},
+		{"p/maker/current", ""},
+		{"", ""},
+	} {
+		t.Run(shape.endpoint, func(t *testing.T) {
+			var told, peers []string
+			processes := Processes{
+				Roles: map[string]Role{"review": {Name: "review", Processes: []Process{
+					{Name: "a", ModelEnv: "MODEL", Command: []string{"/bin/sh", "-c", `printf '%s' "$MODEL"`}},
+					{Name: "b", ModelEnv: "MODEL", Command: []string{"/bin/sh", "-c", `printf '%s' "$MODEL"`}},
+				}}},
+				ModelPrefix: "p/",
+				SelectModel: func(_ context.Context, _ Role, _ Process, _ State, selected []string) (string, string, error) {
+					peers = append(peers, strings.Join(selected, ","))
+					return "maker/current", shape.endpoint, nil
+				},
+				Chosen: func(_, _, model string, _ int) { told = append(told, model) },
+			}
+			want := shape.endpoint
+			if want == "" {
+				want = "p/maker/current"
+			}
+			for _, result := range processes.Execute(context.Background(), Assignment{Role: "review"}, State{}) {
+				if result.Error != "" || result.Output != want || result.Model != "maker/current" || result.ModelPrefix != "p/" || result.Invoked != shape.invoked {
+					t.Fatalf("launch: %#v", result)
+				}
+			}
+			if !reflect.DeepEqual(told, []string{"maker/current", "maker/current"}) || !reflect.DeepEqual(peers, []string{"", "maker/current"}) {
+				t.Fatalf("told %v, peers separated by %v", told, peers)
+			}
+		})
 	}
 }

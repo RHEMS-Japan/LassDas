@@ -1602,8 +1602,7 @@ second comment), and when it resumes after the requester's answer (a stop writte
 waits is not an answer and is not announced as one); a stage whose `announce` sentence the
 operator wrote in `workflow.stages` is announced once when it first begins.
 That sentence carries the model the launch beginning the stage chose, as
-`（モデル: <catalog id>）` without any gateway prefix, or as the gateway's own id
-when the gateway lists that model without its publisher; a stage that launches no
+`（モデル: <catalog id>）` without any gateway prefix; a stage that launches no
 model, a runtime that selects none, and a launch that could not choose one at
 all, say it as the operator wrote it. Once the request is delivered, one
 further comment lists every launch that used a model, one line per stage in
@@ -2280,10 +2279,9 @@ reviewers run that one model, and their reports are no longer independent in
 that sense. This is an experiment switch for comparing one strong model against
 per-launch selection among the configured publishers. It is not a
 recommendation, and neither arrangement is established here as the better one.
-With a gateway configured, the named id is invoked through it with the prefix
-added, as a model the gateway lists with its publisher is. The gateway's list
-is not read for it, so a gateway that lists models only without their
-publisher cannot serve a fixed model.
+With a gateway configured, the named id is invoked through it as the prefix +
+the named id. The gateway's list is not read for it, so a gateway that lists
+models only without their publisher cannot serve a fixed model.
 
 ### Invoking through a gateway
 
@@ -2334,21 +2332,24 @@ bill the account the operator is moving away from.
 A gateway lists a catalog model in one of two shapes, and both are read with
 no further setting: with its publisher, as `prefix` + `z-ai/glm-5.3`, or
 without it, as `prefix` + `glm-5.3`, which is how a provider that serves models
-under their own names is listed. A model listed with its publisher is reached
-as described here, and that shape wins when a gateway lists both. A model
-listed only without its publisher is invoked, recorded as `model` and named to
-the requester by the gateway's id, `tokenhub/glm-5.3` for the prefix
-`tokenhub/`, with no `model_prefix` beside it. When two publishers' catalog ids
-share that name, only the one listed first in the catalog is offered, so the
-judge never sees one gateway model twice. A catalog model the gateway lists in
-neither shape is not offered.
+under their own names is listed. Upper and lower case are not told apart, the
+shape with the publisher wins when a gateway lists both, and the model is
+invoked by the id exactly as the gateway lists it. A name alone can be another
+publisher's model of the same name, so it is taken only when the entry's
+`owned_by` names one of `model_selection.authors` and that is the catalog
+model's publisher, or, when `owned_by` is missing or names none of them, when
+no other catalog id ends in that name. A catalog model the gateway lists in
+neither shape, or under a name spelled otherwise, is not offered. The judge
+still reads the public catalog's prices and context lengths, which need not be
+the gateway provider's.
 
 `prefix + id` is a route to the same model, not a different model and not a
 mark of quality. The judge is offered bare catalog ids, publisher separation in
 a parallel review group still compares publishers rather than the gateway name,
 and the runtime history records the chosen id as `model` with the route beside
-it as `model_prefix` (the gateway's own id alone, for a model it lists without
-its publisher). A gateway configured without `models_url`, `key_env` or
+it as `model_prefix`. A model reached by its name alone also has the id it was
+invoked by recorded as `invoked`, which is what the status page shows; the
+requester is told the catalog id either way. A gateway configured without `models_url`, `key_env` or
 `prefix` is refused before any request is accepted, because a half-configured
 one would quietly keep invoking the account being moved away from. Without
 `model_selection.gateway`, none of this applies and invocation is unchanged.

@@ -730,7 +730,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 			var previous time.Time
 			for i, result := range state.History {
 				entry := record{Index: i + 1, Role: result.Role, Speaker: result.Speaker,
-					Model: result.ModelPrefix + result.Model, Started: result.StartedAt, Finished: result.FinishedAt,
+					Model: invokedModel(result), Started: result.StartedAt, Finished: result.FinishedAt,
 					Duration: humanDuration(result.FinishedAt.Sub(result.StartedAt)), Output: result.Output,
 					Diagnostics: result.Diagnostics, Instruction: result.Instruction, Error: result.Error,
 					Interrupted: result.Interrupted, Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"}
@@ -1104,7 +1104,7 @@ func (j *job) derive(now time.Time) {
 		if j.Model == "" {
 			for i := len(state.History) - 1; i >= 0; i-- {
 				if state.History[i].Model != "" {
-					j.Model = state.History[i].ModelPrefix + state.History[i].Model
+					j.Model = invokedModel(state.History[i])
 					break
 				}
 			}
@@ -1429,6 +1429,16 @@ func agentUsage(log string) (calls, in, out int) {
 		in, out = in+i, out+o
 	}
 	return calls, in, out
+}
+
+// invokedModel is the id a launch was invoked by: the one the record keeps
+// when its gateway lists the model without the publisher, and otherwise the
+// prefix + the catalog id, as it always was.
+func invokedModel(result chain.Result) string {
+	if result.Invoked != "" {
+		return result.Invoked
+	}
+	return result.ModelPrefix + result.Model
 }
 
 func humanDuration(d time.Duration) string {

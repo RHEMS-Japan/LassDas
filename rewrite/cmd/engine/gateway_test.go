@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -613,21 +614,10 @@ func TestFixedModelWithoutAPublisherIsRefusedBeforeIntake(t *testing.T) {
 	}
 }
 
-// tokenhubSelector reaches the catalog's models through a gateway that lists
-// them without the publisher: "tokenhub/glm-5.3" for the catalog's
-// "z-ai/glm-5.3".
-func tokenhubSelector(t *testing.T) selectionConfig {
-	t.Helper()
-	selector := gatewaySelector(t)
-	selector.Authors = []string{"deepseek", "z-ai"}
-	selector.Gateway.Prefix = "tokenhub/"
-	return selector
-}
-
 // gatewayHosts answers the public catalog with catalog, in that order, the
 // gateway list with served, and the judge with the first of prefer it was
 // offered. Every offer is kept, sorted, in the order the judge was asked.
-func gatewayHosts(t *testing.T, catalog, served, prefer []string, offers *[][]string) roundTripFunc {
+func gatewayHosts(t *testing.T, catalog []string, served []any, prefer []string, offers *[][]string) roundTripFunc {
 	t.Helper()
 	return func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Host {
@@ -638,11 +628,7 @@ func gatewayHosts(t *testing.T, catalog, served, prefer []string, offers *[][]st
 			}
 			return selectionReply(request, 200, map[string]any{"data": data}), nil
 		case "gateway.example":
-			var data []any
-			for _, id := range served {
-				data = append(data, gatewayEntry(id))
-			}
-			return selectionReply(request, 200, map[string]any{"data": data}), nil
+			return selectionReply(request, 200, map[string]any{"data": served}), nil
 		case "selection.example":
 			offered := offeredChoices(t, request)
 			*offers = append(*offers, offered)
@@ -655,6 +641,27 @@ func gatewayHosts(t *testing.T, catalog, served, prefer []string, offers *[][]st
 		}
 		return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
 	}
+}
+
+// listedEntries is a gateway list of ids, each with the owner the gateway
+// names as gatewayEntry gives it.
+func listedEntries(ids ...string) []any {
+	var entries []any
+	for _, id := range ids {
+		entries = append(entries, gatewayEntry(id))
+	}
+	return entries
+}
+
+// nameOnlySelector reaches the catalog's models through a gateway that lists
+// them under the prefix p/ without the publisher: "p/glm-5.3" for the
+// catalog's "z-ai/glm-5.3".
+func nameOnlySelector(t *testing.T) selectionConfig {
+	t.Helper()
+	selector := gatewaySelector(t)
+	selector.Authors = []string{"deepseek", "minimax", "z-ai"}
+	selector.Gateway.Prefix = "p/"
+	return selector
 }
 
 // runRoleOnce runs one request that the router sends to role once and then
@@ -709,17 +716,18 @@ func runRoleOnce(t *testing.T, selector selectionConfig, role chain.Role, hosts 
 	return state, string(raw), runErr
 }
 
-// A gateway that lists its models without the publisher, as "tokenhub/glm-5.3"
-// for the catalog's "z-ai/glm-5.3", served nothing before: every candidate was
-// looked for as "tokenhub/z-ai/glm-5.3", none was found, and no role could
-// start. The catalog still decides what is eligible and is what the judge
-// reads; the launch is invoked and recorded by the id the gateway lists.
+// A gateway that lists its models without the publisher, as "p/glm-5.3" for
+// the catalog's "z-ai/glm-5.3", served nothing before: every candidate was
+// looked for as "p/z-ai/glm-5.3", none was found, and no role could start.
+// The catalog still decides what is eligible and is what the judge reads and
+// the history records; the role is handed the id the gateway lists, and the
+// record keeps that id beside the catalog id and the prefix.
 func TestAGatewayThatListsModelsWithoutThePublisherServesThem(t *testing.T) {
 	var offers [][]string
 	worker := chain.Process{Name: "worker", ModelEnv: "CHOSEN_MODEL", Command: []string{"/bin/sh", "-c", `test -z "$GATEWAY_TEST_KEY" || exit 9; printf '%s' "$CHOSEN_MODEL"`}}
-	state, raw, err := runRoleOnce(t, tokenhubSelector(t), chain.Role{Name: "implement", Purpose: "implement", Processes: []chain.Process{worker}},
+	state, raw, err := runRoleOnce(t, nameOnlySelector(t), chain.Role{Name: "implement", Purpose: "implement", Processes: []chain.Process{worker}},
 		gatewayHosts(t, []string{"deepseek/deepseek-v4-pro", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"},
-			[]string{"tokenhub/deepseek-v4-pro", "tokenhub/glm-5.3", "tokenhub/kling-video-v3"}, []string{"z-ai/glm-5.3"}, &offers))
+			listedEntries("p/deepseek-v4-pro", "p/glm-5.3", "p/kling-video-v3"), []string{"z-ai/glm-5.3"}, &offers))
 	if want := [][]string{{"deepseek/deepseek-v4-pro", "z-ai/glm-5.3"}}; !reflect.DeepEqual(offers, want) {
 		t.Fatalf("the judge was offered %v, want %v; history %+v", offers, want, state.History)
 	}
@@ -729,8 +737,8 @@ func TestAGatewayThatListsModelsWithoutThePublisherServesThem(t *testing.T) {
 	if len(state.History) != 1 {
 		t.Fatalf("unexpected history: %+v", state.History)
 	}
-	if record := state.History[0]; record.Output != "tokenhub/glm-5.3" || record.Model != "tokenhub/glm-5.3" || record.ModelPrefix != "" {
-		t.Fatalf("invoked with %q, recorded model=%q prefix=%q", record.Output, record.Model, record.ModelPrefix)
+	if record := state.History[0]; record.Output != "p/glm-5.3" || record.Model != "z-ai/glm-5.3" || record.ModelPrefix != "p/" || record.Invoked != "p/glm-5.3" {
+		t.Fatalf("invoked with %q, recorded model=%q prefix=%q invoked=%q", record.Output, record.Model, record.ModelPrefix, record.Invoked)
 	}
 	if strings.Contains(raw, "synthetic-gateway-only") {
 		t.Fatal("stored history exposed the gateway credential")
@@ -738,13 +746,13 @@ func TestAGatewayThatListsModelsWithoutThePublisherServesThem(t *testing.T) {
 }
 
 // Routing is invoked the same way, by the id the gateway lists, and the log
-// names that id once rather than the prefix twice.
+// names both the catalog id and that id.
 func TestRoutingReachesAModelByTheIDAGatewayListsWithoutThePublisher(t *testing.T) {
-	selector := tokenhubSelector(t)
+	selector := nameOnlySelector(t)
 	var observed []string
 	selector.observe = func(message string) { observed = append(observed, message) }
 	var offers [][]string
-	hosts := gatewayHosts(t, []string{"z-ai/glm-5.3"}, []string{"tokenhub/glm-5.3"}, []string{"z-ai/glm-5.3"}, &offers)
+	hosts := gatewayHosts(t, []string{"z-ai/glm-5.3"}, listedEntries("p/glm-5.3"), []string{"z-ai/glm-5.3"}, &offers)
 	chats := 0
 	useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
 		if request.URL.Host != "routing.example" {
@@ -755,7 +763,7 @@ func TestRoutingReachesAModelByTheIDAGatewayListsWithoutThePublisher(t *testing.
 		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
 			return nil, err
 		}
-		if input.Model != "tokenhub/glm-5.3" {
+		if input.Model != "p/glm-5.3" {
 			t.Errorf("routing reached %q, not the id the gateway lists", input.Model)
 		}
 		return routingSelectionReply(request, chain.Assignment{Role: "review", Instruction: "Inspect the work."}), nil
@@ -768,45 +776,43 @@ func TestRoutingReachesAModelByTheIDAGatewayListsWithoutThePublisher(t *testing.
 	if err != nil || assignment.Role != "review" || chats != 1 {
 		t.Fatalf("assignment=%+v err=%v chats=%d offers=%v", assignment, err, chats, offers)
 	}
-	if len(observed) != 1 || !strings.Contains(observed[0], "tokenhub/glm-5.3") || strings.Contains(observed[0], "tokenhub/tokenhub/") {
-		t.Fatalf("routing log: %v", observed)
+	if want := []string{"routing with freshly selected model: z-ai/glm-5.3; invoked through the configured gateway as p/glm-5.3"}; !reflect.DeepEqual(observed, want) {
+		t.Fatalf("routing log: %q", observed)
 	}
 }
 
 // A gateway that lists a model both ways is reached the way the catalog names
-// it, as it always was, so an operator whose gateway lists the publisher sees
-// nothing change.
+// it, as it always was, and the record holds nothing new.
 func TestAGatewayListingBothShapesKeepsThePublisherShape(t *testing.T) {
-	selector := gatewaySelector(t)
-	selector.Authors = []string{"z-ai"}
-	selector.Gateway.Prefix = "gatewayprov/"
 	var offers [][]string
 	worker := chain.Process{Name: "worker", ModelEnv: "CHOSEN_MODEL", Command: []string{"/bin/sh", "-c", `printf '%s' "$CHOSEN_MODEL"`}}
-	state, _, err := runRoleOnce(t, selector, chain.Role{Name: "implement", Purpose: "implement", Processes: []chain.Process{worker}},
-		gatewayHosts(t, []string{"z-ai/glm-5.3"}, []string{"gatewayprov/glm-5.3", "gatewayprov/z-ai/glm-5.3"}, []string{"z-ai/glm-5.3"}, &offers))
+	state, raw, err := runRoleOnce(t, nameOnlySelector(t), chain.Role{Name: "implement", Purpose: "implement", Processes: []chain.Process{worker}},
+		gatewayHosts(t, []string{"z-ai/glm-5.3"}, listedEntries("p/glm-5.3", "p/z-ai/glm-5.3"), []string{"z-ai/glm-5.3"}, &offers))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(offers, [][]string{{"z-ai/glm-5.3"}}) || len(state.History) != 1 {
 		t.Fatalf("offers=%v history=%+v", offers, state.History)
 	}
-	if record := state.History[0]; record.Output != "gatewayprov/z-ai/glm-5.3" || record.Model != "z-ai/glm-5.3" || record.ModelPrefix != "gatewayprov/" {
-		t.Fatalf("invoked with %q, recorded model=%q prefix=%q", record.Output, record.Model, record.ModelPrefix)
+	if record := state.History[0]; record.Output != "p/z-ai/glm-5.3" || record.Model != "z-ai/glm-5.3" || record.ModelPrefix != "p/" || record.Invoked != "" {
+		t.Fatalf("invoked with %q, recorded model=%q prefix=%q invoked=%q", record.Output, record.Model, record.ModelPrefix, record.Invoked)
+	}
+	if strings.Contains(raw, `"invoked"`) {
+		t.Fatalf("the record gained a field: %s", raw)
 	}
 }
 
-// Peers in a review group run on different publishers. Behind an id without
-// the publisher the publisher is the catalog's: the second reviewer must not
-// run another z-ai model because the first one's id begins with "tokenhub".
+// Peers in a review group run on different publishers, behind ids without
+// the publisher too: the second reviewer is not given another z-ai model.
 func TestPeersReachedByIDsWithoutThePublisherStillDifferInPublisher(t *testing.T) {
 	var offers [][]string
 	worker := chain.Process{ModelEnv: "CHOSEN_MODEL", Command: []string{"/bin/sh", "-c", `printf '%s' "$CHOSEN_MODEL"`}}
 	first, second := worker, worker
 	first.Name, second.Name = "reviewer-a", "reviewer-b"
 	catalog := []string{"deepseek/deepseek-v4-pro", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"}
-	served := []string{"tokenhub/deepseek-v4-pro", "tokenhub/glm-5.3", "tokenhub/glm-5.3-flash"}
-	state, _, err := runRoleOnce(t, tokenhubSelector(t), chain.Role{Name: "review", Purpose: "independent review", Processes: []chain.Process{first, second}},
-		gatewayHosts(t, catalog, served, []string{"z-ai/glm-5.3", "z-ai/glm-5.3-flash", "deepseek/deepseek-v4-pro"}, &offers))
+	state, _, err := runRoleOnce(t, nameOnlySelector(t), chain.Role{Name: "review", Purpose: "independent review", Processes: []chain.Process{first, second}},
+		gatewayHosts(t, catalog, listedEntries("p/deepseek-v4-pro", "p/glm-5.3", "p/glm-5.3-flash"),
+			[]string{"z-ai/glm-5.3", "z-ai/glm-5.3-flash", "deepseek/deepseek-v4-pro"}, &offers))
 	if want := [][]string{catalog, {"deepseek/deepseek-v4-pro"}}; !reflect.DeepEqual(offers, want) {
 		t.Fatalf("the judge was offered %v, want %v; history %+v", offers, want, state.History)
 	}
@@ -815,89 +821,196 @@ func TestPeersReachedByIDsWithoutThePublisherStillDifferInPublisher(t *testing.T
 	}
 	var invoked []string
 	for _, record := range state.History {
-		invoked = append(invoked, record.Speaker+"="+record.Output)
+		invoked = append(invoked, record.Speaker+"="+record.Model+"@"+record.Output)
 	}
-	if want := []string{"reviewer-a=tokenhub/glm-5.3", "reviewer-b=tokenhub/deepseek-v4-pro"}; !reflect.DeepEqual(invoked, want) {
+	if want := []string{"reviewer-a=z-ai/glm-5.3@p/glm-5.3", "reviewer-b=deepseek/deepseek-v4-pro@p/deepseek-v4-pro"}; !reflect.DeepEqual(invoked, want) {
 		t.Fatalf("peers ran %v, want %v", invoked, want)
 	}
 }
 
-// An earlier choice that names no model in this catalog, such as one the
-// gateway or the catalog has since withdrawn, says nothing about a publisher
-// and excludes none.
-func TestAGatewayIDThatNamesNoCatalogModelExcludesNoPublisher(t *testing.T) {
-	var offers [][]string
-	selector := tokenhubSelector(t)
-	catalog := []string{"deepseek/deepseek-v4-pro", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"}
-	useCatalogTransport(t, gatewayHosts(t, catalog, []string{"tokenhub/deepseek-v4-pro", "tokenhub/glm-5.3", "tokenhub/glm-5.3-flash"}, []string{"z-ai/glm-5.3"}, &offers))
-	model, prefix, err := selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, []string{"tokenhub/unknown"})
-	if err != nil || model != "tokenhub/glm-5.3" || prefix != "" {
-		t.Fatalf("model=%q prefix=%q err=%v offers=%v", model, prefix, err, offers)
+// A model name alone can belong to more than one publisher. The gateway's
+// own word on the owner settles it only when it names a configured
+// publisher; any other owner, or none, settles nothing, and then a name the
+// catalog gives more than one id is not taken as any of them.
+func TestAGatewayIDWithoutThePublisherIsTakenOnlyWhenItsPublisherIsKnown(t *testing.T) {
+	entry := func(id string, owner any) map[string]any {
+		listed := map[string]any{"id": id, "object": "model"}
+		if owner != nil {
+			listed["owned_by"] = owner
+		}
+		return listed
 	}
-	if !reflect.DeepEqual(offers, [][]string{catalog}) {
-		t.Fatalf("the judge was offered %v, want %v", offers, catalog)
-	}
-}
-
-// Two publishers can list a model under the same name, and a gateway that
-// lists ids without the publisher serves both by one id. The judge is offered
-// that id once, as the publisher first in the catalog lists it, and the next
-// peer is not offered it again under the other publisher.
-func TestOneGatewayIDIsOfferedOnceWhenTwoPublishersShareItsName(t *testing.T) {
-	selector := tokenhubSelector(t)
-	selector.Authors = []string{"maker-one", "maker-two"}
-	var offers [][]string
-	worker := chain.Process{ModelEnv: "CHOSEN_MODEL", Command: []string{"/bin/sh", "-c", `printf '%s' "$CHOSEN_MODEL"`}}
-	first, second := worker, worker
-	first.Name, second.Name = "reviewer-a", "reviewer-b"
-	// maker-two comes first in the catalog, so it holds the shared name.
-	catalog := []string{"maker-two/shared", "maker-one/shared", "maker-one/other"}
-	state, _, err := runRoleOnce(t, selector, chain.Role{Name: "review", Purpose: "independent review", Processes: []chain.Process{first, second}},
-		gatewayHosts(t, catalog, []string{"tokenhub/shared", "tokenhub/other"}, []string{"maker-one/shared", "maker-two/shared", "maker-one/other"}, &offers))
-	if want := [][]string{{"maker-one/other", "maker-two/shared"}, {"maker-one/other"}}; !reflect.DeepEqual(offers, want) {
-		t.Fatalf("the judge was offered %v, want %v; history %+v", offers, want, state.History)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	var invoked []string
-	for _, record := range state.History {
-		invoked = append(invoked, record.Speaker+"="+record.Output)
-	}
-	if want := []string{"reviewer-a=tokenhub/shared", "reviewer-b=tokenhub/other"}; !reflect.DeepEqual(invoked, want) {
-		t.Fatalf("peers ran %v, want %v", invoked, want)
+	for _, shape := range []struct {
+		name     string
+		catalog  []string
+		owner    any
+		offered  []string
+		endpoint string
+	}{
+		{"two publishers, no owner", []string{"maker-one/shared", "maker-two/shared", "maker-one/other"}, nil, []string{"maker-one/other"}, "p/other"},
+		{"two publishers, owner names the first", []string{"maker-one/shared", "maker-two/shared", "maker-one/other"}, "maker-one", []string{"maker-one/other", "maker-one/shared"}, "p/shared"},
+		{"two publishers, owner names the second in capitals", []string{"maker-one/shared", "maker-two/shared", "maker-one/other"}, "MAKER-TWO", []string{"maker-one/other", "maker-two/shared"}, "p/shared"},
+		{"a publisher outside the configured ones shares the name", []string{"maker-one/shared", "outsider/shared", "maker-one/other"}, nil, []string{"maker-one/other"}, "p/other"},
+		{"one publisher, owner is the provider", []string{"maker-one/shared", "maker-one/other"}, "p", []string{"maker-one/other", "maker-one/shared"}, "p/shared"},
+		{"one publisher, owner is a company nobody configured", []string{"maker-one/shared", "maker-one/other"}, "somecorp", []string{"maker-one/other", "maker-one/shared"}, "p/shared"},
+		{"one publisher, owner publishes in the catalog but is not configured", []string{"maker-one/shared", "outsider/elsewhere", "maker-one/other"}, "outsider", []string{"maker-one/other", "maker-one/shared"}, "p/shared"},
+		{"one publisher, owner is not a string", []string{"maker-one/shared", "maker-one/other"}, 7, []string{"maker-one/other", "maker-one/shared"}, "p/shared"},
+		{"one publisher, owner names another configured publisher", []string{"maker-one/shared", "maker-one/other"}, "maker-two", []string{"maker-one/other"}, "p/other"},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			selector := nameOnlySelector(t)
+			selector.Authors = []string{"maker-one", "maker-two"}
+			var offers [][]string
+			useCatalogTransport(t, gatewayHosts(t, shape.catalog, []any{entry("p/shared", shape.owner), entry("p/other", nil)},
+				[]string{"maker-one/shared", "maker-two/shared", "maker-one/other"}, &offers))
+			_, endpoint, err := selector.choose(context.Background(), chain.Role{Name: "implement"}, chain.Process{}, chain.State{Request: "original request"}, nil)
+			if err != nil || endpoint != shape.endpoint || !reflect.DeepEqual(offers, [][]string{shape.offered}) {
+				t.Fatalf("endpoint=%q err=%v offered %v, want %q offered %v", endpoint, err, offers, shape.endpoint, shape.offered)
+			}
+		})
 	}
 }
 
-// The requester is told the model by the id its launch was invoked with,
-// through the queue, as the stage is declared.
-func TestTheDeclaredModelIsTheIDAGatewayListsWithoutThePublisher(t *testing.T) {
-	cfg := declaringRun(t, `printf '%s' "$MODEL" > invoked`)
-	selector := tokenhubSelector(t)
+// The gateway's word on the owner, when it names a configured publisher, is
+// taken over the name: "p/glm-5.3" owned by minimax is not z-ai's glm-5.3.
+func TestAGatewayIDOwnedByAnotherConfiguredPublisherIsNotTaken(t *testing.T) {
+	selector := nameOnlySelector(t)
+	var offers [][]string
+	useCatalogTransport(t, gatewayHosts(t, []string{"z-ai/glm-5.3"},
+		[]any{map[string]any{"id": "p/glm-5.3", "owned_by": "minimax"}}, []string{"z-ai/glm-5.3"}, &offers))
+	model, endpoint, err := selector.choose(context.Background(), chain.Role{Name: "implement"}, chain.Process{}, chain.State{Request: "original request"}, nil)
+	if err == nil || model != "" || endpoint != "" || len(offers) != 0 {
+		t.Fatalf("model=%q endpoint=%q err=%v offers=%v", model, endpoint, err, offers)
+	}
+}
+
+// Ids are compared without regard to case, and the role is handed the id as
+// the gateway lists it, in either shape.
+func TestGatewayIDsAreMatchedWithoutRegardToCaseAndInvokedAsListed(t *testing.T) {
+	for listed, want := range map[string]string{"p/MiniMax-M2.5": "p/MiniMax-M2.5", "P/MiniMax/MiniMax-M2.5": "P/MiniMax/MiniMax-M2.5"} {
+		t.Run(listed, func(t *testing.T) {
+			var offers [][]string
+			useCatalogTransport(t, gatewayHosts(t, []string{"minimax/minimax-m2.5"}, listedEntries(listed), []string{"minimax/minimax-m2.5"}, &offers))
+			selector := nameOnlySelector(t)
+			model, endpoint, err := selector.choose(context.Background(), chain.Role{Name: "implement"}, chain.Process{}, chain.State{Request: "original request"}, nil)
+			if err != nil || model != "minimax/minimax-m2.5" || endpoint != want {
+				t.Fatalf("model=%q endpoint=%q err=%v offers=%v", model, endpoint, err, offers)
+			}
+		})
+	}
+}
+
+// observedOutputs runs one request through the queue under a named shape of
+// configuration and returns what a person reads of it: the request's
+// history.json with its times blanked, and every comment the tracker got.
+// The worker prints the id it was handed. It uses only helpers main's tests
+// have, so main's engine can write the values these are compared with.
+func observedOutputs(t *testing.T, shape string) (string, []string) {
+	t.Helper()
+	cfg := declaringRun(t, `printf '%s' "$MODEL"`)
+	t.Setenv("SELECTION_TEST_KEY", "synthetic-selection-only")
+	t.Setenv("GATEWAY_TEST_KEY", "synthetic-gateway-only")
+	selector := selectionConfig{Judge: chain.Jev{URL: "https://selection.example/decisions", Model: "decision-model", KeyEnv: "SELECTION_TEST_KEY"},
+		Authors: []string{"z-ai"}}
+	gateway := &gatewayConfig{ModelsURL: "https://gateway.example/v1/models", KeyEnv: "GATEWAY_TEST_KEY", Prefix: "p/"}
+	var listed []string
+	switch shape {
+	case "no gateway":
+	case "publisher listed":
+		selector.Gateway, listed = gateway, []string{"p/z-ai/glm-5.3", "p/model-of-its-own"}
+	case "fixed through a gateway":
+		selector.Gateway, selector.Fixed = gateway, "z-ai/glm-5.3"
+	case "name only listed":
+		selector.Gateway, listed = gateway, []string{"p/glm-5.3"}
+	default:
+		t.Fatalf("unknown shape %q", shape)
+	}
 	cfg.ModelSelection = &selector
 	lookEvery(t, 20*time.Millisecond)
-	var offers [][]string
-	hosts := gatewayHosts(t, []string{"z-ai/glm-5.3"}, []string{"tokenhub/glm-5.3"}, []string{"z-ai/glm-5.3"}, &offers)
 	fixture := &noticeTracker{}
 	fixture.install(t, func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Host {
-		case "openrouter.ai", "gateway.example", "selection.example":
-			return hosts(request)
+		case "openrouter.ai":
+			return selectionReply(request, 200, map[string]any{"data": []any{selectionModel("z-ai/glm-5.3")}}), nil
+		case "gateway.example":
+			var data []any
+			for _, id := range listed {
+				data = append(data, gatewayEntry(id))
+			}
+			return selectionReply(request, 200, map[string]any{"data": data}), nil
+		case "selection.example":
+			return selectionReply(request, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": "z-ai/glm-5.3"}}}), nil
 		}
 		return alwaysChoose("done")(request)
 	})
 	root, directory := noticeJob(t, chain.State{})
 	startStopQueue(t, cfg, root, time.Minute, io.Discard)
-	waitFor(t, func() bool { return len(loadJobState(t, directory).History) > 0 })
-	if record := loadJobState(t, directory).History[0]; record.Model != "tokenhub/glm-5.3" || record.ModelPrefix != "" {
-		t.Fatalf("the first launch was recorded as %+v", record)
+	waitFor(t, func() bool { return loadJobState(t, directory).Done && len(fixture.all()) > 0 })
+	time.Sleep(50 * time.Millisecond)
+	raw, err := os.ReadFile(filepath.Join(directory, "run", "history.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if invoked, err := os.ReadFile(filepath.Join(directory, "workspace", "invoked")); err != nil || string(invoked) != "tokenhub/glm-5.3" {
-		t.Fatalf("the work was invoked with %q (%v)", invoked, err)
+	times := regexp.MustCompile(`"(started_at|finished_at)":"[^"]*"`)
+	return times.ReplaceAllString(string(raw), `"$1":"-"`), fixture.all()
+}
+
+// mainObservedOutputs is what main's engine (351ee9c) wrote through
+// observedOutputs, run twice with the same result: the history.json with
+// its times blanked and the comments the tracker got.
+const mainObservedOutputs = `{
+  "fixed through a gateway": {
+    "comments": [
+      "作業を始めます。（モデル: z-ai/glm-5.3）"
+    ],
+    "history": "{\"request\":\"Original issue: EXAMPLE-51\\nTitle: Original title\\n\\nOriginal conditions\",\"history\":[{\"role\":\"work\",\"speaker\":\"worker\",\"model\":\"z-ai/glm-5.3\",\"model_prefix\":\"p/\",\"output\":\"p/z-ai/glm-5.3\",\"instruction\":\"Stage 1 of 2 in the configured run: work.\\nNothing you write is read, decoded or graded, and saying the work is done advances nothing. The verify stage runs afterwards, and what its commands return is what carries this work on.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"},{\"role\":\"work\",\"speaker\":\"runtime\",\"output\":\"Runtime record for stage work, written by the engine from what it observed.\\nProcess worker exited 0.\\n\",\"instruction\":\"Stage 1 of 2 in the configured run: work.\\nNothing you write is read, decoded or graded, and saying the work is done advances nothing. The verify stage runs afterwards, and what its commands return is what carries this work on.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"},{\"role\":\"verify\",\"speaker\":\"build\",\"output\":\"\",\"instruction\":\"Stage 2 of 2 in the configured run: verify.\\nThe runtime launches this stage's configured commands and records what they returned. Their exit status is the only thing that satisfies this stage.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"},{\"role\":\"verify\",\"speaker\":\"runtime\",\"output\":\"Runtime record for stage verify, written by the engine from what it observed.\\nProcess build exited 0.\\n\",\"instruction\":\"Stage 2 of 2 in the configured run: verify.\\nThe runtime launches this stage's configured commands and records what they returned. Their exit status is the only thing that satisfies this stage.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"}],\"done\":true,\"workflow\":{\"start\":null,\"after\":{},\"recover\":{},\"stages\":[{\"name\":\"work\",\"kind\":\"model\"},{\"name\":\"verify\",\"kind\":\"command\",\"on_failure\":\"work\"}]},\"step\":\"verify\"}"
+  },
+  "no gateway": {
+    "comments": [
+      "作業を始めます。（モデル: z-ai/glm-5.3）"
+    ],
+    "history": "{\"request\":\"Original issue: EXAMPLE-51\\nTitle: Original title\\n\\nOriginal conditions\",\"history\":[{\"role\":\"work\",\"speaker\":\"worker\",\"model\":\"z-ai/glm-5.3\",\"output\":\"z-ai/glm-5.3\",\"instruction\":\"Stage 1 of 2 in the configured run: work.\\nNothing you write is read, decoded or graded, and saying the work is done advances nothing. The verify stage runs afterwards, and what its commands return is what carries this work on.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"},{\"role\":\"work\",\"speaker\":\"runtime\",\"output\":\"Runtime record for stage work, written by the engine from what it observed.\\nProcess worker exited 0.\\n\",\"instruction\":\"Stage 1 of 2 in the configured run: work.\\nNothing you write is read, decoded or graded, and saying the work is done advances nothing. The verify stage runs afterwards, and what its commands return is what carries this work on.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"},{\"role\":\"verify\",\"speaker\":\"build\",\"output\":\"\",\"instruction\":\"Stage 2 of 2 in the configured run: verify.\\nThe runtime launches this stage's configured commands and records what they returned. Their exit status is the only thing that satisfies this stage.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"},{\"role\":\"verify\",\"speaker\":\"runtime\",\"output\":\"Runtime record for stage verify, written by the engine from what it observed.\\nProcess build exited 0.\\n\",\"instruction\":\"Stage 2 of 2 in the configured run: verify.\\nThe runtime launches this stage's configured commands and records what they returned. Their exit status is the only thing that satisfies this stage.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"}],\"done\":true,\"workflow\":{\"start\":null,\"after\":{},\"recover\":{},\"stages\":[{\"name\":\"work\",\"kind\":\"model\"},{\"name\":\"verify\",\"kind\":\"command\",\"on_failure\":\"work\"}]},\"step\":\"verify\"}"
+  },
+  "publisher listed": {
+    "comments": [
+      "作業を始めます。（モデル: z-ai/glm-5.3）"
+    ],
+    "history": "{\"request\":\"Original issue: EXAMPLE-51\\nTitle: Original title\\n\\nOriginal conditions\",\"history\":[{\"role\":\"work\",\"speaker\":\"worker\",\"model\":\"z-ai/glm-5.3\",\"model_prefix\":\"p/\",\"output\":\"p/z-ai/glm-5.3\",\"instruction\":\"Stage 1 of 2 in the configured run: work.\\nNothing you write is read, decoded or graded, and saying the work is done advances nothing. The verify stage runs afterwards, and what its commands return is what carries this work on.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"},{\"role\":\"work\",\"speaker\":\"runtime\",\"output\":\"Runtime record for stage work, written by the engine from what it observed.\\nProcess worker exited 0.\\n\",\"instruction\":\"Stage 1 of 2 in the configured run: work.\\nNothing you write is read, decoded or graded, and saying the work is done advances nothing. The verify stage runs afterwards, and what its commands return is what carries this work on.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"},{\"role\":\"verify\",\"speaker\":\"build\",\"output\":\"\",\"instruction\":\"Stage 2 of 2 in the configured run: verify.\\nThe runtime launches this stage's configured commands and records what they returned. Their exit status is the only thing that satisfies this stage.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"},{\"role\":\"verify\",\"speaker\":\"runtime\",\"output\":\"Runtime record for stage verify, written by the engine from what it observed.\\nProcess build exited 0.\\n\",\"instruction\":\"Stage 2 of 2 in the configured run: verify.\\nThe runtime launches this stage's configured commands and records what they returned. Their exit status is the only thing that satisfies this stage.\\n\",\"started_at\":\"-\",\"finished_at\":\"-\"}],\"done\":true,\"workflow\":{\"start\":null,\"after\":{},\"recover\":{},\"stages\":[{\"name\":\"work\",\"kind\":\"model\"},{\"name\":\"verify\",\"kind\":\"command\",\"on_failure\":\"work\"}]},\"step\":\"verify\"}"
+  }
+}`
+
+// Where the gateway lists the publisher, where there is no gateway, and where
+// a fixed model goes through a gateway, nothing a person reads changes: the
+// history.json and the comment declaring the model are main's, byte for
+// byte. A gateway that lists the model by its name alone is invoked by
+// another id, which the record shows, while the requester is still told the
+// catalog's model.
+func TestNothingAPersonReadsChangesWhereTheGatewayListsThePublisher(t *testing.T) {
+	var want map[string]struct {
+		History  string
+		Comments []string
 	}
-	const want = "作業を始めます。（モデル: tokenhub/glm-5.3）"
-	waitFor(t, func() bool { return fixture.count(want) > 0 })
-	if got := fixture.all(); len(got) != 1 || got[0] != want {
-		t.Fatalf("the requester was told %q", got)
+	if err := json.Unmarshal([]byte(mainObservedOutputs), &want); err != nil {
+		t.Fatal(err)
 	}
+	for _, shape := range []string{"no gateway", "publisher listed", "fixed through a gateway"} {
+		t.Run(shape, func(t *testing.T) {
+			history, comments := observedOutputs(t, shape)
+			if history != want[shape].History {
+				t.Errorf("history.json differs from main's\n got: %s\nwant: %s", history, want[shape].History)
+			}
+			if !reflect.DeepEqual(comments, want[shape].Comments) {
+				t.Errorf("the requester was told %q, main told %q", comments, want[shape].Comments)
+			}
+		})
+	}
+	t.Run("a gateway that lists the name alone", func(t *testing.T) {
+		history, comments := observedOutputs(t, "name only listed")
+		if history == want["publisher listed"].History || !strings.Contains(history, `"output":"p/glm-5.3"`) || !strings.Contains(history, `"invoked":"p/glm-5.3"`) {
+			t.Fatalf("the comparison did not see the other id: %s", history)
+		}
+		if !reflect.DeepEqual(comments, want["publisher listed"].Comments) {
+			t.Fatalf("the requester was told %q, not the catalog's model", comments)
+		}
+	})
 }

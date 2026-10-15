@@ -21,6 +21,10 @@ type Result struct {
 	// was invoked, so the history shows which account the call was billed to.
 	// It is a route to the same model, not a different model or a quality mark.
 	ModelPrefix string `json:"model_prefix,omitempty"`
+	// Invoked is the id this process was handed when ModelPrefix + Model does
+	// not say it: a gateway that lists the model without its publisher. It is
+	// empty for every other launch, whose record reads as it always did.
+	Invoked     string `json:"invoked,omitempty"`
 	Output      string `json:"output"`
 	Instruction string `json:"instruction,omitempty"`
 	// Receipt carries the content of the file the operator named for this

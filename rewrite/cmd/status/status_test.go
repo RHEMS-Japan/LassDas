@@ -1713,3 +1713,42 @@ func TestOnlyAGitHubIssuesOwnPageIsLinkedAndTheRecordDecidesTheKind(t *testing.T
 		t.Error("the Backlog issue's link changed")
 	}
 }
+
+// A launch reached by an id its gateway lists without the publisher shows
+// that id, where it was invoked, and not the prefix + the catalog id, which
+// names nothing the gateway serves. Other launches show what they showed.
+func TestALaunchShowsTheIDItWasInvokedBy(t *testing.T) {
+	root := fixtureQueue(t)
+	job := filepath.Join(root, "jobs", "7")
+	if err := os.RemoveAll(filepath.Join(job, "live")); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	state := chain.State{Request: "REQUEST-TEXT", Step: "implement",
+		Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}, {Name: "verify"}}},
+		History: []chain.Result{
+			{Role: "elicit", Speaker: "elicit-process", Model: "vendor/model", ModelPrefix: "gateway/", Output: "OUTPUT-ELICIT",
+				StartedAt: started, FinishedAt: started.Add(time.Minute)},
+			{Role: "implement", Speaker: "implement-process", Model: "vendor/listed-alone", ModelPrefix: "gateway/", Invoked: "gateway/listed-alone",
+				Output: "OUTPUT-IMPLEMENT", StartedAt: started.Add(2 * time.Minute), FinishedAt: started.Add(3 * time.Minute)},
+		}}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(job, "run", "history.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ts := serve(t, root, fixtureConfig(t), "", "")
+	for _, path := range []string{"/jobs/7", "/"} {
+		response, body := get(t, ts, path)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("%s: %d: %s", path, response.StatusCode, body)
+		}
+		if !strings.Contains(body, "gateway/listed-alone") || strings.Contains(body, "gateway/vendor/listed-alone") {
+			t.Errorf("%s does not show the id the launch was invoked by", path)
+		}
+	}
+	_, body := get(t, ts, "/jobs/7")
+	expectAll(t, body, "gateway/vendor/model")
+}
