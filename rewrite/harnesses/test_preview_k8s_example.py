@@ -70,7 +70,8 @@ POD_POLICY_REFUSAL = ("pods \"pv-sample-12-6d4cf-x2v9p\" is forbidden: Validatin
 #                          install_restarts, install_slow (install never
 #                          ends), install_restarted_clean (started again,
 #                          the last run ended 0), install_restarted_bare
-#                          (started again, no last state), net_install_fails;
+#                          (started again, no last state), net_install_fails,
+#                          receive_stuck (receive keeps running after it);
 #                          failed_create makes no Pod at all
 #   get_fails    phase     reading the objects fails while the Pod is in it
 #   start        starting  the Pod stays in its first rules container
@@ -88,7 +89,8 @@ HERE = Path(__file__).resolve().parent
 OUTCOME = {"ready": "ready", "never_ready": "unready", "crash": "crashing",
            "install_fails": "install_failed", "install_restarts": "install_restarted",
            "install_slow": "installing", "install_restarted_clean": "install_restarted_clean",
-           "install_restarted_bare": "install_restarted_bare", "net_install_fails": "net_install_failed"}
+           "install_restarted_bare": "install_restarted_bare", "net_install_fails": "net_install_failed",
+           "receive_stuck": "receiving"}
 
 
 def parent_environment():
@@ -746,6 +748,7 @@ class PreviewExampleTests(unittest.TestCase):
         self.tool.INSTALL_MARGIN = 0  # lets a 3 second wait cover a 1 second step
         for scenario, changes, removed in (
                 ({"start": "starting"}, {}, True),
+                ({"pod": "receive_stuck"}, {}, True),
                 ({"pod": "install_slow"}, {"PREVIEW_INSTALL": "npm ci", "PREVIEW_INSTALL_SECONDS": "1"}, True),
                 ({"pod": "never_ready"}, {}, False),
                 ({"pod": "never_ready"}, {"PREVIEW_INSTALL": "npm ci", "PREVIEW_INSTALL_SECONDS": "1"}, False)):

@@ -732,8 +732,9 @@ def check_public_url(url, auth, *, signed, seconds=CHECK_SECONDS, pause=2.0):
         cookie;
     (d) the ready path with both, which the application must answer with 200
         to 399.
-    The router's answers when it has nothing to forward to (404, 502, 503),
-    and an unreachable address, are waited out for seconds. The signed URL
+    What the router and the load balancer answer when they have nothing to
+    forward to yet (404, 502, 503, 504), and an unreachable address, are
+    waited out for seconds, in (a) as in (d). The signed URL
     itself is never part of a reason: a reason ends up in the history."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), KeepRedirects)
     authorization = "Basic " + base64.b64encode(auth.encode("utf-8")).decode("ascii")
