@@ -10,11 +10,12 @@ Python's standard library and kubectl, nothing else.
 
 up builds one Deployment and one Service in the preview namespace, hands the
 checkout to the Pod over kubectl exec, waits until the application answers,
-opens the public URL once without and once with the check user's password,
-and writes three lines to $TASK_PREVIEW: the URL, until when it can be opened
-and the identifier of the change it runs. The same change already running is
-not started again; only its lifetime is extended. down removes the
-Deployment and the Service and reads back that they are gone.
+makes the request's signed URL, opens the public address as the requester
+would (the router's password and the signed URL both), and writes three lines
+to $TASK_PREVIEW: the signed URL, until when it can be opened and the
+identifier of the change it runs. The same change already running is not
+started again; only its lifetime is extended, with a new signed URL. down
+removes the Deployment and the Service and reads back that they are gone.
 
 Exit status: 0 when the preview is up (up) or gone (down); 1 otherwise, the
 reason on the last line of the output; 2 for a wrong command line. Nothing
@@ -22,10 +23,10 @@ is removed after a failure, except a Deployment whose dependency step failed:
 the cleanup and down remove the rest.
 
 Credentials. The engine passes PREVIEW_K8S_TOKEN (and, to up,
-PREVIEW_CHECK_AUTH) in the environment and lists their names in
-TASK_CREDENTIAL_NAMES. Before anything else this program takes every listed
-value out of its environment and starts itself again without them, the two it
-needs passed through a pipe: what /proc/self/environ shows of the running
+PREVIEW_CHECK_AUTH and PREVIEW_SIGNING_KEY) in the environment and lists their
+names in TASK_CREDENTIAL_NAMES. Before anything else this program takes every
+listed value out of its environment and starts itself again without them, the
+ones it needs passed through a pipe: what /proc/self/environ shows of the running
 program then holds no credential. git and kubectl get an environment of their
 own without any; kubectl gets only the path of a kubeconfig, written to the
 launch's /tmp after git has run and removed at the end. Nothing in the
@@ -35,6 +36,7 @@ import base64
 import collections
 import datetime
 import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -52,7 +54,11 @@ import urllib.request
 COMMANDS = ("up", "down")
 TOKEN = "PREVIEW_K8S_TOKEN"
 CHECK_AUTH = "PREVIEW_CHECK_AUTH"
-CREDENTIALS = (TOKEN, CHECK_AUTH)
+SIGNING_KEY = "PREVIEW_SIGNING_KEY"
+CREDENTIALS = (TOKEN, CHECK_AUTH, SIGNING_KEY)
+SIGNING_KEY_LENGTH = 32
+OPEN_PATH = "/_preview/open"
+COOKIE = "__Host-preview"
 HANDOVER = "--credentials-fd"
 HANDOVER_LIMIT = 16 * 1024
 # The commands that load the egress rules of the ConfigMap preview-egress.
@@ -656,11 +662,34 @@ def status_of(opener, url, authorization=None):
         return error.code
 
 
-def check_public_url(url, auth, *, seconds=CHECK_SECONDS, pause=2.0):
-    """Opens the URL as the requester would: once without credentials, which
-    the router must answer with 401, and once as the check user, which the
-    application must answer with 200 to 399. The router's own answers (404,
-    502, 503) and an unreachable address are waited out for seconds."""
+def opened_cookie(opener, url, authorization):
+    """The status of the signed URL and the value of the cookie it set."""
+    request = urllib.request.Request(url, headers={"User-Agent": "preview-check", "Authorization": authorization})
+    try:
+        with opener.open(request, timeout=10) as response:
+            return response.status, None
+    except urllib.error.HTTPError as error:
+        status, cookies = error.code, error.headers.get_all("Set-Cookie") or []
+        error.close()
+    for cookie in cookies:
+        name, _, rest = cookie.partition("=")
+        if name.strip() == COOKIE:
+            return status, rest.split(";", 1)[0].strip()
+    return status, None
+
+
+def check_public_url(url, auth, *, signed, seconds=CHECK_SECONDS, pause=2.0):
+    """Opens the address as the requester would (5.5 step 6):
+    (a) without the password, which the router must answer with 401;
+    (b) with the check user's password but without the signed URL's cookie,
+        which the router must answer with 403;
+    (c) the signed URL with the password, which must answer 302 and set the
+        cookie;
+    (d) the ready path with both, which the application must answer with 200
+        to 399.
+    The router's answers when it has nothing to forward to (404, 502, 503),
+    and an unreachable address, are waited out for seconds. The signed URL
+    itself is never part of a reason: a reason ends up in the history."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), KeepRedirects)
     authorization = "Basic " + base64.b64encode(auth.encode("utf-8")).decode("ascii")
     deadline = time.monotonic() + seconds
@@ -670,21 +699,54 @@ def check_public_url(url, auth, *, seconds=CHECK_SECONDS, pause=2.0):
             if anonymous != 401:
                 raise Failure("%s answered %d without credentials; the router's password check must answer 401"
                               % (url, anonymous))
-            answer = status_of(opener, url, authorization)
+            unsigned = status_of(opener, url, authorization)
+            if unsigned == 401:
+                raise Failure("the router refused the check user (401): PREVIEW_CHECK_AUTH does not match its "
+                              "password file")
+            if unsigned != 403:
+                raise Failure("%s answered %d to the check user without the signed URL's cookie; the router's "
+                              "signature check must answer 403" % (url, unsigned))
+            status, cookie = opened_cookie(opener, signed, authorization)
+            if status != 302:
+                raise Failure("the router refused the signed URL (%d): its signing key and PREVIEW_SIGNING_KEY differ, "
+                              "or the clocks do" % status if status == 403 else
+                              "the signed URL answered %d instead of 302" % status)
+            if not cookie:
+                raise Failure("the signed URL answered 302 without setting the cookie %s" % COOKIE)
+            request = urllib.request.Request(url, headers={"User-Agent": "preview-check", "Authorization": authorization,
+                                                           "Cookie": "%s=%s" % (COOKIE, cookie)})
+            try:
+                with opener.open(request, timeout=10) as response:
+                    answer = response.status
+            except urllib.error.HTTPError as error:
+                error.close()
+                answer = error.code
         except (OSError, http.client.HTTPException) as error:
             observed = "%s could not be reached: %s" % (url, getattr(error, "reason", None) or error)
         else:
             if 200 <= answer < 400:
-                return "%s answered 401 without credentials and %d to the check user" % (url, answer)
-            if answer == 401:
-                raise Failure("the router refused the check user (401): PREVIEW_CHECK_AUTH does not match its "
-                              "password file")
+                return ("%s answered 401 without credentials, 403 without the signed URL, and %d with both"
+                        % (url, answer))
+            if answer in (401, 403):
+                raise Failure("the router refused the check user with the signed URL's cookie (%d)" % answer)
             if answer not in ROUTER_STATUSES:
                 raise Failure("the application answered %d at %s" % (answer, url))
-            observed = "%s answered %d to the check user: the router does not reach the application" % (url, answer)
+            observed = "%s answered %d with both: the router does not reach the application" % (url, answer)
         if time.monotonic() >= deadline:
             raise Failure(observed)
         time.sleep(pause)
+
+
+def sign(key, host, end):
+    """The signature of the router's check (README.md, "The signed URL"):
+    HMAC-SHA256 with the key over the lowercase host, a newline and the end
+    in Unix seconds, base64url without "=" padding, as njs writes it."""
+    digest = hmac.new(key.encode("utf-8"), ("%s\n%s" % (host, end)).encode("utf-8"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def signed_url(key, host, end):
+    return "https://%s%s?t=%d.%s" % (host, OPEN_PATH, end, sign(key, host, end))
 
 
 # -- the two commands -------------------------------------------------------
@@ -729,6 +791,10 @@ def up(environment, credentials, *, check=None):
         auth = credential(credentials, CHECK_AUTH)
         if ":" not in auth or auth.startswith(":"):
             raise Failure("PREVIEW_CHECK_AUTH must be user:password")
+        signing_key = credential(credentials, SIGNING_KEY)
+        if len(signing_key) < SIGNING_KEY_LENGTH:
+            raise Failure("PREVIEW_SIGNING_KEY must be at least %d characters (openssl rand -base64 32 makes 44)"
+                          % SIGNING_KEY_LENGTH)
         names = preview_names(settings.site, settings.issue, settings.domain)
         entries = read_env_file(settings.workspace, settings.env_file) if settings.env_file else []
         directory = private_directory(environment)
@@ -752,9 +818,12 @@ def up(environment, credentials, *, check=None):
         else:
             cluster.apply([deployment, service])
             wait_until_ready(cluster, settings, names, change, archive)
-        observed = check("https://" + names.host + settings.ready_path, auth)
+        # The URL ends with the preview's lifetime: a lifetime extended gets
+        # a new URL, and the old one stops opening at the old end.
+        opening = signed_url(signing_key, names.host, int(expires.timestamp()))
+        observed = check("https://" + names.host + settings.ready_path, auth, signed=opening)
         write_result(settings.result, [
-            names.url,
+            opening,
             "この画面は %s (日本時間) まで開けます" % expires.astimezone(JAPAN).strftime("%Y-%m-%d %H:%M"),
             "動いている変更の識別子: %s" % change])
         say(redact("preview up: %s" % observed))
