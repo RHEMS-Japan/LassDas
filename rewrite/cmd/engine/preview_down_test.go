@@ -498,8 +498,8 @@ func TestTheTakeDownFollowsTheCurrentSetting(t *testing.T) {
 // The operator removed the setting while a request's page was up. When that
 // request is delivered or stopped there is no role to take its page down, so
 // nothing is launched and nothing waits for it: the trim and the reclaim go
-// on at once, and the log says once that the page is left to the operator's
-// own cleanup, not again after the runtime restarts.
+// on at once, the request's record of its page ends there with why, and the
+// log says so once, not again after the runtime restarts.
 func TestAPageWhoseSettingWasRemovedHoldsNothing(t *testing.T) {
 	for _, ending := range []string{"delivered", "stopped"} {
 		t.Run(ending, func(t *testing.T) {
@@ -534,8 +534,9 @@ func TestAPageWhoseSettingWasRemovedHoldsNothing(t *testing.T) {
 			if said != 1 {
 				t.Fatalf("that the page is left to the operator's cleanup was said %d times across a restart", said)
 			}
-			if record := pageState(t, directory); record.State != "up" {
-				t.Fatalf("the request's record of its page no longer says it is up: %+v", record)
+			record := pageState(t, directory)
+			if record.State != "unconfirmed" || !strings.Contains(record.GaveUp, "workflow.preview is not set") || record.GaveUpAt == nil {
+				t.Fatalf("the request's record of its page does not end with why: %+v", record)
 			}
 		})
 	}
@@ -584,6 +585,130 @@ func TestAnUnreadableRecordOfThePageHoldsNothingAndIsSaidOnce(t *testing.T) {
 				t.Fatalf("the unreadable record was not kept aside as it was: %q %v", aside, err)
 			}
 		})
+	}
+}
+
+// At a stop the take-down begins first: it is launched before the stop
+// report, and runs while the report has not returned.
+func TestAStoppedRequestsTakeDownBeginsBeforeItsReport(t *testing.T) {
+	cfg, files := previewDownConfig(t)
+	cfg = withStopReport(cfg, files)
+	release := filepath.Join(t.TempDir(), "report-release")
+	report := &cfg.Roles[len(cfg.Roles)-1].Processes[0]
+	report.Env["REPORT_RELEASE"] = release
+	report.Command = []string{"/bin/sh", "-c", `cat > /dev/null; echo "reporting $TASK_ISSUE" >> "$DOWN_LOG"; while [ ! -f "$REPORT_RELEASE" ]; do sleep 0.05; done; echo "report $TASK_ISSUE" >> "$DOWN_LOG"`}
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	root, directory := stoppedPageFixture(t, cfg, time.Now().Add(-time.Hour))
+	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, &lockedLog{})
+	waitFor(t, func() bool {
+		return files.count(t, "end EXAMPLE-51") == 1 && files.count(t, "reporting EXAMPLE-51") == 1
+	})
+	if files.count(t, "report EXAMPLE-51") != 0 {
+		t.Fatalf("the report returned before it was let go: %v", files.lines(t))
+	}
+	if err := os.WriteFile(release, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { done, err := stoppedReportDone(directory); return err == nil && done })
+	finish()
+	if record := pageState(t, directory); record.State != "down" {
+		t.Fatalf("the page is not recorded down: %+v", record)
+	}
+}
+
+// A page left because the setting was removed stays left when the setting
+// comes back: its record ended, so the stopped request, whose workspace has
+// been reclaimed, launches no take-down, and nothing more is said of it.
+func TestASettingRestoredDoesNotReachAPageAlreadyLeft(t *testing.T) {
+	for _, ending := range []string{"delivered", "stopped"} {
+		t.Run(ending, func(t *testing.T) {
+			cfg, files := previewDownConfig(t)
+			if ending == "stopped" {
+				cfg = withStopReport(cfg, files)
+			}
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			root, directory := pageJob(t, cfg, ending, time.Now().Add(-time.Hour))
+			removed := cfg
+			workflow := *cfg.Workflow
+			workflow.Preview = nil
+			removed.Workflow = &workflow
+			log := &lockedLog{}
+			finish := startStopQueue(t, removed, root, 10*time.Millisecond, log)
+			waitFor(t, func() bool {
+				_, reclaimed := os.Stat(filepath.Join(directory, removalFile))
+				return trimmed(directory) && (ending == "delivered" || reclaimed == nil)
+			})
+			waitTicks()
+			finish()
+			// The operator sets workflow.preview again.
+			finish = startStopQueue(t, cfg, root, 10*time.Millisecond, log)
+			waitTicks()
+			finish()
+			for _, line := range files.lines(t) {
+				if strings.HasPrefix(line, "start_") {
+					t.Fatalf("a page already left was taken down after the setting came back: %v", files.lines(t))
+				}
+			}
+			log.mu.Lock()
+			text := log.text.String()
+			log.mu.Unlock()
+			if said := strings.Count(text, "workflow.preview is not set"); said != 1 {
+				t.Fatalf("the page left was said %d times", said)
+			}
+			if record := pageState(t, directory); record.State != "unconfirmed" {
+				t.Fatalf("the left page's record changed after the setting came back: %+v", record)
+			}
+		})
+	}
+}
+
+// A record of the page that cannot be opened for now (here, a file whose
+// permissions were taken away) is not set aside: nothing says the page is
+// down, so the request is held, that is said once, and the record is read
+// again on later ticks. Once it can be read, the page is taken down and the
+// request goes on.
+func TestARecordOfThePageThatCannotBeOpenedHoldsTheRequest(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a file without permissions can still be opened by root")
+	}
+	cfg, files := previewDownConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	root, directory := pageJob(t, cfg, "delivered", time.Now().Add(-time.Hour))
+	record := filepath.Join(directory, previewFile)
+	if err := os.Chmod(record, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(record, 0600) })
+	log := &lockedLog{}
+	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, log)
+	waitFor(t, func() bool {
+		log.mu.Lock()
+		defer log.mu.Unlock()
+		return strings.Contains(log.text.String(), "permission denied")
+	})
+	waitTicks()
+	if trimmed(directory) || len(files.lines(t)) != 0 {
+		t.Fatalf("a record that could not be opened let the request go on: trimmed=%v launches %v", trimmed(directory), files.lines(t))
+	}
+	if _, err := os.Stat(record + ".unreadable"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a record that could not be opened was set aside: %v", err)
+	}
+	log.mu.Lock()
+	said := strings.Count(log.text.String(), "permission denied")
+	log.mu.Unlock()
+	if said != 1 {
+		t.Fatalf("the record that could not be opened was said %d times", said)
+	}
+	if err := os.Chmod(record, 0600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return trimmed(directory) })
+	finish()
+	if got := pageState(t, directory); got.State != "down" || files.count(t, "end EXAMPLE-51") != 1 {
+		t.Fatalf("the page was not taken down once the record could be read: %+v %v", got, files.lines(t))
 	}
 }
 

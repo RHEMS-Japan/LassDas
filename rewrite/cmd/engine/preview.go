@@ -53,7 +53,7 @@ type previewRecord struct {
 	URL       string    `json:"url,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
 	// DownAt is when the down role exited 0, with State down. A State of
-	// unconfirmed is a page the hold ran out on before that.
+	// unconfirmed is a page nothing takes down any more (GaveUp says why).
 	DownAt *time.Time `json:"down_at,omitempty"`
 	// Refused counts the down role's launches in a row that did not exit 0,
 	// DownReason keeps the last one's reason, and Next is when it is
@@ -61,9 +61,10 @@ type previewRecord struct {
 	Refused    int       `json:"refused,omitempty"`
 	DownReason string    `json:"down_reason,omitempty"`
 	Next       time.Time `json:"next,omitzero"`
-	// Left is when the engine, with workflow.preview removed, left the page
-	// to the operator's own cleanup and said so; it is not said again.
-	Left *time.Time `json:"left,omitempty"`
+	// GaveUp says why the record ended unconfirmed, GaveUpAt when: the hold
+	// ran out, or the setting was removed while the page was up.
+	GaveUp   string     `json:"gave_up,omitempty"`
+	GaveUpAt *time.Time `json:"gave_up_at,omitempty"`
 }
 
 // previewDownLock is held while the down role runs for a request.
@@ -130,6 +131,12 @@ func (p previewer) up(ctx context.Context, role string, state chain.State) (stri
 	}
 	results := p.executor.Execute(ctx, chain.Assignment{Role: role, Instruction: previewAssignment}, state)
 	address, words, reason := previewOutcome(results, file, credentialValues(p.cfg))
+	// What the role wrote stays in its home, which outlasts the request's
+	// run, no longer than it takes to read it: a credential written there by
+	// mistake is not kept.
+	if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) && p.observe != nil {
+		p.observe("the address file of the page was not removed after it was read: " + err.Error())
+	}
 	if reason != "" {
 		record.State, record.Reason = "failed", reason
 		p.keep(record)
@@ -205,9 +212,8 @@ func (p previewer) post(ctx context.Context, address, words, event string) error
 }
 
 // previewOutcome reads what one launch of the up role left: every process
-// exited 0, its file is text without control characters other than line
-// breaks, and the first line is an https address without spaces. Otherwise
-// the reason it did not come up, in a line.
+// exited 0, its file is text for a person, and the first line is an https
+// address without spaces. Otherwise the reason it did not come up, in a line.
 func previewOutcome(results []chain.Result, file string, secrets []string) (address, words, reason string) {
 	if len(results) == 0 {
 		return "", "", "the launch returned no result"
@@ -222,16 +228,23 @@ func previewOutcome(results []chain.Result, file string, secrets []string) (addr
 		return "", "", reason
 	}
 	// The words go to the requester as they are, so the file is text for a
-	// person: Windows line ends are read as line breaks, and any other
-	// control character, on any line, is a file that is not.
-	text := strings.ReplaceAll(string(data), "\r\n", "\n")
-	if strings.ContainsFunc(text, func(r rune) bool { return r != '\n' && unicode.IsControl(r) }) {
-		return "", "", "the address file holds a control character other than a line break"
+	// person: Windows line ends are read as line breaks. The address holds no
+	// control character and no invisible formatting character. The words
+	// hold no control character but the tab, and none that turns the
+	// direction of the text around them.
+	first, rest, _ := strings.Cut(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	if strings.ContainsFunc(first, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) {
+		return "", "", "the address line holds a control or invisible formatting character"
+	}
+	if strings.ContainsFunc(rest, func(r rune) bool {
+		return r != '\n' && r != '\t' && unicode.IsControl(r) || r >= '\u202a' && r <= '\u202e' || r >= '\u2066' && r <= '\u2069'
+	}) {
+		return "", "", "the words after the address hold a control character or one that turns the direction of text"
 	}
 	for _, secret := range secrets {
-		text = strings.ReplaceAll(text, secret, "[credential]")
+		first = strings.ReplaceAll(first, secret, "[credential]")
+		rest = strings.ReplaceAll(rest, secret, "[credential]")
 	}
-	first, rest, _ := strings.Cut(text, "\n")
 	if !previewAddressLine(first) {
 		return "", "", "the first line the role wrote is not an https:// address without spaces"
 	}
@@ -319,7 +332,7 @@ func validatePreview(cfg config) error {
 	}
 	preview := cfg.Workflow.Preview
 	if hold := preview.HoldHours; hold != nil && (*hold < 1 || uint64(*hold) > uint64(time.Duration(1<<63-1)/time.Hour)) {
-		return fmt.Errorf("workflow.preview.hold_hours is %d: it is a whole number of hours from 1 to %d (the page's lifetime plus one), or left out for %d", *hold, uint64(time.Duration(1<<63-1)/time.Hour), defaultPreviewHoldHours)
+		return fmt.Errorf("workflow.preview.hold_hours is %d: it is a whole number of hours from 1 to %d; write the page's lifetime plus one, or leave it out for %d", *hold, uint64(time.Duration(1<<63-1)/time.Hour), defaultPreviewHoldHours)
 	}
 	for i, role := range cfg.Roles {
 		setting := "workflow.preview.up"
@@ -333,6 +346,9 @@ func validatePreview(cfg config) error {
 		for j, process := range role.Processes {
 			if process.ModelEnv != "" {
 				return fmt.Errorf("%s names %q, whose process %q (roles[%d].processes[%d]) sets model_env: the preview roles run the operator's commands and launch no model", setting, role.Name, process.Name, i, j)
+			}
+			if process.TimeoutMinutes <= 0 {
+				return fmt.Errorf("%s names %q, whose process %q (roles[%d].processes[%d]) has no timeout_minutes: a launch without a time limit that never returns would hold its request, and every later take-down, past the hold", setting, role.Name, process.Name, i, j)
 			}
 		}
 		if cfg.Intake != nil && role.Name == cfg.Intake.StopReportRole {
@@ -354,6 +370,9 @@ const previewDownName = "preview-down:"
 const previewDownAssignment = "Take down the page put up for the requester of this request. Exit 0 only when nothing of it is left.\n"
 
 // readPreviewRecord reads the request's record of its page.
+// errDamagedPreview is a record of the page that was read and is not one.
+var errDamagedPreview = errors.New("the record of the page is unreadable")
+
 func readPreviewRecord(job string) (previewRecord, error) {
 	var record previewRecord
 	raw, err := os.ReadFile(filepath.Join(job, previewFile))
@@ -361,7 +380,7 @@ func readPreviewRecord(job string) (previewRecord, error) {
 		return record, err
 	}
 	if err := json.Unmarshal(raw, &record); err != nil {
-		return previewRecord{}, errors.New("the record of the page is unreadable")
+		return previewRecord{}, errDamagedPreview
 	}
 	return record, nil
 }
@@ -385,31 +404,35 @@ type pageDowns struct {
 func (d pageDowns) settle(issue sourceIssue, directory, name string, say func(string)) bool {
 	configured := d.cfg.Workflow != nil && d.cfg.Workflow.Preview != nil
 	record, err := readPreviewRecord(directory)
-	if errors.Is(err, os.ErrNotExist) {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
 		return true
-	}
-	if err != nil {
+	case errors.Is(err, errDamagedPreview):
 		d.setAside(directory, name, err, say)
+		return true
+	case err != nil:
+		// The record could not be opened this time: nothing says the page
+		// is down, so the request is held and the record read again on the
+		// next tick. The same reason is said once while the runtime runs.
+		if d.trouble[name] != "read: "+err.Error() {
+			say("the record of the page could not be read, tried again on the next tick: " + err.Error())
+			d.trouble[name] = "read: " + err.Error()
+		}
+		return false
+	}
+	if strings.HasPrefix(d.trouble[name], "read: ") {
+		delete(d.trouble, name)
+	}
+	// A record that ended stays ended, also when the setting comes back.
+	if record.State == "down" || record.State == "unconfirmed" {
 		return true
 	}
 	if !configured {
 		// The operator removed the setting: there is no role to take the
-		// page down, and nothing waits for one. That is said once; the
-		// record keeps that it was, so a restart does not say it again.
-		if record.State == "down" || record.State == "unconfirmed" || record.Left != nil || d.trouble[name] != "" {
-			return true
-		}
-		say("workflow.preview is not set, so the page put up for the requester is not taken down; the operator's own cleanup removes it at the end of its lifetime")
-		d.trouble[name] = "unset"
-		now := time.Now().UTC()
-		record.Left = &now
-		if err := writePreviewRecord(directory, record); err != nil {
-			say("that was not recorded, so a restart says it again: " + err.Error())
-		}
-		return true
-	}
-	if record.State == "down" || record.State == "unconfirmed" {
-		return true
+		// page down, and nothing waits for one. The record ends here, so a
+		// restart or the setting coming back does not reach it again.
+		return d.giveUp(directory, name, record, "workflow.preview is not set; the operator's cleanup removes the page at the end of its lifetime",
+			"workflow.preview is not set, so the page put up for the requester is not taken down; the operator's own cleanup removes it at the end of its lifetime", say)
 	}
 	launch := previewDownName + name
 	if d.active[launch] {
@@ -419,13 +442,8 @@ func (d pageDowns) settle(issue sourceIssue, directory, name string, say func(st
 		// The operator's own cleanup has had the page's lifetime. Kept any
 		// longer, a stopped workspace would never be reclaimed while the
 		// take-down cannot answer, and once it is the role has nowhere to run.
-		record.State = "unconfirmed"
-		if err := writePreviewRecord(directory, record); err != nil {
-			say("the record of the page was not updated: " + err.Error())
-			return false
-		}
-		say("the page put up for the requester was not confirmed taken down within workflow.preview.hold_hours of being put up; the request's caches and workspace are no longer held for it")
-		return true
+		return d.giveUp(directory, name, record, "workflow.preview.hold_hours ran out",
+			"the page put up for the requester was not confirmed taken down within workflow.preview.hold_hours of being put up; the request's caches and workspace are no longer held for it", say)
 	}
 	for running := range d.active {
 		if strings.HasPrefix(running, previewDownName) {
@@ -440,6 +458,24 @@ func (d pageDowns) settle(issue sourceIssue, directory, name string, say func(st
 		return nil
 	})
 	return false
+}
+
+// giveUp ends the record of a page nothing will take down any more, with why
+// and when, and says so once: the ended record is what keeps a restart from
+// saying it again. A record that could not be written is said once while the
+// runtime runs, and nothing waits for it either.
+func (d pageDowns) giveUp(directory, name string, record previewRecord, why, message string, say func(string)) bool {
+	if d.trouble[name] == "gave up" {
+		return true
+	}
+	now := time.Now().UTC()
+	record.State, record.GaveUp, record.GaveUpAt = "unconfirmed", why, &now
+	say(message)
+	if err := writePreviewRecord(directory, record); err != nil {
+		d.trouble[name] = "gave up"
+		say("that was not recorded, so a restart says it again: " + err.Error())
+	}
+	return true
 }
 
 // setAside moves a record of the page that cannot be read out of the way, as
