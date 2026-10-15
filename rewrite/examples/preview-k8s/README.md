@@ -56,8 +56,8 @@ as before, in words, with one line saying so.
 5. Waits until the Pod is ready and the Service has a ready endpoint. Steps 4
    and 5 together end at `PREVIEW_WAIT_SECONDS`. When the wait ends for any
    reason (the dependency step, a rules container, the hand-over, a failed
-   read, the time) with the Pod short of its last rules container (`net`),
-   `up` removes the Deployment first and says so.
+   read, the time) before the Pod's last rules container (`net`) has ended
+   with status 0, `up` removes the Deployment first and says so.
 6. Makes the signed URL for the preview's end, and opens the public address
    as the requester would: (a) `PREVIEW_READY_PATH` without the password,
    which the router must answer with 401; (b) the same with the check user's
@@ -130,8 +130,8 @@ least `PREVIEW_INSTALL_SECONDS` + 180, or `up` ends before it calls the
 cluster: `up` has to be still watching when a late dependency step fails, to
 remove its Deployment. With the defaults (240 + 180 = 420) that holds; a step
 of 120 seconds leaves 300 of the 420; a step of 480 needs a wait of 660 or
-more. When the wait ends with the Pod short of its last rules container
-(`net`), `up` removes the Deployment before it ends 1.
+more. When the wait ends before the Pod's last rules container (`net`) has
+ended with status 0, `up` removes the Deployment before it ends 1.
 
 Keep `timeout_minutes` × 60 at least `PREVIEW_WAIT_SECONDS` + 180: the rest
 covers listing and packing the checkout, applying and the public check. If
@@ -235,9 +235,9 @@ address stops opening at the preview's end.
 | 1 | Anything else. The last line of the output is the reason, with the cluster's own message where it gave one (a policy refusal names the policy). `TASK_PREVIEW` is not written. |
 | 2 | A wrong command line. The engine never starts it so with this configuration. |
 
-After a failure nothing is removed, except a Deployment whose Pod had not
-reached its last rules container (`net`) when the wait ended, for whatever
-reason: until then the dependency step could still run with public addresses
+After a failure nothing is removed, except a Deployment whose Pod's last
+rules container (`net`) had not ended with status 0 when the wait ended, for
+whatever reason: until then the dependency step could still run with public addresses
 open. `down` and the cleanup remove the rest.
 
 ## What it never reads
