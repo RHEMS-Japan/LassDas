@@ -2423,7 +2423,9 @@ that sense. This is an experiment switch for comparing one strong model against
 per-launch selection among the configured publishers. It is not a
 recommendation, and neither arrangement is established here as the better one.
 With a gateway configured, the named id is invoked through it as before, as
-the prefix + the named id; the gateway's list is not read for it.
+the prefix + the named id; the gateway's list is not read for it. A gateway
+that lists models by their name alone (`p/<model>`) serves no such id, so a
+fixed model cannot be used through it.
 
 ### Invoking through a gateway
 
