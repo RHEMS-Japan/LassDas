@@ -62,10 +62,11 @@ type Preview struct {
 	Up string `json:"up"`
 	// Down is launched once the request is delivered or stopped.
 	Down string `json:"down"`
-	// HoldHours is how long, from when a page was put up, the request's
-	// caches and stopped workspace are kept for the down role to take the
-	// page down. After that they are cleared whether or not it did.
-	HoldHours int `json:"hold_hours"`
+	// HoldHours is how long, in hours from when a page was put up, the
+	// request's caches and stopped workspace are kept for the down role to
+	// take the page down; after that they are cleared whether or not it did.
+	// Left out, the engine uses its default.
+	HoldHours *int `json:"hold_hours,omitempty"`
 }
 
 func (w *Workflow) Validate(roles map[string]string) error {
@@ -155,6 +156,10 @@ func (w *Workflow) clone() *Workflow {
 		ConfirmationReworkLimit: w.ConfirmationReworkLimit, EnvironmentPauseLimit: w.EnvironmentPauseLimit}
 	if w.Preview != nil {
 		preview := *w.Preview
+		if w.Preview.HoldHours != nil {
+			hours := *w.Preview.HoldHours
+			preview.HoldHours = &hours
+		}
 		copy.Preview = &preview
 	}
 	if w.LaunchLimit != nil {

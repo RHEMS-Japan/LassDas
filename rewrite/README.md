@@ -1338,8 +1338,8 @@ Each is an ordinary configured role whose processes run the operator's
 commands; what they put up, where, and with which credentials is theirs, and
 the engine knows none of it. Both must be configured roles, different from
 each other, neither a stage nor the question role, and neither may launch a
-model. The up role has exactly one process. `hold_hours` is a positive number
-of hours (below). The setting needs an ordered run with a stage marked
+model. The up role has exactly one process. `hold_hours` may be left out
+(below). The setting needs an ordered run with a stage marked
 `"confirm": true`; anything else is refused before work is accepted. Without the setting nothing changes. A request keeps the copy of the
 workflow it was accepted with, so adding the setting does not reach requests
 accepted before it.
@@ -1416,8 +1416,11 @@ reclaim of a stopped workspace do wait, because the down role runs in that
 workspace: they go on once `preview.json` says `"down"`. While the down role
 runs it holds `queue/jobs/<id>/preview-down/runner.lock`, which the reclaim
 also stops at. They wait at most `workflow.preview.hold_hours` after the page
-was put up; set it to the page's own lifetime plus an hour, so that the
-operator's own cleanup has removed the page by then. After that `preview.json`
+was put up: write the page's own lifetime plus one, so that the operator's own
+cleanup has removed the page by then; left out, it is 73 (a lifetime of 72
+hours plus one). A shorter value only lets the trim and the reclaim go on
+sooner, leaving the page to that cleanup; a longer one keeps the workspace a
+little longer. After that `preview.json`
 says `"unconfirmed"`, the log says once that the page was not confirmed taken
 down, the caches and workspace are no longer held for it, and the down role is
 not launched again for that request. A request accepted before the setting,

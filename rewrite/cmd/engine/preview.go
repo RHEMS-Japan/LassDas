@@ -271,6 +271,20 @@ func scrubCredentials(cfg config, text string) string {
 	return text
 }
 
+// defaultPreviewHoldHours is the hold when workflow.preview.hold_hours is
+// left out: a page lifetime of 72 hours plus one.
+const defaultPreviewHoldHours = 73
+
+// previewHold is how long after a page was put up its request's caches and
+// stopped workspace are kept for the down role.
+func previewHold(preview *chain.Preview) time.Duration {
+	hours := defaultPreviewHoldHours
+	if preview.HoldHours != nil {
+		hours = *preview.HoldHours
+	}
+	return time.Duration(hours) * time.Hour
+}
+
 // validatePreview checks what the workflow cannot see of the preview roles:
 // they run the operator's commands and launch no model, the role that puts
 // the page up has one process, whose file is the one read back, and the hold
@@ -280,20 +294,25 @@ func validatePreview(cfg config) error {
 		return nil
 	}
 	preview := cfg.Workflow.Preview
-	if preview.HoldHours <= 0 || uint64(preview.HoldHours) > uint64(time.Duration(1<<63-1)/time.Hour) {
-		return errors.New("workflow.preview.hold_hours needs a positive number of hours: how long after a page was put up the request's caches and stopped workspace are kept for the down role to take it down (the page's lifetime plus an hour)")
+	if hold := preview.HoldHours; hold != nil && (*hold < 1 || uint64(*hold) > uint64(time.Duration(1<<63-1)/time.Hour)) {
+		return fmt.Errorf("workflow.preview.hold_hours is %d: it is a whole number of hours, 1 or more (the page's lifetime plus one), or left out for %d", *hold, defaultPreviewHoldHours)
 	}
-	for _, role := range cfg.Roles {
-		if role.Name != preview.Up && role.Name != preview.Down {
+	for i, role := range cfg.Roles {
+		setting := "workflow.preview.up"
+		switch role.Name {
+		case preview.Up:
+		case preview.Down:
+			setting = "workflow.preview.down"
+		default:
 			continue
 		}
-		for _, process := range role.Processes {
+		for j, process := range role.Processes {
 			if process.ModelEnv != "" {
-				return fmt.Errorf("the preview role %q launches a model; the preview roles run the operator's commands", role.Name)
+				return fmt.Errorf("%s names %q, whose process %q (roles[%d].processes[%d]) sets model_env: the preview roles run the operator's commands and launch no model", setting, role.Name, process.Name, i, j)
 			}
 		}
 		if role.Name == preview.Up && len(role.Processes) != 1 {
-			return fmt.Errorf("workflow.preview.up names %q, which needs exactly one process: that process's own file is where the address is read back", role.Name)
+			return fmt.Errorf("workflow.preview.up names %q (roles[%d]), which has %d processes and needs exactly one process: that process's own file is where the address is read back", role.Name, i, len(role.Processes))
 		}
 	}
 	return nil
@@ -358,7 +377,7 @@ func (d pageDowns) settle(issue sourceIssue, directory, name string, say func(st
 	if d.active[launch] {
 		return false
 	}
-	if !turnClock().Before(record.StartedAt.Add(time.Duration(d.cfg.Workflow.Preview.HoldHours) * time.Hour)) {
+	if !turnClock().Before(record.StartedAt.Add(previewHold(d.cfg.Workflow.Preview))) {
 		// The operator's own cleanup has had the page's lifetime. Kept any
 		// longer, a stopped workspace would never be reclaimed while the
 		// take-down cannot answer, and once it is the role has nowhere to run.

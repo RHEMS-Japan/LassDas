@@ -27,7 +27,7 @@ if [ -f "$DOWN_FAIL" ]; then echo "failed $TASK_ISSUE" >> "$DOWN_LOG"; echo "the
 echo "end $TASK_ISSUE" >> "$DOWN_LOG"`
 
 // previewHoldHours is how long the engine waits for the page to be taken
-// down in these tests' configuration.
+// down when the configuration does not say: a lifetime of 72 hours plus one.
 const previewHoldHours = 73
 
 type downFiles struct{ log, release, fail string }
@@ -80,8 +80,8 @@ func previewDownConfig(t *testing.T) (config, downFiles) {
 	down := &cfg.Roles[5].Processes[0]
 	down.Env = map[string]string{"DOWN_LOG": files.log, "DOWN_RELEASE": files.release, "DOWN_FAIL": files.fail}
 	down.Command = []string{"/bin/sh", "-c", downScript}
-	if cfg.Workflow.Preview.HoldHours != previewHoldHours {
-		t.Fatalf("the configuration holds the page for %d hours", cfg.Workflow.Preview.HoldHours)
+	if cfg.Workflow.Preview.HoldHours != nil || previewHold(cfg.Workflow.Preview) != previewHoldHours*time.Hour {
+		t.Fatalf("the configuration does not hold the page for the default %d hours", previewHoldHours)
 	}
 	return cfg, files
 }
@@ -368,19 +368,33 @@ func TestAPageCutShortByAStopIsTakenDown(t *testing.T) {
 	}
 }
 
-// A page that has not been confirmed taken down by the time the operator's
-// hold runs out, counted from when it was put up, holds the request no longer:
-// that is said once, the caches are removed, and the take-down is not tried
-// again, since a reclaimed workspace leaves the role nowhere to run.
+// A page that has not been confirmed taken down by the time the hold runs
+// out, counted from when it was put up, holds the request no longer: that is
+// said once, the caches are removed, and the take-down is not tried again,
+// since a reclaimed workspace leaves the role nowhere to run. The hold is the
+// operator's when written, 73 hours when not; a page three hours old is past
+// a written hold of two, and would be taken down under the default.
 func TestAPageNotConfirmedDownByTheHoldNoLongerHoldsTheRequest(t *testing.T) {
+	for _, hold := range []string{"left-out", "written"} {
+		t.Run(hold, func(t *testing.T) { testPageNotConfirmedDownByTheHold(t, hold) })
+	}
+}
+
+func testPageNotConfirmedDownByTheHold(t *testing.T, hold string) {
 	cfg, files := previewDownConfig(t)
 	fixture := &noticeTracker{}
 	fixture.install(t, alwaysChoose("done"))
 	if err := os.WriteFile(files.fail, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
+	age := (previewHoldHours + 1) * time.Hour
+	if hold == "written" {
+		hours := 2
+		cfg.Workflow.Preview.HoldHours = &hours
+		age = 3 * time.Hour
+	}
 	root := t.TempDir()
-	directory := pageUpJob(t, root, 51, time.Now().Add(-(previewHoldHours+1)*time.Hour))
+	directory := pageUpJob(t, root, 51, time.Now().Add(-age))
 	log := &lockedLog{}
 	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, log)
 	waitFor(t, func() bool { return trimmed(directory) })

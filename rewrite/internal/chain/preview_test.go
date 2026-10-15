@@ -231,6 +231,8 @@ func TestNoPreviewWhereNoConfirmationQuestionIsChosen(t *testing.T) {
 // not reach it.
 func TestTheAcceptedRunKeepsItsOwnCopyOfThePreviewRoles(t *testing.T) {
 	flow := previewFlow(t)
+	hold := 5
+	flow.Preview.HoldHours = &hold
 	store := &memoryStore{state: State{Request: "Show the item count on the list screen."}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -246,11 +248,12 @@ func TestTheAcceptedRunKeepsItsOwnCopyOfThePreviewRoles(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved := store.state.Workflow
-	if saved == nil || saved.Preview == nil || *saved.Preview != (Preview{Up: "preview_up", Down: "preview_down"}) {
+	if saved == nil || saved.Preview == nil || saved.Preview.Up != "preview_up" || saved.Preview.Down != "preview_down" ||
+		saved.Preview.HoldHours == nil || *saved.Preview.HoldHours != 5 {
 		t.Fatalf("the accepted run has no copy of the preview roles: %+v", saved)
 	}
-	flow.Preview.Up = "changed_later"
-	if saved.Preview.Up != "preview_up" {
+	flow.Preview.Up, hold = "changed_later", 9
+	if saved.Preview.Up != "preview_up" || *saved.Preview.HoldHours != 5 {
 		t.Fatal("the accepted run shares the operator's setting instead of keeping a copy")
 	}
 	if clone := confirmFlow(t).clone(); clone.Preview != nil {
