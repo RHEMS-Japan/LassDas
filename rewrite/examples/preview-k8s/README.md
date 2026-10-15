@@ -53,7 +53,9 @@ as before, in words, with one line saying so.
    so the kubelet does not run the step again with public addresses open.
    A ReplicaSet the cluster refused to create a Pod for (a policy, the quota)
    ends it at once too, with the cluster's reason.
-5. Waits until the Pod is ready and the Service has a ready endpoint.
+5. Waits until the Pod is ready and the Service has a ready endpoint. Steps 4
+   and 5 together end at `PREVIEW_WAIT_SECONDS`; a wait that ends with the Pod
+   short of its last rules container (`net`) removes the Deployment first.
 6. Makes the signed URL for the preview's end, and opens the public address
    as the requester would: (a) `PREVIEW_READY_PATH` without the password,
    which the router must answer with 401; (b) the same with the check user's
@@ -118,14 +120,22 @@ whose mode makes the script executable. The two credentials go into the
 engine's Secret and the StatefulSet's environment like the other keys
 ([SETUP.md](../../../deploy/ticket-engine/SETUP.md), section 5).
 
-**Time.** The role's `timeout_minutes` covers everything `up` does: listing
-and packing the checkout, applying, pulling the images, the hand-over, the
-dependency step, waiting for ready and up to 60 seconds of the public check.
-Keep `PREVIEW_WAIT_SECONDS` at least two minutes below it, so `up` ends with
-its own reason before the engine stops it. With `PREVIEW_INSTALL`, the
-dependency step runs inside that wait: raise `timeout_minutes` to 15 and
-`PREVIEW_WAIT_SECONDS` to 780, or keep `PREVIEW_INSTALL_SECONDS` at 180 or
-less.
+**Time.** The wait `PREVIEW_WAIT_SECONDS` (420 seconds by default) is what
+bounds steps 4 and 5: the hand-over, the dependency step and the start of the
+application all happen inside it. With `PREVIEW_INSTALL`, it has to be at
+least `PREVIEW_INSTALL_SECONDS` + 180, or `up` ends before it calls the
+cluster: `up` has to be still watching when a late dependency step fails, to
+remove its Deployment. With the defaults (240 + 180 = 420) that holds; a step
+of 120 seconds leaves 300 of the 420; a step of 480 needs a wait of 660 or
+more. When the wait ends with the Pod short of its last rules container
+(`net`), `up` removes the Deployment before it ends 1.
+
+Keep `timeout_minutes` × 60 at least `PREVIEW_WAIT_SECONDS` + 180: the rest
+covers listing and packing the checkout, applying and the public check. If
+the engine's limit comes first, it stops `up` in the middle of the dependency
+step, the Deployment is not removed, and only the cleanup stops the step
+(within its 10 minutes). The defaults fit 10 minutes exactly (420 + 180 =
+600); a wait of 660 needs 15.
 
 ## Settings
 
@@ -141,9 +151,9 @@ Set in the role's `env`. The engine reads none of them.
 | `PREVIEW_IMAGE` | `python:3.12-slim` | yes (up) | The image the application runs in. It needs `sh`, `tar` and `sleep`, and `timeout` (coreutils, or BusyBox 1.30 or later) when `PREVIEW_INSTALL` is set. Name it by digest to keep it fixed. |
 | `PREVIEW_MEMORY` | `512Mi` | no (`512Mi`) | The memory limit of the application and of the dependency step. |
 | `PREVIEW_INSTALL` | `npm ci` | no | A dependency step, run with `sh -c` in the checkout before the application. Only during this step can the Pod reach public addresses. |
-| `PREVIEW_INSTALL_SECONDS` | `300` | no (`300`) | The step's time limit: digits only, 1 to 480. Anything else ends `up` before the cluster is called. |
+| `PREVIEW_INSTALL_SECONDS` | `240` | no (`240`) | The step's time limit: digits only, 1 to 480, and at most `PREVIEW_WAIT_SECONDS` − 180 (see Time above). Anything else ends `up` before the cluster is called. |
 | `PREVIEW_ENV_FILE` | `.env.preview` | no | A file in the checkout, relative to it, of `KEY=VALUE` lines for the application's environment. No secrets: the file is in the branch. At most 64 KiB; a line that is not `KEY=VALUE` (blank lines and `#` lines aside) ends `up`. `PORT` is always the script's. |
-| `PREVIEW_WAIT_SECONDS` | `420` | no (420 for up, 60 for down) | How long to wait for the Pod to be ready (up) or for the objects to be gone (down). |
+| `PREVIEW_WAIT_SECONDS` | `420` | no (420 for up, 60 for down) | How long to wait for the Pod to be ready (up) or for the objects to be gone (down). With `PREVIEW_INSTALL`, at least `PREVIEW_INSTALL_SECONDS` + 180. |
 | `PREVIEW_DOMAIN` | `preview.example.invalid` | yes (up) | The domain under which every preview gets one label: `sample-12.preview.example.invalid`. The same for every installation using the router. |
 | `PREVIEW_NAMESPACE` | `preview-apps` | yes | The preview namespace. |
 | `PREVIEW_K8S_SERVER` | `https://<api-server>` | yes | The cluster's API server address. |
@@ -223,7 +233,9 @@ address stops opening at the preview's end.
 | 2 | A wrong command line. The engine never starts it so with this configuration. |
 
 After a failure nothing is removed, except a Deployment whose dependency step
-failed or was started again. `down` and the cleanup remove the rest.
+failed or was started again, or whose Pod had not reached its last rules
+container (`net`) when `PREVIEW_WAIT_SECONDS` ended. `down` and the cleanup
+remove the rest.
 
 ## What it never reads
 
