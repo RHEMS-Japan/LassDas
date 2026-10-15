@@ -2279,9 +2279,8 @@ reviewers run that one model, and their reports are no longer independent in
 that sense. This is an experiment switch for comparing one strong model against
 per-launch selection among the configured publishers. It is not a
 recommendation, and neither arrangement is established here as the better one.
-With a gateway configured, the named id is invoked through it as the prefix +
-the named id. The gateway's list is not read for it, so a gateway that lists
-models only without their publisher cannot serve a fixed model.
+With a gateway configured, the named id is invoked through it as before, as
+the prefix + the named id; the gateway's list is not read for it.
 
 ### Invoking through a gateway
 

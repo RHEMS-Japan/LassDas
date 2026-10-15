@@ -1014,3 +1014,17 @@ func TestNothingAPersonReadsChangesWhereTheGatewayListsThePublisher(t *testing.T
 		}
 	})
 }
+
+// The judge reads earlier failures by the catalog id, which is what it
+// chooses among, and not by the id a gateway was called with.
+func TestTheJudgeReadsEarlierFailuresByTheCatalogID(t *testing.T) {
+	input := selectionInput(chain.State{Request: "original request", History: []chain.Result{
+		{Role: "implement", Speaker: "worker", Model: "z-ai/glm-5.3", ModelPrefix: "p/", Invoked: "p/glm-5.3", Error: "model service returned HTTP 503"},
+	}})
+	if len(input.History) != 1 {
+		t.Fatalf("failures read: %+v", input.History)
+	}
+	if failure := input.History[0]; failure.Model != "z-ai/glm-5.3" || failure.Invoked != "" || failure.ModelPrefix != "" || failure.Error != "model service returned HTTP 503" {
+		t.Fatalf("the judge read %+v", failure)
+	}
+}
