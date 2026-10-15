@@ -1457,7 +1457,11 @@ either: it is set aside as `preview.json.unreadable` for a person to read,
 which is said once, and the request is trimmed and reclaimed as one that put
 no page up. One that cannot be opened for now, for want of permission for
 example, is not set aside: the request is held, the reason is said once, and
-the file is read again on the next tick.
+the file is read again on the next tick, but no longer than `hold_hours` from
+when it was last written, and not at all without the setting. Past that the
+page is not confirmed taken down, which is said once and kept in
+`preview.json.gave-up` beside it, so neither a restart nor the record opening
+again reaches that page.
 
 ### A pull request description from the run's reports
 

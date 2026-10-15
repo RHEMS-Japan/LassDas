@@ -402,6 +402,11 @@ type pageDowns struct {
 // whether the request's caches and stopped workspace may now be cleared: the
 // request never put a page up, its page is down, or the hold ran out.
 func (d pageDowns) settle(issue sourceIssue, directory, name string, say func(string)) bool {
+	// A page given up on while its record could not be opened stays given
+	// up on, also once the record can be opened again.
+	if _, err := os.Lstat(filepath.Join(directory, previewGaveUpFile)); err == nil {
+		return true
+	}
 	configured := d.cfg.Workflow != nil && d.cfg.Workflow.Preview != nil
 	record, err := readPreviewRecord(directory)
 	switch {
@@ -410,10 +415,21 @@ func (d pageDowns) settle(issue sourceIssue, directory, name string, say func(st
 	case errors.Is(err, errDamagedPreview):
 		d.setAside(directory, name, err, say)
 		return true
+	case err != nil && !configured:
+		// Nothing would take the page down whatever the record says.
+		return d.giveUpUnopened(directory, name, "workflow.preview is not set; the operator's cleanup removes the page at the end of its lifetime",
+			"workflow.preview is not set and the record of the page could not be read, so the page put up for the requester is not confirmed taken down; the operator's own cleanup removes it at the end of its lifetime", say)
 	case err != nil:
 		// The record could not be opened this time: nothing says the page
 		// is down, so the request is held and the record read again on the
-		// next tick. The same reason is said once while the runtime runs.
+		// next tick, but no longer than the hold, counted from when the
+		// record was last written (or, when even that cannot be learned,
+		// from the first time it could not be opened).
+		since := d.unopenedSince(directory, name)
+		if !turnClock().Before(since.Add(previewHold(d.cfg.Workflow.Preview))) {
+			return d.giveUpUnopened(directory, name, "workflow.preview.hold_hours ran out while the record of the page could not be read",
+				"the page put up for the requester was not confirmed taken down within workflow.preview.hold_hours, its record could not be read; the request's caches and workspace are no longer held for it", say)
+		}
 		if d.trouble[name] != "read: "+err.Error() {
 			say("the record of the page could not be read, tried again on the next tick: " + err.Error())
 			d.trouble[name] = "read: " + err.Error()
@@ -472,6 +488,50 @@ func (d pageDowns) giveUp(directory, name string, record previewRecord, why, mes
 	record.State, record.GaveUp, record.GaveUpAt = "unconfirmed", why, &now
 	say(message)
 	if err := writePreviewRecord(directory, record); err != nil {
+		d.trouble[name] = "gave up"
+		say("that was not recorded, so a restart says it again: " + err.Error())
+	}
+	return true
+}
+
+// previewGaveUpFile says, beside a record of the page that could not be
+// opened, that the page was given up on: the record itself cannot be
+// rewritten to say so.
+const previewGaveUpFile = previewFile + ".gave-up"
+
+// unopenedSince is when the hold for a record that cannot be opened begins:
+// when the record was last written, which the directory still tells, or else
+// the first time this runtime could not open it.
+func (d pageDowns) unopenedSince(directory, name string) time.Time {
+	if info, err := os.Lstat(filepath.Join(directory, previewFile)); err == nil {
+		return info.ModTime()
+	}
+	if first, err := time.Parse(time.RFC3339Nano, d.trouble["unopened since "+name]); err == nil {
+		return first
+	}
+	now := turnClock()
+	d.trouble["unopened since "+name] = now.Format(time.RFC3339Nano)
+	return now
+}
+
+// giveUpUnopened ends a page whose record could not be opened, in a file of
+// its own beside the record, and says so once, so a restart says nothing
+// again. A file that could not be written is said once while the runtime
+// runs, and nothing waits for it either.
+func (d pageDowns) giveUpUnopened(directory, name, why, message string, say func(string)) bool {
+	if d.trouble[name] == "gave up" {
+		return true
+	}
+	now := time.Now().UTC()
+	data, err := json.Marshal(struct {
+		GaveUp   string    `json:"gave_up"`
+		GaveUpAt time.Time `json:"gave_up_at"`
+	}{why, now})
+	say(message)
+	if err == nil {
+		err = writeRuntimeFile(filepath.Join(directory, previewGaveUpFile), data)
+	}
+	if err != nil {
 		d.trouble[name] = "gave up"
 		say("that was not recorded, so a restart says it again: " + err.Error())
 	}

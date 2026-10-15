@@ -712,6 +712,71 @@ func TestARecordOfThePageThatCannotBeOpenedHoldsTheRequest(t *testing.T) {
 	}
 }
 
+// A record of the page that stays unopenable holds the request no longer than
+// the hold, counted from when the record was last written, and not at all
+// when the setting was removed. Past that, it is said once that the page was
+// not confirmed taken down, the request goes on, no take-down is launched,
+// and a restart says nothing again, also once the record can be opened.
+func TestARecordOfThePageThatStaysUnopenableHoldsNoLongerThanTheHold(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a file without permissions can still be opened by root")
+	}
+	for _, scene := range []string{"hold-ran-out", "setting-removed"} {
+		for _, ending := range []string{"delivered", "stopped"} {
+			t.Run(scene+"/"+ending, func(t *testing.T) {
+				cfg, files := previewDownConfig(t)
+				if ending == "stopped" {
+					cfg = withStopReport(cfg, files)
+				}
+				fixture := &noticeTracker{}
+				fixture.install(t, alwaysChoose("done"))
+				written := time.Now().Add(-time.Hour)
+				if scene == "hold-ran-out" {
+					written = time.Now().Add(-(previewHoldHours + 1) * time.Hour)
+				}
+				root, directory := pageJob(t, cfg, ending, written)
+				if scene == "setting-removed" {
+					cfg.Workflow.Preview = nil
+				}
+				record := filepath.Join(directory, previewFile)
+				if err := os.Chtimes(record, written, written); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(record, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(record, 0600) })
+				log := &lockedLog{}
+				finish := startStopQueue(t, cfg, root, 10*time.Millisecond, log)
+				waitFor(t, func() bool {
+					_, reclaimed := os.Stat(filepath.Join(directory, removalFile))
+					return trimmed(directory) && (ending == "delivered" || reclaimed == nil)
+				})
+				waitTicks()
+				finish()
+				// The runtime restarts after the record can be opened again.
+				if err := os.Chmod(record, 0600); err != nil {
+					t.Fatal(err)
+				}
+				finish = startStopQueue(t, cfg, root, 10*time.Millisecond, log)
+				waitTicks()
+				finish()
+				for _, line := range files.lines(t) {
+					if strings.HasPrefix(line, "start_") {
+						t.Fatalf("a take-down was launched for a page given up on: %v", files.lines(t))
+					}
+				}
+				log.mu.Lock()
+				said := strings.Count(log.text.String(), "not confirmed taken down")
+				log.mu.Unlock()
+				if said != 1 {
+					t.Fatalf("that the page was not confirmed taken down was said %d times", said)
+				}
+			})
+		}
+	}
+}
+
 // The reclaim of a stopped workspace also stops at a running take-down, but a
 // request that never put a page up has no such lock and is reclaimed as
 // before, and the three locks it already waited on are read as before.
