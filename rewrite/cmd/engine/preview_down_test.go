@@ -23,7 +23,7 @@ import (
 const downScript = `cat > /dev/null
 echo "start $TASK_ISSUE" >> "$DOWN_LOG"
 while [ ! -f "$DOWN_RELEASE" ]; do sleep 0.05; done
-if [ -f "$DOWN_FAIL" ]; then echo "failed $TASK_ISSUE" >> "$DOWN_LOG"; echo 'the cluster did not answer' >&2; exit 1; fi
+if [ -f "$DOWN_FAIL" ]; then echo "failed $TASK_ISSUE" >> "$DOWN_LOG"; echo "the cluster did not answer $PREVIEW_K8S_TOKEN" >&2; exit 1; fi
 echo "end $TASK_ISSUE" >> "$DOWN_LOG"`
 
 // previewHoldHours is how long the engine waits for the page to be taken
@@ -186,7 +186,7 @@ func TestAPageThatCannotBeTakenDownIsTriedAgainAndSaidOnce(t *testing.T) {
 		t.Fatalf("a refused take-down was tried again at once: %d launches", got)
 	}
 	record := pageState(t, directory)
-	if record.State != "up" || record.Refused != 1 || !strings.Contains(record.DownReason, "the cluster did not answer") || record.Next.IsZero() {
+	if record.State != "up" || record.Refused != 1 || !strings.Contains(record.DownReason, "the cluster did not answer [credential]") || record.Next.IsZero() {
 		t.Fatalf("the refusal was not recorded with when to try again: %+v", record)
 	}
 	// The minute after the first refusal has passed.
@@ -196,9 +196,12 @@ func TestAPageThatCannotBeTakenDownIsTriedAgainAndSaidOnce(t *testing.T) {
 	if trimmed(directory) {
 		t.Fatal("the caches were removed while the page was still up")
 	}
-	said := strings.Count(func() string { log.mu.Lock(); defer log.mu.Unlock(); return log.text.String() }(), "the cluster did not answer")
-	if said != 1 {
+	text := func() string { log.mu.Lock(); defer log.mu.Unlock(); return log.text.String() }()
+	if said := strings.Count(text, "the cluster did not answer [credential]"); said != 1 {
 		t.Fatalf("the same reason was said %d times", said)
+	}
+	if strings.Contains(text, previewToken) || strings.Contains(string(readFile(t, filepath.Join(directory, previewFile))), previewToken) {
+		t.Fatal("the preview credential the down role was handed is in the log or the record")
 	}
 	if err := os.Remove(files.fail); err != nil {
 		t.Fatal(err)
