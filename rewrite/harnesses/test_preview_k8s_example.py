@@ -529,7 +529,12 @@ class PreviewExampleTests(unittest.TestCase):
         self.assertIs(pod["hostUsers"], False)
         self.assertEqual(pod["securityContext"]["seccompProfile"], {"type": "RuntimeDefault"})
         self.assertIs(pod["securityContext"]["runAsNonRoot"], True)
-        self.assertEqual(pod["preemptionPolicy"], "Never")
+        # The cluster's Priority admission refuses a Pod whose preemptionPolicy
+        # differs from its class's (PreemptLowerPriority without a class), so
+        # Never would keep every Pod from being created. Priority 0 and no
+        # class are what keep a preview from displacing other Pods.
+        self.assertNotIn("preemptionPolicy", pod)
+        self.assertNotIn("priority", pod)
         self.assertNotIn("priorityClassName", pod)
         self.assertEqual(pod["terminationGracePeriodSeconds"], 5)
         for absent in ("nodeName", "hostNetwork", "hostPID", "hostIPC", "tolerations", "affinity",

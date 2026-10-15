@@ -367,8 +367,11 @@ def manifests(settings, names, entries, expires):
                    "readinessProbe": {"httpGet": {"path": settings.ready_path, "port": settings.port},
                                       "periodSeconds": 5, "timeoutSeconds": 3, "failureThreshold": 3},
                    "securityContext": unprivileged(False), "resources": working, "volumeMounts": [source]}
+    # No preemptionPolicy and no priority: the cluster's Priority admission
+    # refuses a Pod that names a preemptionPolicy other than its class's, and
+    # without a class a Pod has priority 0, below nothing that runs.
     pod = {"automountServiceAccountToken": False, "enableServiceLinks": False, "hostUsers": False,
-           "preemptionPolicy": "Never", "terminationGracePeriodSeconds": 5,
+           "terminationGracePeriodSeconds": 5,
            "nodeSelector": {"kubernetes.io/arch": "amd64"},
            "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000,
                                "seccompProfile": {"type": "RuntimeDefault"}},

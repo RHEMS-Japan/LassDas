@@ -218,8 +218,12 @@ The Deployment `up` sends, and nothing else of it varies but the settings:
   runs as `timeout -s KILL <seconds> sh -c "$PREVIEW_INSTALL"`: KILL, because
   a step that ignores TERM would keep running past the limit.
 - No ServiceAccount token, no Service links, its own user namespace
-  (`hostUsers: false`), seccomp `RuntimeDefault`, `preemptionPolicy: Never`,
-  no priority class, a termination grace of 5 seconds, amd64 nodes.
+  (`hostUsers: false`), seccomp `RuntimeDefault`, no priority class and no
+  priority (0, so it displaces no Pod of priority 0 or more), a termination
+  grace of 5 seconds, amd64 nodes. It names no `preemptionPolicy`: the
+  cluster's Priority admission refuses a Pod whose `preemptionPolicy`
+  differs from its class's, and without a class that is
+  `PreemptLowerPriority`.
 - `net-*` run as root with `NET_ADMIN` only and a read-only root. Every
   other container runs as a user other than root, without privilege
   escalation and with every capability dropped. Memory, CPU and local
