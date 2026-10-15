@@ -236,6 +236,12 @@ def cases():
              setting([{"name": "XTABLES_LIBDIR", "value": "/policy"}], "@net", "env"), D, "rules ConfigMap at /policy"),
         Case("PATH set in net", "deployment", False, setting([{"name": "PATH", "value": "/policy"}], "@net", "env"), D,
              "rules ConfigMap at /policy"),
+        Case("net mounting the rules without readOnly", "deployment", False,
+             change(lambda spec: [mount.pop("readOnly") for mount in container(spec, "net")["volumeMounts"]
+                                  if mount["name"] == "policy"]), D, "rules ConfigMap at /policy"),
+        Case("envFrom in net (a ConfigMap)", "deployment", False,
+             setting([{"configMapRef": {"name": "preview-egress"}}], "@net", "envFrom"), D,
+             "rules ConfigMap at /policy"),
         Case("the rules ConfigMap with install.rules as run.rules", "deployment", True, change(rules_items), D,
              "as a whole"),
         Case("the application mounting the rules volume", "deployment", False,
