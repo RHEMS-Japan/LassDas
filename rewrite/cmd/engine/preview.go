@@ -61,6 +61,9 @@ type previewRecord struct {
 	Refused    int       `json:"refused,omitempty"`
 	DownReason string    `json:"down_reason,omitempty"`
 	Next       time.Time `json:"next,omitzero"`
+	// Left is when the engine, with workflow.preview removed, left the page
+	// to the operator's own cleanup and said so; it is not said again.
+	Left *time.Time `json:"left,omitempty"`
 }
 
 // previewDownLock is held while the down role runs for a request.
@@ -385,23 +388,23 @@ func (d pageDowns) settle(issue sourceIssue, directory, name string, say func(st
 	if errors.Is(err, os.ErrNotExist) {
 		return true
 	}
-	if !configured {
-		// The operator removed the setting: there is no role to take the
-		// page down, and nothing waits for one.
-		if err == nil && (record.State == "down" || record.State == "unconfirmed") {
-			return true
-		}
-		const unset = "workflow.preview is not set, so the page put up for the requester is not taken down; the operator's own cleanup removes it at the end of its lifetime"
-		if d.trouble[name] != unset {
-			say(unset)
-			d.trouble[name] = unset
-		}
+	if err != nil {
+		d.setAside(directory, name, err, say)
 		return true
 	}
-	if err != nil {
-		if d.trouble[name] != err.Error() {
-			say(err.Error() + "; the request's caches and workspace are not held for its page")
-			d.trouble[name] = err.Error()
+	if !configured {
+		// The operator removed the setting: there is no role to take the
+		// page down, and nothing waits for one. That is said once; the
+		// record keeps that it was, so a restart does not say it again.
+		if record.State == "down" || record.State == "unconfirmed" || record.Left != nil || d.trouble[name] != "" {
+			return true
+		}
+		say("workflow.preview is not set, so the page put up for the requester is not taken down; the operator's own cleanup removes it at the end of its lifetime")
+		d.trouble[name] = "unset"
+		now := time.Now().UTC()
+		record.Left = &now
+		if err := writePreviewRecord(directory, record); err != nil {
+			say("that was not recorded, so a restart says it again: " + err.Error())
 		}
 		return true
 	}
@@ -437,6 +440,24 @@ func (d pageDowns) settle(issue sourceIssue, directory, name string, say func(st
 		return nil
 	})
 	return false
+}
+
+// setAside moves a record of the page that cannot be read out of the way, as
+// an unreadable record of notice kinds is, and says so once. The record says
+// nothing of the page, so nothing waits for it; the request then reads as one
+// that put no page up, and a restart says nothing again. A record that could
+// not be moved is said once while the runtime runs.
+func (d pageDowns) setAside(directory, name string, cause error, say func(string)) {
+	if d.trouble[name] != "" {
+		return
+	}
+	aside := filepath.Join(directory, previewFile+".unreadable")
+	if err := os.Rename(filepath.Join(directory, previewFile), aside); err != nil {
+		d.trouble[name] = "unreadable"
+		say(cause.Error() + " and could not be set aside (" + err.Error() + "); the request's caches and workspace are not held for its page")
+		return
+	}
+	say(cause.Error() + "; it was set aside as " + aside + ", and the request's caches and workspace are not held for its page")
 }
 
 // takeDown launches the down role once and records what came of it: the time

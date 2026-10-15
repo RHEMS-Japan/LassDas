@@ -1434,7 +1434,10 @@ operator's current setting, not from the request's copy: a changed
 `hold_hours` reaches requests already accepted at once, and removing the
 setting leaves their pages to the operator's own cleanup: when such a request
 is delivered or stopped, nothing is launched or held for its page, and the log
-says so once.
+says so once; `preview.json` keeps when (`left`), so a restart does not say it
+again. A `preview.json` that cannot be read holds nothing either: it is set
+aside as `preview.json.unreadable` for a person to read, which is said once,
+and the request is trimmed and reclaimed as one that put no page up.
 
 ### A pull request description from the run's reports
 

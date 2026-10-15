@@ -499,7 +499,7 @@ func TestTheTakeDownFollowsTheCurrentSetting(t *testing.T) {
 // request is delivered or stopped there is no role to take its page down, so
 // nothing is launched and nothing waits for it: the trim and the reclaim go
 // on at once, and the log says once that the page is left to the operator's
-// own cleanup.
+// own cleanup, not again after the runtime restarts.
 func TestAPageWhoseSettingWasRemovedHoldsNothing(t *testing.T) {
 	for _, ending := range []string{"delivered", "stopped"} {
 		t.Run(ending, func(t *testing.T) {
@@ -519,6 +519,10 @@ func TestAPageWhoseSettingWasRemovedHoldsNothing(t *testing.T) {
 			})
 			waitTicks()
 			finish()
+			// The runtime restarts on the same queue.
+			finish = startStopQueue(t, cfg, root, 10*time.Millisecond, log)
+			waitTicks()
+			finish()
 			for _, line := range files.lines(t) {
 				if strings.HasPrefix(line, "start_") {
 					t.Fatalf("a take-down was launched without the setting: %v", files.lines(t))
@@ -528,10 +532,56 @@ func TestAPageWhoseSettingWasRemovedHoldsNothing(t *testing.T) {
 			said := strings.Count(log.text.String(), "workflow.preview is not set")
 			log.mu.Unlock()
 			if said != 1 {
-				t.Fatalf("that the page is left to the operator's cleanup was said %d times", said)
+				t.Fatalf("that the page is left to the operator's cleanup was said %d times across a restart", said)
 			}
 			if record := pageState(t, directory); record.State != "up" {
-				t.Fatalf("the request's record of its page was changed: %+v", record)
+				t.Fatalf("the request's record of its page no longer says it is up: %+v", record)
+			}
+		})
+	}
+}
+
+// A record of the page that cannot be read holds nothing either: the trim and
+// the reclaim go on, the record is set aside beside the request for a person
+// to read, and that is said once, not again after the runtime restarts.
+func TestAnUnreadableRecordOfThePageHoldsNothingAndIsSaidOnce(t *testing.T) {
+	for _, ending := range []string{"delivered", "stopped"} {
+		t.Run(ending, func(t *testing.T) {
+			cfg, files := previewDownConfig(t)
+			if ending == "stopped" {
+				cfg = withStopReport(cfg, files)
+			}
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			root, directory := pageJob(t, cfg, ending, time.Now().Add(-time.Hour))
+			damaged := []byte(`{"state": "up", "started_at": `)
+			if err := os.WriteFile(filepath.Join(directory, previewFile), damaged, 0600); err != nil {
+				t.Fatal(err)
+			}
+			log := &lockedLog{}
+			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, log)
+			waitFor(t, func() bool {
+				_, reclaimed := os.Stat(filepath.Join(directory, removalFile))
+				return trimmed(directory) && (ending == "delivered" || reclaimed == nil)
+			})
+			waitTicks()
+			finish()
+			finish = startStopQueue(t, cfg, root, 10*time.Millisecond, log)
+			waitTicks()
+			finish()
+			for _, line := range files.lines(t) {
+				if strings.HasPrefix(line, "start_") {
+					t.Fatalf("a take-down was launched for an unreadable record: %v", files.lines(t))
+				}
+			}
+			log.mu.Lock()
+			said := strings.Count(log.text.String(), "the record of the page is unreadable")
+			log.mu.Unlock()
+			if said != 1 {
+				t.Fatalf("the unreadable record was said %d times across a restart", said)
+			}
+			if aside, err := os.ReadFile(filepath.Join(directory, previewFile+".unreadable")); err != nil || string(aside) != string(damaged) {
+				t.Fatalf("the unreadable record was not kept aside as it was: %q %v", aside, err)
 			}
 		})
 	}
