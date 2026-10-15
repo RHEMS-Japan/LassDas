@@ -151,8 +151,12 @@ func reclaimStoppedWorkspace(cfg config, issue sourceIssue, directory string, no
 		return false, err
 	}
 	defer job.Close()
-	for _, name := range []string{"run/runner.lock", "stop-report/runner.lock", ".workspace.prepare.lock"} {
+	for _, name := range []string{"run/runner.lock", "stop-report/runner.lock", ".workspace.prepare.lock", previewDownLock} {
 		lock, err := removalOpen(job, name, mount, os.O_RDWR)
+		if name == previewDownLock && errors.Is(err, os.ErrNotExist) {
+			// A request that never put a page up has nothing taking it down.
+			continue
+		}
 		if err != nil {
 			return false, err
 		}

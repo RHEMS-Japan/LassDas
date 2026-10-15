@@ -300,6 +300,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 	if err := validateQuestionRole(cfg); err != nil {
 		return err
 	}
+	if err := validatePreview(cfg); err != nil {
+		return err
+	}
 	observe := func(message string) { fmt.Fprintln(log, message) }
 	// Watch creates each request's saved limits before launching its child.
 	// Observe once at that child's startup, without changing operator config.
@@ -451,6 +454,11 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 	if questionMonitor != nil {
 		engine.QuestionPosted = questionMonitor.posted
 		engine.RequesterReply = questionMonitor.reply
+	}
+	if cfg.Workflow != nil && cfg.Workflow.Preview != nil {
+		// The page goes up with the same launching as the stages; the
+		// request's record and notices are beside its run directory.
+		engine.PreviewUp = previewer{cfg: cfg, executor: executor, job: filepath.Dir(store.Dir), key: assigned, observe: observe}.up
 	}
 	if cfg.Intake != nil {
 		engine.WaitAfter = cfg.Intake.QuestionRole

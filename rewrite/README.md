@@ -358,7 +358,9 @@ ownership across separate queue roots or supervision after a hard process crash.
 In watch mode a process directory must be empty or relative to its job workspace,
 not a shared absolute checkout. The launcher receives `TASK_WORKSPACE`,
 `TASK_HOME` (different for each role process), `TASK_ISSUE` and `TASK_ACTIVITY`
-(below). These names cannot also be process `env`, credential or
+(below). The process of the role `workflow.preview.up` names also receives
+`TASK_PREVIEW` (see "A page to see the change before the question").
+These names cannot also be process `env`, credential or
 model-selection destinations. The Hermes bridge uses
 `TASK_HOME` instead of a global `HERMES_HOME`. Commands and referenced bridge
 paths must be available from the per-job directory. Repository preparation and
@@ -1319,6 +1321,147 @@ the requester once about a change that could not be read. The question role's in
 question for a change a fixed closing sentence in Japanese, and the report
 says whether the requester's confirmation was asked: `依頼者の確認: なし` with
 the reason, or the question and the reply.
+
+### A page to see the change before the question
+
+A change to a screen is hard to judge from words. An operator who can put the
+checkout up somewhere the requester can open names two roles of their own:
+
+```json
+"workflow": {
+  "stages": [ ... ],
+  "preview": { "up": "preview_up", "down": "preview_down", "hold_hours": 73 }
+},
+"roles": [
+  { "name": "preview_up", "purpose": "...",
+    "processes": [ { "name": "up", "command": [ ... ], "timeout_minutes": 10 } ] },
+  { "name": "preview_down", "purpose": "...",
+    "processes": [ { "name": "down", "command": [ ... ], "timeout_minutes": 3 } ] }
+]
+```
+
+Each is an ordinary configured role whose processes run the operator's
+commands; what they put up, where, and with which credentials is theirs, and
+the engine knows none of it. Both must be configured roles, different from
+each other, neither a stage, the question role nor `intake.stop_report_role`,
+and neither may launch a model. Every process of theirs needs
+`timeout_minutes`: a take-down that never returned would hold its request,
+and every later take-down, past the hold. The up role has exactly one process. `hold_hours` may be left out
+(below). The setting needs an ordered run with a stage marked
+`"confirm": true`; anything else is refused before work is accepted. Without the setting nothing changes. A request keeps the copy of the
+workflow it was accepted with, so adding the setting does not reach requests
+accepted before it. Of the setting, that copy keeps only the up role: naming
+another one later does not change which role puts an accepted request's page
+up.
+
+**When the page goes up.** Only when the decision after the stage that
+confirms the change chooses the question role, and right before the question
+is launched: not for a question after the first stage, and not when the
+decision chooses the next stage, so an internal change puts nothing up. The
+runtime first removes the file the previous launch wrote, writes
+`queue/jobs/<id>/preview.json` saying a page is going up (`"state":
+"starting"`), and then launches the up role once with the same launching the
+stages have. The page goes up before the question is recorded as pending: a
+restart while it goes up leaves no question that never ran, the decision is
+asked again, and a question chosen again puts the page up again.
+
+**What the up role writes.** Its process is given `TASK_PREVIEW`, a file named
+`task-preview.txt` in that process's own `TASK_HOME`. The first line is the
+page's address and the lines after it are words for the requester, such as how
+long the page stays open. The page came up when every process exited 0 and
+the first line is an `https://` address without spaces. The file is read as
+`TASK_ACTIVITY` is: an ordinary file with one name and at most 16 KiB, without
+following a link or waiting on a pipe, in UTF-8, a Windows line end read as a
+line break. The address line holds no control character and no invisible
+formatting character (such as a zero-width space); the words after it hold no
+control character other than the tab, and none that turns the direction of
+text (U+202A to U+202E, U+2066 to U+2069). A file that is not counts as a page
+that did not come up. Every credential value the engine can name is replaced
+with `[credential]` before anything is used, and the file is removed once it
+has been read, so nothing written there stays in the role's home.
+`preview.json` then says `"up"` with the address, or `"failed"` with the
+reason; a failed launch may still have made part of a page.
+
+**What the requester and the question are told.** When the page came up, the
+engine posts its own comment before the question:
+
+> 確認用の画面: https://sample-12.preview.example.invalid/
+> この画面は 10/17 18:00 まで開けます
+
+The comment is a notice of kind `preview`, recorded in `notices.json` like the
+others, and said once for each point in the request's record where the
+question was chosen: a restart that puts the page up again at the same point
+does not post it again, and a page put up again for a question about a
+corrected change is posted again. The run and the watcher of the same request
+settle and post notices one at a time, so neither submits a notice the other
+is submitting. The question's instruction then says the address was posted,
+asks it to point the requester to it, and tells it not to write that it opened
+the page. When the comment could not be confirmed, the question is told to
+give the address itself; one that was recorded and not confirmed is retried
+by the watcher like any notice. When the page
+did not come up (an exit status other than 0, the time limit, a first line
+that is not such an address, nothing written, or a file that is not an
+ordinary one), nothing is posted and the question is told to say in one line
+`確認用の画面は用意できなかった` and describe the change in words as before.
+Whether the question mentions the address is still the question role's words;
+the engine's own comment above it is what is certain.
+
+**What it changes in the run.** Nothing. The runtime keeps one record of its
+own of what came of the page, with `"role": "router"`, `"speaker": "runtime"`
+and the outcome in `output`; its `error` is always empty, so the choice of a
+model does not read it as a failure. No stage is satisfied, failed or run again
+by it, the request is never stopped by it, and the decisions that follow are
+offered what they would be without the setting. Nothing a role prints is read.
+
+**When the page comes down.** When a request whose `preview.json` says
+`starting`, `up` or `failed` is delivered or stopped, the queue launches the
+down role once for it, right after it sets the issue's status, bound to the
+request's own homes, workspace and `TASK_ISSUE` as its other roles are. The
+launch runs apart from the queue's ticks, under the name
+`preview-down:<id>`, so the other requests are taken up and run while it
+runs; it takes none of their execution slots, and one take-down runs at a
+time. When every process exited 0, `preview.json` says `"down"` with the
+time. Otherwise the reason goes to the log once while it stays the same and
+into `preview.json`, the request is left as it is, and the launch is tried
+again on a later tick, spaced as a refused status move is: a minute after the
+first refusal, doubling up to an hour.
+
+A stopped request's report goes out at once and does not wait for the page.
+That is the order when the queue finds the request stopped: the take-down is
+launched first and the report right after. A request stopped while its work
+runs reports its stop within that run, as before, and its page is taken down
+once that report has returned and the queue comes to it. The trim of the
+request's caches and, where the operator allows it, the
+reclaim of a stopped workspace do wait, because the down role runs in that
+workspace: they go on once `preview.json` says `"down"`. While the down role
+runs it holds `queue/jobs/<id>/preview-down/runner.lock`, which the reclaim
+also stops at. They wait at most `workflow.preview.hold_hours` after the page
+was put up: write the page's own lifetime plus one, so that the operator's own
+cleanup has removed the page by then; left out, it is 73 (a lifetime of 72
+hours plus one). A shorter value only lets the trim and the reclaim go on
+sooner, leaving the page to that cleanup; a longer one keeps the workspace a
+little longer. After that `preview.json` says `"unconfirmed"`, with why in
+`gave_up` and when in `gave_up_at`, the log says once that the page was not
+confirmed taken down, the caches and workspace are no longer held for it, and
+the down role is not launched again for that request. A request accepted before the setting,
+or whose page never went up, has no `preview.json` and is trimmed and
+reclaimed as before. The down role and `hold_hours` are read from the
+operator's current setting, not from the request's copy: a changed
+`hold_hours` reaches requests already accepted at once, and removing the
+setting leaves their pages to the operator's own cleanup: when such a request
+is delivered or stopped, nothing is launched or held for its page, its
+`preview.json` ends as `"unconfirmed"` the same way, and the log says so once.
+An ended record stays ended, so neither a restart nor the setting coming back
+reaches that page again. A `preview.json` that is not a record holds nothing
+either: it is set aside as `preview.json.unreadable` for a person to read,
+which is said once, and the request is trimmed and reclaimed as one that put
+no page up. One that cannot be opened for now, for want of permission for
+example, is not set aside: the request is held, the reason is said once, and
+the file is read again on the next tick, but no longer than `hold_hours` from
+when it was last written, and not at all without the setting. Past that the
+page is not confirmed taken down, which is said once and kept in
+`preview.json.gave-up` beside it, so neither a restart nor the record opening
+again reaches that page.
 
 ### A pull request description from the run's reports
 
