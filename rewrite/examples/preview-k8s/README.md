@@ -431,7 +431,11 @@ The Deployment `up` sends, and nothing else of it varies but the settings:
   `PreemptLowerPriority`.
 - `net-*` run as root with `NET_ADMIN` only and a read-only root. Every
   other container runs as a user other than root, without privilege
-  escalation and with every capability dropped. Memory, CPU and local
+  escalation and with every capability dropped.
+- `nodeSelector` is `kubernetes.io/arch: amd64`, and the policy accepts no
+  other value (nor `kubernetes.io/os` other than `linux`): a cluster whose
+  general nodes are arm64 changes it in `preview.py` and in the policy
+  together. Memory, CPU and local
   storage are limited in every container.
 - The volumes are emptyDirs (the checkout's holds 1 GiB) and the ConfigMap
   `preview-egress`. No Secret, no projected token, no host path.
@@ -502,6 +506,8 @@ another namespace no. It exits 0 when every check came out as expected.
 | a toleration without a key (tolerates every taint) | Deployment | preview-deployment-shape |
 | affinity | Deployment | preview-deployment-shape |
 | a nodeSelector of another label | Deployment | preview-deployment-shape |
+| nodeSelector kubernetes.io/arch=arm64 | Deployment | preview-deployment-shape |
+| nodeSelector kubernetes.io/os=windows | Deployment | preview-deployment-shape |
 | NET_ADMIN in a container other than the rules containers | Deployment | preview-deployment-shape |
 | net with another image | Deployment | preview-deployment-shape |
 | net with another command | Deployment | preview-deployment-shape |
@@ -509,6 +515,8 @@ another namespace no. It exits 0 when every check came out as expected.
 | net-install with net's command | Deployment | preview-deployment-shape |
 | net adding SYS_ADMIN besides NET_ADMIN | Deployment | preview-deployment-shape |
 | net without dropping ALL | Deployment | preview-deployment-shape |
+| the application without dropping ALL | Deployment | preview-deployment-shape |
+| receive dropping only NET_RAW | Deployment | preview-deployment-shape |
 | every rules container reading /policy from the checkout | Deployment | preview-deployment-shape |
 | net alone reading /policy from the checkout | Deployment | preview-deployment-shape |
 | the checkout mounted over /usr/sbin in net | Deployment | preview-deployment-shape |

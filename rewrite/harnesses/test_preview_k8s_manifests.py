@@ -455,6 +455,12 @@ print("yes" if "can-i" in sys.argv else "applied (server dry run)")
 
 
 
+def first_changed(token):
+    """The token with the first character of its signature changed."""
+    end, signature = token.split(".", 1)
+    return "%s.%s%s" % (end, "A" if signature[0] != "A" else "B", signature[1:])
+
+
 def njs_request(host, args=None, cookie=None):
     return ("request(%s, %s, %s)" % (json.dumps(host), json.dumps(args or {}),
                                     "undefined" if cookie is None else json.dumps(cookie)))
@@ -509,7 +515,10 @@ var results = [];
             ("no token", njs_request(self.HOST), 403),
             ("another request's token", njs_request(self.HOST, {"t": self.token(now + 3600, "sample-13.preview.example.invalid")}), 403),
             ("an ended token", njs_request(self.HOST, {"t": self.token(now - 1)}), 403),
-            ("a changed signature", njs_request(self.HOST, {"t": good[:-1] + ("A" if good[-1] != "A" else "B")}), 403),
+            ("a changed signature (its last character)",
+             njs_request(self.HOST, {"t": good[:-1] + ("A" if good[-1] != "A" else "B")}), 403),
+            ("a changed signature (its first character)",
+             njs_request(self.HOST, {"t": first_changed(good)}), 403),
             ("a changed end", njs_request(self.HOST, {"t": str(now + 7200) + good[good.index("."):]}), 403),
             ("an end with a leading zero", njs_request(self.HOST, {"t": "0" + good}), 403),
             ("padding", njs_request(self.HOST, {"t": good + "="}), 403),
@@ -548,6 +557,8 @@ var results = [];
             ("another host's cookie", njs_request(self.HOST, cookie="__Host-preview=" + self.token(
                 now + 3600, "sample-13.preview.example.invalid")), 403),
             ("an ended cookie", njs_request(self.HOST, cookie="__Host-preview=" + self.token(now - 1)), 403),
+            ("a cookie whose signature's first character changed",
+             njs_request(self.HOST, cookie="__Host-preview=" + first_changed(good)), 403),
             ("two cookies of the name", njs_request(self.HOST, cookie="__Host-preview=%s; __Host-preview=x" % good), 403),
             ("a cookie of another name", njs_request(self.HOST, cookie="preview=" + good), 403),
         ]
