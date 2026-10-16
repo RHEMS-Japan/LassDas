@@ -105,7 +105,8 @@ jobs:
           sudo apt-get purge -y -qq nginx nginx-common
           curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor \
             | sudo tee /usr/share/keyrings/nginx-archive-keyring.gpg > /dev/null
-          keys=$(gpg --dry-run --quiet --no-keyring --import --import-options import-show --with-colons \
+          gnupg=$(mktemp -d)
+          keys=$(GNUPGHOME="$gnupg" gpg --dry-run --quiet --no-keyring --import --import-options import-show --with-colons \
             /usr/share/keyrings/nginx-archive-keyring.gpg | awk -F: '$1 == "fpr" { print $10 }' | sort | paste -sd ' ' -)
           echo "keys: $keys"
           test "$keys" = "573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62 8540A6F18833A80E9C1653A42FD21310B49F6B46 9E9BE90EACBCDE69FE9B204CBCDCD8A38D88A2B3"
