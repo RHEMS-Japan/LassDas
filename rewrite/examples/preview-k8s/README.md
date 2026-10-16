@@ -242,7 +242,7 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
 | `<relay-path-prefix>` | router, relay | The paths relayed, as the start of the path, for example `/api/`. |
 | `<relay-allowed-path>` | router, relay | One allowed path, a regular expression of the whole path, for example `/api/items/[0-9]+`. One line for each. |
 | `<relay-allowed-query>` | router, relay | A query form of an allowed path, for example `owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?`. One line for each form; a path without one is relayed with no query only. |
-| `<relay-id-query-path>` | router, relay | An allowed path that needs its query (it takes an identifier there), refused without one, for example `/api/projects/[0-9]+/items`. One line for each, above the line that lets an empty query through; or delete the line. |
+| `<relay-id-query-path>` | router, relay | An allowed path that needs its query (it takes an identifier there), refused without one, for example `/api/projects/[0-9]+/items`. One line for each, or delete the line. The template keeps the query lines in their order: the line that refuses a second `?` first, then these, the line that lets an empty query through, and the forms. |
 | `<relay-refused-path>` | router, relay | One refused path, a regular expression of the start of the path, for example `/api/account/keys(/\|$)`. One line for each. |
 | `<relay-service>` | router, relay | The API's Service as `<name>.<namespace>`, answering on port 80, for example `api.example-dev`. |
 | `<relay-header>` | router, relay | The header the API reads the key from, for example `X-Example-Key`. |
@@ -692,10 +692,10 @@ cluster, with a key only the router holds, and only when it reads.
   in: after writing the list, open the page once and check that none of its
   requests answers 403. A path that takes an identifier in its query is
   also listed as `<relay-id-query-path>`, and is then refused without a
-  query; these lines stay above the one that lets an empty query through,
-  since the lines are checked from the top. A query with a second `?` is
-  refused first of all, so a path written with `[^/]+`, which takes any
-  character but `/`, cannot take in part of the query.
+  query. The lines are checked from the top, and the template keeps their
+  order: first the line that refuses a query with a second `?`, then the
+  paths that need their query, the line that lets an empty query through,
+  and the forms.
 - **The path decided on is the path sent.** nginx decodes and normalizes the
   path first (`/../`, `%2F`); the lists are checked on that path, and that
   path is what the API receives, with the query as it came. The relay keeps
@@ -723,7 +723,9 @@ cluster, with a key only the router holds, and only when it reads.
   WebSocket.
 
 The router's access log writes a relayed request with the path the relay
-decided on, without its query, and never the key.
+decided on, without its query, and never the key. Its error log keeps only
+critical errors of the relay, so an API that does not answer leaves no
+relayed address or query there; the access log still has the 503.
 
 The values go into the relay's lines of the router's `nginx.conf` (the
 blocks between `relay: begin` and `relay: end` in
@@ -751,11 +753,11 @@ map "$request_method:$relay_path" $relay_refusal {
   default "確認用の画面では保存できません";
 }
 map "$relay_path?$args" $relay_args_refusal {
+  default "確認用の画面では使えない操作です";
   "~^[^?]*[?][^?]*[?]" "確認用の画面では使えない操作です";
   "~^/api/projects/[0-9]+/items[?]$" "確認用の画面では使えない操作です";
   "~^[^?]*\?$" "";
   "~^/api/projects/[0-9]+/items[?]owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?$" "";
-  default "確認用の画面では使えない操作です";
 }
 ```
 

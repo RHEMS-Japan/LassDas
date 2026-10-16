@@ -761,10 +761,10 @@ class RelayTemplateTests(unittest.TestCase):
         self.assertEqual(lines[4], 'default "%s";' % SAVING_SENTENCE)
         query = self.config[self.config.index('map "$relay_path?$args" $relay_args_refusal {'):]
         query = [line.strip() for line in query[:query.index("\n  }\n")].splitlines()[1:]]
-        self.assertEqual(query, ['"~^[^?]*[?][^?]*[?]" "%s";' % REFUSED_SENTENCE,
+        self.assertEqual(query, ['default "%s";' % REFUSED_SENTENCE,
+                                 '"~^[^?]*[?][^?]*[?]" "%s";' % REFUSED_SENTENCE,
                                  '"~^<relay-id-query-path>[?]$" "%s";' % REFUSED_SENTENCE,
-                                 '"~^[^?]*\\?$" "";', '"~^<relay-allowed-path>[?]<relay-allowed-query>$" "";',
-                                 'default "%s";' % REFUSED_SENTENCE])
+                                 '"~^[^?]*\\?$" "";', '"~^<relay-allowed-path>[?]<relay-allowed-query>$" "";'])
         self.assertIn('"~^(?:<relay-label-pattern>)$" 1;', self.config, "the whole label has to match")
 
     def test_the_relay_answers_json_and_sends_no_password_or_cookie(self):
@@ -777,6 +777,7 @@ class RelayTemplateTests(unittest.TestCase):
                      "proxy_set_header <relay-header> $relay_key;", "proxy_hide_header Set-Cookie;"):
             self.assertIn(line, location)
         self.assertNotIn("proxy_intercept_errors", location, "the API's own answers go to the page as they are")
+        self.assertIn("error_log stderr crit;", location, "an API that does not answer would log the query")
         for name in ("@relay_refused", "@relay_down"):
             named = self.config[self.config.index("location %s {" % name):].splitlines()[0]
             self.assertIn("default_type application/json;", named)
@@ -1048,8 +1049,7 @@ class RelayNginxTests(unittest.TestCase):
                 ("/api/items?page=1", None),
                 ("/api/items?", "/api/items"),
                 ("/api/session?x", None),
-                # [^/]+ at the end of an allowed path takes any character but
-                # "/", the "?" of the query too; a second "?" is refused first.
+                # A query with a second "?" answers 403.
                 ("/api/tags/3", "/api/tags/3"),
                 ("/api/tags/3?owner=demo", "/api/tags/3?owner=demo"),
                 ("/api/tags/3?owner=demo&q=abc", "/api/tags/3?owner=demo&q=abc"),
@@ -1068,6 +1068,38 @@ class RelayNginxTests(unittest.TestCase):
                     before = len(self.api.received)
                     self.refused(self.ask("GET", target), REFUSED_SENTENCE)
                     self.assertEqual(len(self.api.received), before)
+
+    def test_a_second_question_mark_is_refused_with_both_query_fields_written(self):
+        self.start(fill_relay(router_config(), id_query_paths=RELAY_ID_QUERY_PATHS + ("/api/tags/[^/]+",)))
+        for target in ("/api/tags/3?owner=other&z=?owner=demo", "/api/tags/3??owner=demo",
+                       "/api/tags/3?owner=demo&q=abc?"):
+            with self.subTest(target=target):
+                self.refused(self.ask("GET", target), REFUSED_SENTENCE)
+        self.refused(self.ask("GET", "/api/tags/3"), REFUSED_SENTENCE)
+        self.assertEqual(self.api.received, [])
+        self.assertEqual(self.ask("GET", "/api/tags/3?owner=demo")[0], 200)
+
+    def test_an_api_that_does_not_answer_leaves_no_address_or_query_in_the_error_log(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            closed = probe.getsockname()[1]
+        target = "/api/projects/3/items?owner=demo&page=2"
+
+        def logged(config):
+            self.start(config, api_port=closed)
+            self.refused(self.ask("GET", target), "API に届きません", status=503)
+            time.sleep(0.2)
+            return "".join((self.base / name).read_text() for name in ("error.log", "nginx.stderr")
+                           if (self.base / name).exists())
+        config = fill_relay(router_config())
+        written = logged(config)
+        for word in ("owner=demo", "/api/projects/3", ":%d" % closed, RELAY_KEY):
+            self.assertNotIn(word, written)
+        self.assertIn('"GET /api/projects/3/items HTTP/1.1" 503', self.access_log())
+        # The check sees it: without the line, the error log has the query.
+        quiet = "      error_log stderr crit;\n"
+        self.assertEqual(config.count(quiet), 1)
+        self.assertIn("owner=demo", logged(config.replace(quiet, "")))
 
     def test_only_the_labels_that_match_whole_are_relayed(self):
         self.start()
@@ -1118,7 +1150,7 @@ class RelayNginxTests(unittest.TestCase):
         self.assertIn("この画面は課題に投稿された URL から開いてください", body)
         self.start(config.replace('map "$request_method:$relay_path" $relay_refusal', 'map "$request_method:$uri" $relay_refusal', 1))
         self.refused(self.ask("GET", "/api/items/7"), REFUSED_SENTENCE)
-        # Without the second "?" line, [^/]+ takes in part of the query.
+        # Without the line that refuses a second "?", the same request is not refused.
         second = '    "~^[^?]*[?][^?]*[?]" "%s";\n' % REFUSED_SENTENCE
         self.assertEqual(config.count(second), 1)
         self.start(config.replace(second, ""))
