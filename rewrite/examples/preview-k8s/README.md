@@ -393,7 +393,8 @@ address stops opening at the preview's end.
 - **Checked:** the tests run [preview-router.js](preview-router.js) with the
   njs command line where one is installed (`PREVIEW_NJS`, or `njs` on
   `PATH`) and skip it where not; a table of signatures njs made binds
-  `preview.py` to the same text everywhere.
+  `preview.py` to the same text everywhere. They need njs 1.0's command
+  line: njs 0.8.2's has no `-m`.
 - **The router** checks it after the password: the signature made again
   from the request's `Host` and `<end>` has to match (compared in constant
   time), and `<end>` has to be later than now. Then it sets the cookie
@@ -772,7 +773,8 @@ this example filled in on an nginx with the njs and auth_request modules
 to stand-ins for the API and the Pod: the cases above, the labels that are
 and are not relayed, the headers the API receives, and controls that show
 each check sees the relay's pieces taken out. That run was nginx 1.28.0 with
-njs 1.0.1 on macOS; the router's image and the real Service are checked on
+njs 1.0.1 on macOS, and CI runs it with nginx 1.30.6 and njs 1.0.2 from
+nginx.org's packages; the router's image and the real Service are checked on
 the cluster (see [Checking a running preview](#checking-a-running-preview)).
 
 ## Checking a running preview
