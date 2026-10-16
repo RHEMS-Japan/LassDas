@@ -896,7 +896,8 @@ class RelayNginxTests(unittest.TestCase):
                 .replace("<cluster-dns-ip>", "127.0.0.1")
                 .replace("listen 8080 default_server;", "listen 127.0.0.1:%d default_server;" % port)
                 .replace("listen 8080;", "listen 127.0.0.1:%d;" % port)
-                .replace("/etc/preview-router/", str(base) + "/").replace("/tmp/", str(base / "tmp") + "/")
+                # /tmp/ first: the places put in after it may lie under /tmp.
+                .replace("/tmp/", str(base / "tmp") + "/").replace("/etc/preview-router/", str(base) + "/")
                 .replace("access_log /dev/stdout ", "access_log %s/access.log " % base)
                 .replace("http://pv-$preview_label.preview-apps.svc.cluster.local",
                          "http://127.0.0.1:%d" % self.pod.server_address[1])
