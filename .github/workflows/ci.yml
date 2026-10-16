@@ -90,10 +90,10 @@ jobs:
         run: go version
       # The preview router's tests run its nginx configuration and its njs
       # script on 127.0.0.1 (test_preview_k8s_manifests.py); without these
-      # programs they are skipped. They need nginx.org's packages: Ubuntu's
-      # njs 0.8.2 looks for the router's script only beside nginx.conf, and
-      # its command line has no -m. The runner's own nginx is removed first,
-      # so that nginx.org's package does not stop to ask about Ubuntu's
+      # programs they are skipped. They use nginx.org's packages, because
+      # the command line of Ubuntu's njs 0.8.2 has no -m, which the script's
+      # tests use. The runner's own nginx is removed first, so that
+      # nginx.org's package does not stop to ask about Ubuntu's
       # configuration files. The key file must hold exactly the keys it held
       # on 2026-10-16: the one nginx.org's instructions name
       # (nginx.org/en/linux_packages.html) and two newer ones, one of which
