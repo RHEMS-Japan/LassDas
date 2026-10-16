@@ -88,9 +88,46 @@ jobs:
           cache: false
       - name: Say which Go the Python harnesses use
         run: go version
+      # The preview router's tests run its nginx configuration and its njs
+      # script on 127.0.0.1 (test_preview_k8s_manifests.py); without these
+      # programs they are skipped. They use nginx.org's packages, because
+      # the command line of Ubuntu's njs 0.8.2 has no -m, which the script's
+      # tests use. The runner's own nginx is removed first, so that
+      # nginx.org's package does not stop to ask about Ubuntu's
+      # configuration files. apt is given one key of nginx.org's key file:
+      # the one that signs the noble repository's InRelease (checked on
+      # 2026-10-16; nginx.org/en/linux_packages.html names an older key,
+      # which does not). A key file without it stops the step. When
+      # nginx.org signs with another key, apt-get cannot check the signature
+      # and the step stops: read the key that signs InRelease (gpg --verify
+      # against nginx_signing.key), and put its fingerprint here, twice.
+      - name: Install nginx and njs for the preview router's tests
+        if: matrix.group == 'remaining'
+        working-directory: .
+        run: |
+          sudo apt-get purge -y -qq nginx nginx-common
+          gnupg=$(mktemp -d)
+          curl -fsSL https://nginx.org/keys/nginx_signing.key | GNUPGHOME="$gnupg" gpg --quiet --import
+          GNUPGHOME="$gnupg" gpg --export 8540A6F18833A80E9C1653A42FD21310B49F6B46 \
+            | sudo tee /usr/share/keyrings/nginx-archive-keyring.gpg > /dev/null
+          keys=$(GNUPGHOME="$gnupg" gpg --dry-run --quiet --no-keyring --import --import-options import-show --with-colons \
+            /usr/share/keyrings/nginx-archive-keyring.gpg | awk -F: '$1 == "fpr" { print $10 }' | sort | paste -sd ' ' -)
+          echo "keys: $keys"
+          test "$keys" = "8540A6F18833A80E9C1653A42FD21310B49F6B46"
+          codename=$(lsb_release -cs)
+          echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/ubuntu $codename nginx" \
+            | sudo tee /etc/apt/sources.list.d/nginx.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends -o Dpkg::Options::=--force-confnew \
+            "nginx=1.30.6-1~$codename" "nginx-module-njs=1.30.6+1.0.2-1~$codename"
+          dpkg-query -W -f '${Package} ${Version}\n' nginx nginx-module-njs
+          ls -l /etc/nginx/modules/ngx_http_js_module.so /usr/bin/njs
+          /usr/sbin/nginx -V 2>&1 | tr ' ' '\n' | grep -E '^nginx/|auth_request'
+          /usr/bin/njs -v
       - name: Test the selected Python harness group
         env:
           HARNESS_GROUP: ${{ matrix.group }}
+          PREVIEW_NGINX: ${{ matrix.group == 'remaining' && '/usr/sbin/nginx' || '' }}
         run: bash ../.github/scripts/test-harness-group.sh "$HARNESS_GROUP"
 
   # Preserve the existing required result: Go and both Python groups must pass.
