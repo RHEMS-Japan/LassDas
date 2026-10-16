@@ -17,6 +17,9 @@
 #                      auth_request module (nginxinc/nginx-unprivileged has
 #                      both), by digest
 # <certificate-arn>    the certificate for *.<preview-domain> (README.md, step 1)
+# <relay-...>          the API relay of one preview name (README.md, "Relaying
+#                      an API"): delete every block between "relay: begin"
+#                      and "relay: end" when no preview's page reads an API
 #
 # Requests for <label>.<preview-domain> go to the Service pv-<label> in the
 # preview namespace after two checks, both required: the password (401
@@ -42,6 +45,9 @@ data:
     load_module /etc/nginx/modules/ngx_http_js_module.so;
     # The signing key, from the Secret preview-router-signing, for njs.
     env PREVIEW_SIGNING_KEY;
+    # relay: begin. The key the relay adds, from the Secret preview-relay.
+    env PREVIEW_RELAY_KEY;
+    # relay: end
     worker_processes 1;
     pid /tmp/nginx.pid;
     error_log stderr warn;
@@ -67,6 +73,46 @@ data:
       js_path /etc/preview-router/js;
       js_import preview from preview-router.js;
       js_set $preview_other_cookies preview.otherCookies;
+      # relay: begin (README.md, "Relaying an API"). The API of one preview
+      # name, reached from the router with a key the preview never holds.
+      # Only GET and HEAD of the allowed paths go through; every decision is
+      # made on $relay_path, the path nginx normalized, saved before the
+      # rewrite to the relay's location (after it, $uri is /_relay/api).
+      js_set $relay_key preview.relayKey;
+      # The previews whose API is relayed: the whole label matches.
+      map $preview_label $relay_label { default 0; "~^(?:<relay-label-pattern>)$" 1; }
+      map "$relay_label:$relay_path" $relay_on { default 0; "~^1:<relay-path-prefix>" 1; }
+      # Their pages may send requests to their own origin only.
+      map $relay_label $relay_csp { default ""; 1 "connect-src 'self'"; }
+      # Checked from the top: a path with a character outside the set, then
+      # the refused paths, then the allowed ones (one line each, the whole
+      # path); anything else is refused, and so is every other method.
+      map "$request_method:$relay_path" $relay_refusal {
+        "~^(GET|HEAD):.*[^A-Za-z0-9/._~-]" "確認用の画面では使えない操作です";
+        "~^(GET|HEAD):<relay-refused-path>" "確認用の画面では使えない操作です";
+        "~^(GET|HEAD):<relay-allowed-path>$" "";
+        "~^(GET|HEAD):" "確認用の画面では使えない操作です";
+        default "確認用の画面では保存できません";
+      }
+      # The query of an allowed path: none, or one of the forms listed for
+      # that path (each name once, in a fixed order, values without %).
+      # Checked from the top. The first two lines stay as they are: a query
+      # with a second "?" is refused whatever is written below. Then, in this
+      # order, the paths that need their query (refused without one), the
+      # line that lets an empty query through, and the forms.
+      map "$relay_path?$args" $relay_args_refusal {
+        default "確認用の画面では使えない操作です";
+        "~^[^?]*[?][^?]*[?]" "確認用の画面では使えない操作です";
+        "~^<relay-id-query-path>[?]$" "確認用の画面では使えない操作です";
+        "~^[^?]*\?$" "";
+        "~^<relay-allowed-path>[?]<relay-allowed-query>$" "";
+      }
+      map $relay_args_refusal $relay_args_message { "" "この画面は課題に投稿された URL から開いてください"; default $relay_args_refusal; }
+      map $relay_refusal $relay_message { "" $relay_args_message; default $relay_refusal; }
+      # The relay's log line names the path it decided on, without the query.
+      log_format preview_relay '$remote_addr - $remote_user [$time_local] "$request_method $relay_path $server_protocol" '
+                               '$status $body_bytes_sent "$http_user_agent"';
+      # relay: end
 
       # Every other host, and the load balancer's health check (which names
       # the Pod's address as its host).
@@ -95,8 +141,45 @@ data:
         location = /_preview/open { error_log stderr crit; js_content preview.open; }
         location = /_preview/check { internal; js_content preview.check; }
         location ^~ /_preview/ { return 404; }
+        # relay: begin. A refusal returns before the password is checked:
+        # "return" answers ahead of auth_basic, with the fixed sentence only,
+        # and nothing is sent to the API.
+        location = /_relay/api {
+          internal;
+          auth_request /_preview/check;
+          error_page 403 = @relay_refused;
+          error_page 502 503 504 = @relay_down;
+          if ($relay_refusal != "") { return 403; }
+          if ($relay_args_refusal != "") { return 403; }
+          if ($relay_key = "") { return 503; }
+          # The path that was decided on is the path that is sent.
+          proxy_pass http://<relay-service>.svc.cluster.local$relay_uri;
+          # Every header is set here: nothing of the location / below applies.
+          proxy_set_header Host <relay-service>.svc.cluster.local;
+          proxy_set_header Authorization "";
+          proxy_set_header Cookie "";
+          proxy_set_header <relay-cleared-header> "";
+          proxy_set_header <relay-header> $relay_key;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto https;
+          proxy_hide_header Set-Cookie;
+          proxy_connect_timeout 5s;
+          access_log /dev/stdout preview_relay;
+          # Only critical errors: an API that does not answer would otherwise
+          # write the request line and the relayed address, query and all.
+          error_log stderr crit;
+        }
+        location @relay_refused { access_log /dev/stdout preview_relay; default_type application/json; return 403 '{"error":"$relay_message"}'; }
+        location @relay_down { access_log /dev/stdout preview_relay; default_type application/json; return 503 '{"error":"API に届きません"}'; }
+        # relay: end
         location / {
           if ($preview_label = "") { return 404; }
+          # relay: begin
+          set $relay_path $uri;
+          set $relay_uri $uri$is_args$args;
+          if ($relay_on) { rewrite ^ /_relay/api last; }
+          add_header Content-Security-Policy $relay_csp always;
+          # relay: end
           # The password (auth_basic) is checked first, then the cookie.
           auth_request /_preview/check;
           proxy_pass http://pv-$preview_label.<preview-namespace>.svc.cluster.local;
@@ -217,6 +300,11 @@ spec:
             - name: PREVIEW_SIGNING_KEY
               valueFrom:
                 secretKeyRef: { name: preview-router-signing, key: key }
+            # relay: begin
+            - name: PREVIEW_RELAY_KEY
+              valueFrom:
+                secretKeyRef: { name: preview-relay, key: key, optional: true }
+            # relay: end
           volumeMounts:
             - { name: config, mountPath: /etc/preview-router/conf, readOnly: true }
             - { name: pages, mountPath: /etc/preview-router/pages, readOnly: true }

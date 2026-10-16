@@ -6,8 +6,11 @@ a fake one. Nothing here reaches a cluster.
 The manifests are read as text, the way the module's other template checks
 read theirs: no YAML library is needed or added.
 """
+import base64
 import contextlib
 import datetime
+import http.client
+import http.server
 import importlib.util
 import io
 import json
@@ -15,9 +18,11 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -25,6 +30,10 @@ EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "preview-k8s"
 # The njs command line, to run the router's script. CI has none, and those
 # tests are skipped there; the README says how they were run.
 NJS = os.environ.get("PREVIEW_NJS") or shutil.which("njs")
+# An nginx with the njs and auth_request modules, to run the router's
+# configuration on 127.0.0.1 (PREVIEW_NGINX). CI has none either, and those
+# tests are skipped there; the README says how they were run.
+NGINX = os.environ.get("PREVIEW_NGINX")
 # The commands a test starts get the fake's directory and the programs
 # named only, a kubeconfig naming no real server and an empty home (as-8):
 # test_preview_k8s_example.py has the preparation.
@@ -190,17 +199,22 @@ class ManifestTests(unittest.TestCase):
     def test_the_router_logs_no_query_and_no_referer(self):
         router = (EXAMPLE / "router.yaml.example").read_text()
         config = router[router.index("  nginx.conf: |"):router.index("  ended.html: |")]
-        formats = re.findall(r"log_format (\S+) ((?:'[^']*'\s*)+);", config)
-        self.assertEqual([name for name, _ in formats], ["preview"])
-        written = formats[0][1]
-        self.assertIn("$uri", written)
-        for variable in ("$request ", "$request\"", "$request_uri", "$args", "$query_string", "$arg_", "$http_referer",
-                         "$http_cookie", "$cookie_"):
-            self.assertNotIn(variable, written)
+        formats = dict(re.findall(r"log_format (\S+) ((?:'[^']*'\s*)+);", config))
+        self.assertEqual(sorted(formats), ["preview", "preview_relay"])
+        self.assertIn("$uri", formats["preview"])
+        self.assertIn("$relay_path", formats["preview_relay"], "the relay's line names the path it decided on")
+        for written in formats.values():
+            for variable in ("$request ", "$request\"", "$request_uri", "$args", "$query_string", "$arg_", "$http_referer",
+                             "$http_cookie", "$cookie_", "$relay_uri", "$relay_key", "$http_authorization"):
+                self.assertNotIn(variable, written)
         logs = re.findall(r"access_log ([^;]+);", config)
         self.assertTrue(logs)
         for line in logs:
-            self.assertTrue(line.strip() == "off" or line.split()[-1] == "preview", line)
+            self.assertTrue(line.strip() == "off" or line.split()[-1] in formats, line)
+        start = config.index("location = /_relay/api {")
+        relay = config[start:config.index("location / {", start)]
+        self.assertEqual(relay.count("access_log /dev/stdout preview_relay;"), 3,
+                         "the relay's location and its two answers write the relay's line")
 
     def test_the_router_drops_the_password_and_makes_no_dns_record(self):
         router = (EXAMPLE / "router.yaml.example").read_text()
@@ -646,6 +660,511 @@ preview.filterCookies(s); results.push(s.headersOut['Set-Cookie'] === undefined)
                  "'c=3; Domain=%s']; preview.filterCookies(m); results.push(m.headersOut['Set-Cookie']);"
                  % (json.dumps(host), host))
         self.assertEqual(self.run_script(mixed), [["b=2", "c=3; Domain=%s" % host]])
+
+
+# README.md's example of a relay ("Relaying an API"), written into the router's
+# configuration the way the README says: one line per path.
+RELAY_VALUES = {"relay-label-pattern": "sample-example-[0-9]+", "relay-path-prefix": "/api/",
+                "relay-service": "api.example-dev", "relay-header": "X-Example-Key", "relay-cleared-header": "X-Act-As"}
+RELAY_ALLOWED = ("/api/session", "/api/items", "/api/items/[0-9]+", "/api/projects/[0-9]+/items", "/api/status/[0-9]+",
+                 "/api/tags/[^/]+")
+RELAY_REFUSED = ("/api/account/keys(/|$)", "/api/items/[0-9]+/export$")
+RELAY_QUERIES = (("/api/projects/[0-9]+/items", "owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?"),
+                 ("/api/projects/[0-9]+/items", "owner=demo&q=[a-z]{1,20}"),
+                 ("/api/tags/[^/]+", "owner=demo"), ("/api/tags/[^/]+", "owner=demo&q=[a-z]{1,20}"))
+# The allowed paths that take an identifier in their query, and so are
+# refused without one.
+RELAY_ID_QUERY_PATHS = ("/api/projects/[0-9]+/items",)
+RELAY_KEY = "example-relay-key-0123456789"
+REFUSED_SENTENCE = "確認用の画面では使えない操作です"
+SAVING_SENTENCE = "確認用の画面では保存できません"
+COOKIE_SENTENCE = "この画面は課題に投稿された URL から開いてください"
+
+
+def router_config():
+    """The nginx.conf of router.yaml.example, unindented."""
+    router = (EXAMPLE / "router.yaml.example").read_text()
+    block = router[router.index("  nginx.conf: |\n") + len("  nginx.conf: |\n"):router.index("  ended.html: |")]
+    return "\n".join(line[4:] for line in block.splitlines()) + "\n"
+
+
+def without_relay(text):
+    """The text with every relay block deleted, as the README says to when no
+    preview's page reads an API."""
+    return re.sub(r"(?ms)^[ \t]*# relay: begin.*?# relay: end\n", "", text)
+
+
+def fill_relay(config, allowed=RELAY_ALLOWED, refused=RELAY_REFUSED, queries=RELAY_QUERIES,
+               id_query_paths=RELAY_ID_QUERY_PATHS, values=None):
+    """The relay's placeholders filled: one line for each path and each query."""
+    values = dict(RELAY_VALUES, **(values or {}))
+    lines = []
+    for line in config.splitlines():
+        if "<relay-id-query-path>" in line:
+            lines += [line.replace("<relay-id-query-path>", path) for path in id_query_paths]
+        elif "<relay-allowed-query>" in line:
+            lines += [line.replace("<relay-allowed-path>", path).replace("<relay-allowed-query>", query)
+                      for path, query in queries]
+        elif "<relay-allowed-path>" in line:
+            lines += [line.replace("<relay-allowed-path>", path) for path in allowed]
+        elif "<relay-refused-path>" in line:
+            lines += [line.replace("<relay-refused-path>", path) for path in refused]
+        else:
+            for name, value in values.items():
+                line = line.replace("<%s>" % name, value)
+            lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+class RelayTemplateTests(unittest.TestCase):
+    """The relay's place in router.yaml.example, read as text."""
+
+    def setUp(self):
+        self.router = (EXAMPLE / "router.yaml.example").read_text()
+        self.config = router_config()
+
+    def relay_location(self):
+        start = self.config.index("location = /_relay/api {")
+        return self.config[start:self.config.index("\n    }\n", start)]
+
+    def test_without_the_relay_nothing_of_it_is_left(self):
+        removed = without_relay(self.router)
+        self.assertNotEqual(removed, self.router, "no relay block was found; the check removes nothing")
+        code = "\n".join(line for line in removed.splitlines() if not line.lstrip().startswith("#"))
+        for word in ("relay", "PREVIEW_RELAY_KEY", "Content-Security-Policy"):
+            self.assertNotIn(word, code)
+        for kept in ("location / {", "auth_request /_preview/check;", "env PREVIEW_SIGNING_KEY;",
+                     "secretKeyRef: { name: preview-router-signing, key: key }"):
+            self.assertIn(kept, removed)
+        self.assertEqual(self.router.count("# relay: begin"), self.router.count("# relay: end"))
+
+    def test_the_relay_decides_on_the_path_saved_before_the_rewrite(self):
+        location = self.config[self.config.index("    location / {"):]
+        saved = location.index("set $relay_path $uri;")
+        self.assertLess(saved, location.index("rewrite ^ /_relay/api last;"))
+        self.assertIn("set $relay_uri $uri$is_args$args;", location)
+        maps = re.findall(r'map "([^"]*)" \$relay_(?:refusal|args_refusal|on) ', self.config)
+        self.assertEqual(sorted(maps), sorted(["$relay_label:$relay_path", "$request_method:$relay_path",
+                                               "$relay_path?$args"]))
+        for key in maps:
+            self.assertNotIn("$uri", key, "after the rewrite, $uri is the relay's own location")
+        self.assertIn("proxy_pass http://<relay-service>.svc.cluster.local$relay_uri;", self.relay_location())
+
+    def test_refusals_come_first_and_everything_else_is_refused(self):
+        refusal = self.config[self.config.index('map "$request_method:$relay_path" $relay_refusal {'):]
+        refusal = refusal[:refusal.index("\n  }\n")]
+        lines = [line.strip() for line in refusal.splitlines()[1:]]
+        self.assertTrue(lines[0].startswith('"~^(GET|HEAD):.*[^A-Za-z0-9/._~-]"'), lines[0])
+        self.assertTrue(lines[1].startswith('"~^(GET|HEAD):<relay-refused-path>"'), lines[1])
+        self.assertEqual(lines[2], '"~^(GET|HEAD):<relay-allowed-path>$" "";')
+        self.assertEqual(lines[3], '"~^(GET|HEAD):" "%s";' % REFUSED_SENTENCE)
+        self.assertEqual(lines[4], 'default "%s";' % SAVING_SENTENCE)
+        query = self.config[self.config.index('map "$relay_path?$args" $relay_args_refusal {'):]
+        query = [line.strip() for line in query[:query.index("\n  }\n")].splitlines()[1:]]
+        self.assertEqual(query, ['default "%s";' % REFUSED_SENTENCE,
+                                 '"~^[^?]*[?][^?]*[?]" "%s";' % REFUSED_SENTENCE,
+                                 '"~^<relay-id-query-path>[?]$" "%s";' % REFUSED_SENTENCE,
+                                 '"~^[^?]*\\?$" "";', '"~^<relay-allowed-path>[?]<relay-allowed-query>$" "";'])
+        self.assertIn('"~^(?:<relay-label-pattern>)$" 1;', self.config, "the whole label has to match")
+
+    def test_the_relay_answers_json_and_sends_no_password_or_cookie(self):
+        location = self.relay_location()
+        for line in ("internal;", "auth_request /_preview/check;", "error_page 403 = @relay_refused;",
+                     "error_page 502 503 504 = @relay_down;", 'if ($relay_refusal != "") { return 403; }',
+                     'if ($relay_args_refusal != "") { return 403; }', 'if ($relay_key = "") { return 503; }',
+                     "proxy_set_header Host <relay-service>.svc.cluster.local;", 'proxy_set_header Authorization "";',
+                     'proxy_set_header Cookie "";', 'proxy_set_header <relay-cleared-header> "";',
+                     "proxy_set_header <relay-header> $relay_key;", "proxy_hide_header Set-Cookie;"):
+            self.assertIn(line, location)
+        self.assertNotIn("proxy_intercept_errors", location, "the API's own answers go to the page as they are")
+        self.assertIn("error_log stderr crit;", location, "an API that does not answer would log the query")
+        for name in ("@relay_refused", "@relay_down"):
+            named = self.config[self.config.index("location %s {" % name):].splitlines()[0]
+            self.assertIn("default_type application/json;", named)
+        self.assertIn("add_header Content-Security-Policy $relay_csp always;", self.config)
+        self.assertIn("""map $relay_label $relay_csp { default ""; 1 "connect-src 'self'"; }""", self.config)
+
+    def test_the_key_is_the_router_s_alone(self):
+        self.assertIn("env PREVIEW_RELAY_KEY;", self.config)
+        self.assertIn("js_set $relay_key preview.relayKey;", self.config)
+        self.assertIn("- name: PREVIEW_RELAY_KEY\n              valueFrom:\n"
+                      "                secretKeyRef: { name: preview-relay, key: key, optional: true }", self.router)
+        script = (EXAMPLE / "preview-router.js").read_text()
+        self.assertIn("return process.env.PREVIEW_RELAY_KEY || '';", script)
+        preview = (EXAMPLE / "preview.py").read_text()
+        self.assertNotIn("RELAY", preview, "the preview command neither reads nor passes the relay's key")
+
+    def test_the_readme_s_example_is_the_one_the_tests_run(self):
+        readme = (EXAMPLE / "README.md").read_text()
+        section = readme[readme.index("## Relaying an API"):]
+        example = section[section.index("```nginx\n") + len("```nginx\n"):]
+        example = example[:example.index("```")]
+        filled = [line.strip() for line in fill_relay(self.config).splitlines()]
+        lines = [line.strip() for line in example.splitlines() if line.strip()]
+        self.assertGreater(len(lines), 10)
+        for line in lines:
+            self.assertIn(line, filled)
+        for line in ("proxy_pass http://api.example-dev.svc.cluster.local$relay_uri;", 'proxy_set_header X-Act-As "";'):
+            self.assertIn(line, filled)
+            self.assertIn("`%s`" % line, section)
+
+    def test_the_egress_rules_stay_as_they_were(self):
+        router = [line for line in rules(EXAMPLE / "router.yaml.example", "router.rules") if line.startswith("-A")]
+        self.assertEqual(router[-2:], ["-A OUTPUT -d <service-cidr> -p tcp --dport 80 -j ACCEPT", "-A OUTPUT -j REJECT"])
+
+
+class StandIn(http.server.BaseHTTPRequestHandler):
+    """A stand-in for the API, or for a preview's Pod, on 127.0.0.1: it
+    keeps what it received and says which it is."""
+
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *arguments):
+        pass
+
+    def answer(self):
+        self.server.received.append({"method": self.command, "target": self.path,
+                                     "headers": {name.lower(): value for name, value in self.headers.items()}})
+        status = 200
+        found = re.match(r"^/api/status/([0-9]{3})$", self.path)
+        if found and self.server.role == "api":
+            status = int(found.group(1))
+        body = json.dumps({"from": self.server.role, "target": self.path}).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json" if self.server.role == "api" else "text/html")
+        self.send_header("Set-Cookie", "session=from-%s; Path=/" % self.server.role)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    do_GET = do_HEAD = do_POST = answer
+
+
+def stand_in(role):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StandIn)
+    server.role, server.received = role, []
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@unittest.skipUnless(NGINX, "no nginx with njs and auth_request is named (set PREVIEW_NGINX); the relay is not run")
+class RelayNginxTests(unittest.TestCase):
+    """The router's configuration from router.yaml.example, with README.md's
+    example relay filled in, run by nginx on 127.0.0.1 with stand-ins for
+    the API and the preview's Pod. Only the addresses, the files' places and
+    the module line are changed to run it here."""
+
+    HOST = "sample-example-12.preview.example.invalid"
+    PASSWORD = "requester-password"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.preview = load("preview")
+        version = subprocess.run([NGINX, "-V"], capture_output=True, text=True, timeout=30).stderr
+        cls.njs_built_in = "--add-module=" in version and "njs" in version
+        cls.api, cls.pod = stand_in("api"), stand_in("pod")
+
+    @classmethod
+    def tearDownClass(cls):
+        for server in (cls.api, cls.pod):
+            server.shutdown()
+            server.server_close()
+
+    def setUp(self):
+        self.api.received.clear()
+        self.pod.received.clear()
+
+    def start(self, config=None, key=RELAY_KEY, api_port=None):
+        """nginx with this configuration (by default the filled example),
+        on a free port; it is stopped when the test ends."""
+        temporary = tempfile.TemporaryDirectory(prefix="preview-relay-")
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        for directory in ("js", "pages", "auth", "conf", "tmp"):
+            (base / directory).mkdir()
+        shutil.copy(EXAMPLE / "preview-router.js", base / "js" / "preview-router.js")
+        router = (EXAMPLE / "router.yaml.example").read_text()
+        for page in ("ended.html", "denied.html"):
+            (base / "pages" / page).write_text("\n".join(rules(EXAMPLE / "router.yaml.example", page)) + "\n")
+        (base / "auth" / "htpasswd").write_text("requester:{PLAIN}%s\n" % self.PASSWORD)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        text = fill_relay(router_config()) if config is None else config
+        text = (text.replace("<preview-domain>", "preview.example.invalid").replace("<preview-namespace>", "preview-apps")
+                .replace("<cluster-dns-ip>", "127.0.0.1")
+                .replace("listen 8080 default_server;", "listen 127.0.0.1:%d default_server;" % port)
+                .replace("listen 8080;", "listen 127.0.0.1:%d;" % port)
+                # /tmp/ first: the places put in after it may lie under /tmp.
+                .replace("/tmp/", str(base / "tmp") + "/").replace("/etc/preview-router/", str(base) + "/")
+                .replace("access_log /dev/stdout ", "access_log %s/access.log " % base)
+                .replace("http://pv-$preview_label.preview-apps.svc.cluster.local",
+                         "http://127.0.0.1:%d" % self.pod.server_address[1])
+                .replace("http://api.example-dev.svc.cluster.local$relay_uri",
+                         "http://127.0.0.1:%d$relay_uri" % (api_port or self.api.server_address[1])))
+        if self.njs_built_in:
+            text = text.replace("load_module /etc/nginx/modules/ngx_http_js_module.so;\n", "")
+        (base / "conf" / "nginx.conf").write_text(text)
+        environment = {"PREVIEW_SIGNING_KEY": SIGNING_KEY}
+        if key is not None:
+            environment["PREVIEW_RELAY_KEY"] = key
+        log = open(base / "nginx.stderr", "w")
+        self.addCleanup(log.close)
+        process = subprocess.Popen([NGINX, "-p", str(base), "-e", str(base / "error.log"), "-c",
+                                    str(base / "conf" / "nginx.conf"), "-g", "daemon off;"],
+                                   env=environment, stdout=log, stderr=subprocess.STDOUT)
+
+        def stop():
+            process.terminate()
+            process.wait(timeout=10)
+        self.addCleanup(stop)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                self.fail("nginx ended %s: %s" % (process.returncode, (base / "nginx.stderr").read_text()))
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        self.port = port
+        self.base = base
+
+    def access_log(self):
+        return (self.base / "access.log").read_text()
+
+    def token(self, host):
+        end = int(time.time()) + 3600
+        return "%d.%s" % (end, self.preview.sign(SIGNING_KEY, host, end))
+
+    def ask(self, method, target, host=None, password=True, cookie=True, headers=None):
+        host = host or self.HOST
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        connection.putrequest(method, target, skip_host=True, skip_accept_encoding=True)
+        sent = {"Host": host}
+        if password:
+            sent["Authorization"] = "Basic " + base64.b64encode(("requester:" + self.PASSWORD).encode()).decode()
+        if cookie:
+            sent["Cookie"] = "__Host-preview=%s; app=1" % self.token(host)
+        sent.update(headers or {})
+        for name, value in sent.items():
+            connection.putheader(name, value)
+        connection.endheaders()
+        response = connection.getresponse()
+        body = response.read().decode()
+        headers = {name.lower(): value for name, value in response.getheaders()}
+        connection.close()
+        return response.status, headers.get("content-type", ""), body, headers
+
+    def refused(self, answer, sentence, status=403):
+        code, kind, body, _ = answer
+        self.assertEqual((code, kind), (status, "application/json"), body)
+        self.assertEqual(json.loads(body), {"error": sentence})
+
+    def test_an_allowed_get_reaches_the_api_with_the_key_and_nothing_of_the_browser(self):
+        self.start()
+        code, kind, body, headers = self.ask("GET", "/api/items/7", headers={"X-Act-As": "someone-else"})
+        self.assertEqual((code, kind), (200, "application/json"), body)
+        self.assertEqual(json.loads(body), {"from": "api", "target": "/api/items/7"})
+        self.assertNotIn("set-cookie", headers, "the API's cookie reaches the page")
+        received = self.api.received[-1]["headers"]
+        self.assertEqual(received.get("x-example-key"), RELAY_KEY)
+        self.assertEqual(received.get("host"), "api.example-dev.svc.cluster.local")
+        for name in ("authorization", "cookie"):
+            self.assertNotIn(name, received, "%s reached the API" % name)
+        self.assertEqual(received.get("x-act-as", ""), "", "the cleared header reached the API")
+        self.assertEqual(self.ask("HEAD", "/api/session")[0], 200)
+        self.assertEqual(self.pod.received, [], "the relayed paths reached the Pod")
+        self.ask("GET", "/api/projects/3/items?owner=demo&page=2")
+        self.refused(self.ask("GET", "/api/other?owner=demo"), REFUSED_SENTENCE)
+        written = self.access_log()
+        for line in ('"GET /api/items/7 HTTP/1.1" 200', '"HEAD /api/session HTTP/1.1" 200',
+                     '"GET /api/projects/3/items HTTP/1.1" 200', '"GET /api/other HTTP/1.1" 403'):
+            self.assertIn(line, written)
+        for word in ("/_relay/api", "owner=", "page=", RELAY_KEY, self.PASSWORD):
+            self.assertNotIn(word, written)
+
+    def test_what_is_not_allowed_is_refused_before_anything_is_sent(self):
+        self.start()
+        for method, target, sentence in (
+                ("GET", "/api/other", REFUSED_SENTENCE),
+                ("GET", "/api/items/7/comments", REFUSED_SENTENCE),
+                ("GET", "/api/account/keys", REFUSED_SENTENCE),
+                ("GET", "/api/account/keys/1", REFUSED_SENTENCE),
+                ("GET", "/api/items/7/export", REFUSED_SENTENCE),
+                ("POST", "/api/items", SAVING_SENTENCE),
+                ("PUT", "/api/items/7", SAVING_SENTENCE),
+                ("DELETE", "/api/items/7", SAVING_SENTENCE),
+                ("OPTIONS", "/api/items", SAVING_SENTENCE)):
+            with self.subTest(method=method, target=target):
+                self.refused(self.ask(method, target), sentence)
+        self.assertEqual(self.api.received, [])
+
+    def test_a_refused_path_stays_refused_when_it_is_also_allowed(self):
+        self.start(fill_relay(router_config(), allowed=RELAY_ALLOWED + ("/api/account/keys", "/api/items/[0-9]+/export")))
+        self.refused(self.ask("GET", "/api/account/keys"), REFUSED_SENTENCE)
+        self.refused(self.ask("GET", "/api/items/7/export"), REFUSED_SENTENCE)
+        self.assertEqual(self.api.received, [])
+        # The check sees the difference: without the refusal, the same path goes through.
+        self.start(fill_relay(router_config(), allowed=RELAY_ALLOWED + ("/api/account/keys",), refused=("/api/none$",)))
+        self.assertEqual(self.ask("GET", "/api/account/keys")[0], 200)
+
+    def test_the_path_decided_on_is_the_normalized_path_that_is_sent(self):
+        self.start()
+        for target in ("/api/items/../account/keys", "/api/account%2Fkeys", "/api/session/../account/keys/",
+                       "/api/items/7%2Fexport", "//api//account//keys", "/api/items/a%20b", "/api/items/%2e%2e/account/keys"):
+            with self.subTest(target=target):
+                self.refused(self.ask("GET", target), REFUSED_SENTENCE)
+        # [^/]+ of an allowed path takes any character but "/"; the line
+        # before the refused paths keeps what would need encoding again.
+        for target in ("/api/tags/a%20b", "/api/tags/x%3Fy", "/api/tags/x%23y", "/api/tags/x%25y", "/api/tags/x%0Ay"):
+            with self.subTest(target=target):
+                self.refused(self.ask("GET", target), REFUSED_SENTENCE)
+        self.assertEqual(self.api.received, [])
+        code, _, body, _ = self.ask("GET", "/api/other/../items/7")
+        self.assertEqual(code, 200, body)
+        self.assertEqual(self.api.received[-1]["target"], "/api/items/7")
+        self.assertEqual(self.ask("GET", "/api/tags/x-y_1.2~")[0], 200)
+        self.assertEqual(self.api.received[-1]["target"], "/api/tags/x-y_1.2~")
+
+    def test_the_query_is_none_or_the_form_listed_for_its_path(self):
+        self.start()
+        # The target sent, or None where the request is refused.
+        for target, sent in (
+                ("/api/projects/3/items", None),
+                ("/api/projects/3/items?", None),
+                ("/api/projects/3/items?owner=demo", "/api/projects/3/items?owner=demo"),
+                ("/api/projects/3/items?owner=demo&page=2&limit=50", "/api/projects/3/items?owner=demo&page=2&limit=50"),
+                ("/api/projects/3/items?owner=demo&q=abc", "/api/projects/3/items?owner=demo&q=abc"),
+                ("/api/projects/3/items?owner=demo&q=abc&page=1", None),
+                ("/api/projects/3/items?owner=demo&q=a%62c", None),
+                ("/api/projects/3/items?owner=other", None),
+                ("/api/projects/3/items?owner=demo&owner=other", None),
+                ("/api/projects/3/items?owner=demo&page=1&page=2", None),
+                ("/api/projects/3/items?owner=dem%6F", None),
+                ("/api/projects/3/items?%6Fwner=demo", None),
+                ("/api/projects/3/items?owner=demo&limit=5&page=1", None),
+                ("/api/projects/3/items?owner=demo&sort=name", None),
+                ("/api/projects/3/items?page=1", None),
+                ("/api/items?page=1", None),
+                ("/api/items?", "/api/items"),
+                ("/api/session?x", None),
+                # A query with a second "?" answers 403.
+                ("/api/tags/3", "/api/tags/3"),
+                ("/api/tags/3?owner=demo", "/api/tags/3?owner=demo"),
+                ("/api/tags/3?owner=demo&q=abc", "/api/tags/3?owner=demo&q=abc"),
+                ("/api/tags/3?owner=other&z=?owner=demo", None),
+                ("/api/tags/3?sort=name?owner=demo", None),
+                ("/api/tags/3?owner=other&z=?owner=demo&q=abc", None),
+                ("/api/tags/3?owner=demo?", None),
+                ("/api/tags/3??owner=demo", None),
+                ("/api/projects/3/items?owner=other&z=?owner=demo", None)):
+            with self.subTest(target=target):
+                if sent:
+                    code, _, body, _ = self.ask("GET", target)
+                    self.assertEqual(code, 200, body)
+                    self.assertEqual(self.api.received[-1]["target"], sent)
+                else:
+                    before = len(self.api.received)
+                    self.refused(self.ask("GET", target), REFUSED_SENTENCE)
+                    self.assertEqual(len(self.api.received), before)
+
+    def test_a_second_question_mark_is_refused_with_both_query_fields_written(self):
+        self.start(fill_relay(router_config(), id_query_paths=RELAY_ID_QUERY_PATHS + ("/api/tags/[^/]+",)))
+        for target in ("/api/tags/3?owner=other&z=?owner=demo", "/api/tags/3??owner=demo",
+                       "/api/tags/3?owner=demo&q=abc?"):
+            with self.subTest(target=target):
+                self.refused(self.ask("GET", target), REFUSED_SENTENCE)
+        self.refused(self.ask("GET", "/api/tags/3"), REFUSED_SENTENCE)
+        self.assertEqual(self.api.received, [])
+        self.assertEqual(self.ask("GET", "/api/tags/3?owner=demo")[0], 200)
+
+    def test_an_api_that_does_not_answer_leaves_no_address_or_query_in_the_error_log(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            closed = probe.getsockname()[1]
+        target = "/api/projects/3/items?owner=demo&page=2"
+
+        def logged(config):
+            self.start(config, api_port=closed)
+            self.refused(self.ask("GET", target), "API に届きません", status=503)
+            time.sleep(0.2)
+            return "".join((self.base / name).read_text() for name in ("error.log", "nginx.stderr")
+                           if (self.base / name).exists())
+        config = fill_relay(router_config())
+        written = logged(config)
+        for word in ("owner=demo", "/api/projects/3", ":%d" % closed, RELAY_KEY):
+            self.assertNotIn(word, written)
+        self.assertIn('"GET /api/projects/3/items HTTP/1.1" 503', self.access_log())
+        # The check sees it: without the line, the error log has the query.
+        quiet = "      error_log stderr crit;\n"
+        self.assertEqual(config.count(quiet), 1)
+        self.assertIn("owner=demo", logged(config.replace(quiet, "")))
+
+    def test_only_the_labels_that_match_whole_are_relayed(self):
+        self.start()
+        for host in ("sample-stg-example-12.preview.example.invalid", "sample-12.preview.example.invalid",
+                     "other-1.preview.example.invalid", "xsample-example-12.preview.example.invalid",
+                     "sample-example-12x.preview.example.invalid"):
+            with self.subTest(host=host):
+                code, kind, body, headers = self.ask("GET", "/api/items/7", host=host)
+                self.assertEqual((code, json.loads(body)["from"]), (200, "pod"))
+                self.assertNotIn("content-security-policy", headers)
+        self.assertEqual(self.api.received, [])
+        code, _, _, headers = self.ask("GET", "/index.html")
+        self.assertEqual(code, 200)
+        self.assertEqual(headers.get("content-security-policy"), "connect-src 'self'")
+
+    def test_every_refusal_is_json_and_never_the_router_s_pages(self):
+        self.start()
+        self.refused(self.ask("GET", "/api/items/7", cookie=False), COOKIE_SENTENCE)
+        self.refused(self.ask("GET", "/api/other", password=False, cookie=False), REFUSED_SENTENCE)
+        self.assertEqual(self.ask("GET", "/api/items/7", password=False)[0], 401)
+        code, kind, body, _ = self.ask("GET", "/api/status/401")
+        self.assertEqual((code, kind, json.loads(body)["from"]), (401, "application/json", "api"))
+        self.assertEqual(self.ask("GET", "/api/status/503")[:2], (503, "application/json"))
+        self.assertEqual(json.loads(self.ask("GET", "/api/status/503")[2])["from"], "api")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            closed = probe.getsockname()[1]
+        self.start(api_port=closed)
+        self.refused(self.ask("GET", "/api/items/7"), "API に届きません", status=503)
+        self.start(key=None)
+        self.refused(self.ask("GET", "/api/items/7"), "API に届きません", status=503)
+        self.refused(self.ask("GET", "/api/other"), REFUSED_SENTENCE)
+
+    def test_the_checks_see_the_difference_without_the_relay_s_pieces(self):
+        """Positive controls: each piece the tests above rely on, taken out,
+        changes what they see."""
+        config = fill_relay(router_config())
+        self.start(fill_relay(without_relay(router_config())))
+        code, _, body, _ = self.ask("GET", "/api/items/7")
+        self.assertEqual((code, json.loads(body)["from"]), (200, "pod"), "without the relay the Pod answers")
+        bare = config
+        for line in ("      error_page 403 = @relay_refused;\n", "      error_page 502 503 504 = @relay_down;\n"):
+            self.assertEqual(bare.count(line), 1, line)
+            bare = bare.replace(line, "")
+        self.start(bare)
+        code, kind, body, _ = self.ask("GET", "/api/other")
+        self.assertEqual((code, kind), (403, "text/html"), "without the relay's error_page the router's page answers")
+        self.assertIn("この画面は課題に投稿された URL から開いてください", body)
+        self.start(config.replace('map "$request_method:$relay_path" $relay_refusal', 'map "$request_method:$uri" $relay_refusal', 1))
+        self.refused(self.ask("GET", "/api/items/7"), REFUSED_SENTENCE)
+        # Without the line that refuses a second "?", the same request is not refused.
+        second = '    "~^[^?]*[?][^?]*[?]" "%s";\n' % REFUSED_SENTENCE
+        self.assertEqual(config.count(second), 1)
+        self.start(config.replace(second, ""))
+        code, _, body, _ = self.ask("GET", "/api/tags/3?owner=other&z=?owner=demo")
+        self.assertEqual(code, 200, body)
+        self.assertEqual(self.api.received[-1]["target"], "/api/tags/3?owner=other&z=?owner=demo")
+        # A path that needs its query, listed below the line that lets an
+        # empty query through, lets one through.
+        needs = '    "~^/api/projects/[0-9]+/items[?]$" "%s";\n' % REFUSED_SENTENCE
+        empty = '    "~^[^?]*\\?$" "";\n'
+        self.assertEqual((config.count(needs), config.count(empty)), (1, 1))
+        self.start(config.replace(needs, "").replace(empty, empty + needs))
+        self.assertEqual(self.ask("GET", "/api/projects/3/items")[0], 200)
 
 
 if __name__ == "__main__":
