@@ -206,10 +206,13 @@ def read_settings(environment, command):
             raise Failure("PREVIEW_ENV_FILE must be a path inside the checkout, relative to it, without . or ..")
     pack_dir = environment.get("PREVIEW_PACK_DIR") or None
     if pack_dir is not None:
+        written = pack_dir
+        if pack_dir.endswith("/") and not pack_dir.endswith("//"):
+            pack_dir = pack_dir[:-1]  # one trailing / names the same directory
         parts = pack_dir.split("/")
         if "\0" in pack_dir or pack_dir.startswith("/") or any(part in ("", ".", "..") for part in parts):
-            raise Failure("PREVIEW_PACK_DIR must be a directory inside the checkout, relative to it, "
-                          "without . or ..")
+            raise Failure("PREVIEW_PACK_DIR must be a directory inside the checkout, relative to it, with no "
+                          "leading or doubled / and no . or .. part (it is %r)" % written)
     net_image = matching(environment, "PREVIEW_NET_IMAGE", r"[^\s@]+@sha256:[0-9a-f]{64}",
                          "the rules image named by its digest (name@sha256:...)")
     return Settings(workspace, result, issue, site, start, port, ready_path, lifetime, image, memory, install,
@@ -335,9 +338,10 @@ def checkout_paths(root, environment):
 
 def pack_paths(root, relative, environment):
     """The files and links inside PREVIEW_PACK_DIR, relative to it. The
-    directory has to be one git ignores (git check-ignore; git does not count
-    a directory with a tracked file in it as ignored): what it holds is then
-    never part of a delivery, only of the preview. Every directory on the way
+    directory itself has to be one git ignores (git check-ignore; git does not
+    count a directory with a tracked file in it as ignored, nor one only whose
+    contents a pattern such as dist/* ignores): what it holds is then never
+    part of a delivery, only of the preview. Every directory on the way
     to it and under it is opened without following a symbolic link; a link
     inside is listed as a link, to be carried as one."""
     name = "PREVIEW_PACK_DIR %s" % relative
@@ -377,8 +381,9 @@ def pack_paths(root, relative, environment):
         os.close(directory)
     ignored = git(root, environment, ["check-ignore", "-q", "--", relative], "git check-ignore could not run")
     if ignored.returncode == 1:
-        raise Failure("%s is not ignored by git: what it holds would be delivered too, so it is not carried "
-                      "to the preview alone" % name)
+        raise Failure("git does not ignore %s itself (a tracked file inside, or a pattern such as dist/* that "
+                      "ignores only what is inside): only a directory git ignores as a whole is carried to the "
+                      "preview alone" % name)
     if ignored.returncode != 0:
         raise Failure("git check-ignore could not read %s: %s" % (relative, last_line(ignored.stderr)))
     if not found:

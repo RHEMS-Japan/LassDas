@@ -1189,13 +1189,25 @@ class PreviewExampleTests(unittest.TestCase):
         os.symlink(str(self.base / "elsewhere" / "dist"), self.checkout / "client" / "linked")
         (self.checkout / "loose").mkdir()
         (self.checkout / "loose" / "page.html").write_text("<h1>neither tracked nor ignored</h1>\n")
+        # dist/* ignores what is inside, not the directory itself: git says
+        # the directory is not ignored, though its files are.
+        (self.checkout / "web" / "out").mkdir(parents=True)
+        (self.checkout / "web" / "out" / "index.html").write_text("<h1>contents ignored</h1>\n")
+        (self.checkout / "web" / ".gitignore").write_text("out/*\n")
+        not_ignored = "does not ignore PREVIEW_PACK_DIR"
+        malformed = "with no leading or doubled / and no . or .. part"
         cases = [
-            ("a directory git tracks", {"PREVIEW_PACK_DIR": "site"}, "is not ignored by git"),
-            ("a directory neither tracked nor ignored", {"PREVIEW_PACK_DIR": "loose"}, "is not ignored by git"),
+            ("a directory git tracks", {"PREVIEW_PACK_DIR": "site"}, not_ignored),
+            ("a directory neither tracked nor ignored", {"PREVIEW_PACK_DIR": "loose"}, not_ignored),
+            ("a directory only whose contents are ignored", {"PREVIEW_PACK_DIR": "web/out"}, not_ignored),
             ("an empty directory", {"PREVIEW_PACK_DIR": "client/empty"}, "holds nothing to carry"),
-            ("a value with ..", {"PREVIEW_PACK_DIR": "client/../client/dist"}, "without . or .."),
-            ("a path leaving the checkout", {"PREVIEW_PACK_DIR": "../outside"}, "without . or .."),
-            ("an absolute path", {"PREVIEW_PACK_DIR": str(self.outside)}, "inside the checkout"),
+            ("a value with ..", {"PREVIEW_PACK_DIR": "client/../client/dist"}, malformed),
+            ("a path leaving the checkout", {"PREVIEW_PACK_DIR": "../outside"}, malformed),
+            ("an absolute path", {"PREVIEW_PACK_DIR": str(self.outside)}, malformed),
+            ("a value starting with ./", {"PREVIEW_PACK_DIR": "./client/dist"}, malformed),
+            ("a doubled /", {"PREVIEW_PACK_DIR": "client//dist"}, malformed),
+            ("two trailing /", {"PREVIEW_PACK_DIR": "client/dist//"}, malformed),
+            ("a single /", {"PREVIEW_PACK_DIR": "/"}, malformed),
             ("a link on the way", {"PREVIEW_PACK_DIR": "client/via/dist"}, "client/via/dist is not a directory"),
             ("the directory itself a link", {"PREVIEW_PACK_DIR": "client/linked"}, "is a symbolic link"),
         ]
@@ -1224,7 +1236,7 @@ class PreviewExampleTests(unittest.TestCase):
             self.git("add", "-f", "client/dist/index.html")
             status, output = self.up(PREVIEW_PACK_DIR="client/dist")
             self.assertEqual(status, 1, output)
-            self.assertIn("is not ignored by git", output.strip().splitlines()[-1])
+            self.assertIn("does not ignore PREVIEW_PACK_DIR", output.strip().splitlines()[-1])
             self.assertEqual(self.calls(), [])
             self.git("rm", "-q", "--cached", "client/dist/index.html")
 
@@ -1257,6 +1269,20 @@ class PreviewExampleTests(unittest.TestCase):
         status, output = self.up(tool=following, PREVIEW_PACK_DIR="client/linked")
         self.assertEqual(status, 0, "with links followed the directory behind one was still refused: " + output)
         self.assertIn("index.html", self.handed_over()[0])
+
+    def test_one_trailing_slash_names_the_same_pack_dir(self):
+        self.ignored_dist()
+        status, output = self.up(PREVIEW_PACK_DIR="client/dist")
+        self.assertEqual(status, 0, output)
+        first = self.applied_deployments()[-1]["spec"]["template"]["metadata"]["annotations"]["preview-change"]
+        members, _ = self.handed_over()
+        status, output = self.up(PREVIEW_PACK_DIR="client/dist/")
+        self.assertEqual(status, 0, output)
+        self.assertIn("the same change is running already", output)
+        self.assertEqual(len(self.streams()), 1, "client/dist/ was taken for another directory")
+        self.assertEqual(first, self.applied_deployments()[-1]["spec"]["template"]["metadata"]["annotations"]
+                         ["preview-change"])
+        self.assertEqual(sorted(members), ["alias.html", "assets/app.js", "index.html", "outdir", "secret"])
 
     def test_the_same_pack_dir_gives_the_same_identifier(self):
         dist = self.ignored_dist()

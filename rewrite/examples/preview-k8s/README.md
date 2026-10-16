@@ -301,7 +301,7 @@ Set in the role's `env`. The engine reads none of them.
 | `PREVIEW_INSTALL` | `npm ci` | no | A dependency step, run with `sh -c` in the checkout before the application. Only during this step can the Pod reach public addresses. |
 | `PREVIEW_INSTALL_SECONDS` | `240` | no (`240`) | The step's time limit: digits only, 1 to 480, and, when `PREVIEW_INSTALL` is set, at most `PREVIEW_WAIT_SECONDS` − 180 (see Time above). Anything else ends `up` before the cluster is called. |
 | `PREVIEW_ENV_FILE` | `.env.preview` | no | A file in the checkout, relative to it, of `KEY=VALUE` lines for the application's environment. No secrets: the file is in the branch. At most 64 KiB; a line that is not `KEY=VALUE` (blank lines and `#` lines aside) ends `up`. `PORT` is always the script's. |
-| `PREVIEW_PACK_DIR` | `web/dist` | no | A directory of the checkout, relative to it, that git ignores, such as the output a build of the verification stage left there. With it, `up` carries only what is inside it, with the directory as the root (`web/dist/index.html` is `/src/index.html` in the Pod), instead of the checkout's tracked and untracked files. `up` ends 1 before the cluster is called when the value starts with `/` or has an empty, `.` or `..` part; when the directory, or a directory on its way, is a symbolic link or missing; when git does not ignore it (git does not count a directory with a tracked file in it as ignored); when it holds no file; and when it holds more than 1 GiB. A link inside is carried as a link. The same contents give the same change identifier, so the same build again only extends the lifetime. |
+| `PREVIEW_PACK_DIR` | `web/dist` | no | A directory of the checkout, relative to it, that git ignores, such as the output a build of the verification stage left there. With it, `up` carries only what is inside it, with the directory as the root (`web/dist/index.html` is `/src/index.html` in the Pod), instead of the checkout's tracked and untracked files. The directory itself has to be ignored, as `dist` or `dist/` in a `.gitignore` ignores it: `dist/*` ignores only what is inside, and git does not count a directory with a tracked file in it as ignored either. One trailing `/` is allowed. `up` ends 1 before the cluster is called when the value starts with `/` or has a doubled `/` or a `.` or `..` part; when the directory, or a directory on its way, is a symbolic link or missing; when git does not ignore the directory itself; when it holds no file or link; and when it holds more than 1 GiB. A link inside is carried as a link. The same contents give the same change identifier, so the same build again only extends the lifetime. |
 | `PREVIEW_WAIT_SECONDS` | `420` | no (420 for up, 60 for down) | How long to wait for the Pod to be ready (up) or for the objects to be gone (down): 1 to 3600. With `PREVIEW_INSTALL`, at least `PREVIEW_INSTALL_SECONDS` + 180. Above 1800 the cleanup, which removes a Deployment that has had no ready Pod for 30 minutes, may remove the preview while `up` still waits. |
 | `PREVIEW_DOMAIN` | `preview.example.invalid` | yes (up) | The domain under which every preview gets one label: `sample-12.preview.example.invalid`. The same for every installation using the router. |
 | `PREVIEW_NAMESPACE` | `preview-apps` | yes | The preview namespace. |
@@ -329,12 +329,13 @@ hash, so two long request numbers never share a preview.
 
 What the command does with them:
 
-- Before anything else it removes every name listed in
-  `TASK_CREDENTIAL_NAMES` (and these three, listed or not) from its
-  environment, writes the values into a pipe and starts itself again
+- Before anything else `up` and `down` remove every name listed in
+  `TASK_CREDENTIAL_NAMES` (and these three, listed or not) from their
+  environment, write the values into a pipe and start the program again
   without them, reading them from the pipe. `/proc/self/environ` shows the
   environment a program started with, so removing a value is not enough;
-  after the restart the running program's environment holds none.
+  after the restart the running program's environment holds none. `origin`
+  reads no credential and does none of this.
 - git and kubectl start with `PATH`, `LANG` and a temporary `HOME` only;
   kubectl also gets `KUBECONFIG`.
 - The kubeconfig is written with mode 0600 into a new directory under the
@@ -405,7 +406,7 @@ standard error and nothing on standard output.
 | --- | --- |
 | 0 | `up`: the preview answers on its public address and `TASK_PREVIEW` is written. `down`: neither the Deployment nor the Service of the request is left, also when there was none. `origin`: the origin is printed. |
 | 1 | Anything else. The last line of the output is the reason, with the cluster's own message where it gave one (a policy refusal names the policy). `TASK_PREVIEW` is not written. |
-| 2 | A wrong command line. The engine never starts it so with this configuration. Also `origin` without one of its settings. |
+| 2 | A wrong command line. The engine never starts it so with this configuration. Also `origin` without one of its settings, or with a wrong one. |
 
 After a failure nothing is removed, except a Deployment whose Pod's last
 rules container (`net`) had not ended with status 0 when the wait ended, for
