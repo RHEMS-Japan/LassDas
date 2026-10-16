@@ -400,114 +400,6 @@ address stops opening at the preview's end.
   `Domain` of every `Set-Cookie` to the host and drops one of its own name or
   with a `Domain` that still names something else.
 
-## Relaying an API
-
-A preview whose page reads data from an API (the development environment of
-the same product, say) cannot reach it itself: the preview's Pod has no
-egress while it runs, and the API needs a key the preview's code must never
-hold. The router can relay that API instead. A request of the preview's page
-to a path under one prefix is sent by the router to a Service of the
-cluster, with a key only the router holds, and only when it reads.
-
-- **Which previews:** those whose label (the preview's name, `-`, and the
-  issue key in lowercase) matches `<relay-label-pattern>` whole. Write the
-  name and the form of the key, `sample-example-[0-9]+` for the name
-  `sample` and keys like `EXAMPLE-12`. A pattern that only starts with the
-  name would also relay another installation whose name starts the same
-  (`sample-stg-example-12`).
-- **Which paths:** those under `<relay-path-prefix>`. Every other path of
-  these previews goes to the preview as before.
-- **Only GET and HEAD of an allowed path.** Each allowed path is one line,
-  `<relay-allowed-path>`, a regular expression of the whole path
-  (`/api/items/[0-9]+`). Every other method is refused, and so is every GET
-  not on the list.
-- **Refused first.** Each refused path is one line, `<relay-refused-path>`, a
-  regular expression of the start of the path (`/api/account/keys(/|$)`).
-  They are checked before the allowed ones, so a path on both lists is
-  refused. Put there every path that answers with a credential and every GET
-  that changes something, even when nobody would allow it: the allowed list
-  is the guard, and this is the guard behind it.
-- **Characters.** A path with a character other than `A-Z a-z 0-9 / . _ ~ -`
-  after nginx decoded it is refused before both lists: it would have to be
-  encoded again to be sent.
-- **The query:** an allowed path is relayed with no query, or with the one
-  form listed for it, `<relay-allowed-query>` on a line of its own beside the
-  path. Write each name once, in a fixed order, with values from a set
-  without `%`: then a repeated name, a name or value written with `%`, a
-  name not listed, and another value of a fixed one are all refused. Any
-  other query is refused.
-- **The path decided on is the path sent.** nginx decodes and normalizes the
-  path first (`/../`, `%2F`); the lists are checked on that path, and that
-  path is what the API receives, with the query as it came. The relay keeps
-  the path in `$relay_path` before it moves the request to its own location,
-  because after the move `$uri` is that location's name and every allowed
-  path would be refused.
-- **What the API receives:** the request with `<relay-header>` set to the
-  key and `Host` the Service's name. `Authorization` (the shared password),
-  `Cookie` (the router's and the page's) and each `<relay-cleared-header>`
-  are sent empty. Every header is set in the relay's location: nginx carries
-  none of the location `/`'s over once one is set there.
-- **What the page receives:** the API's answer as it is, status and body,
-  without `Set-Cookie`.
-- **Refusals** are 403 with `Content-Type: application/json` and a fixed
-  sentence: `{"error":"確認用の画面では保存できません"}` for another method,
-  `{"error":"確認用の画面では使えない操作です"}` for a path or a query not
-  allowed, `{"error":"この画面は課題に投稿された URL から開いてください"}`
-  without the signed URL's cookie. When the API does not answer, or the
-  router has no key, 503 with `{"error":"API に届きません"}`. Never the
-  router's HTML pages. A refused path can carry a sentence of its own on its
-  line (a login path, say); keep sentences free of `"` and `\`.
-- **The page's own requests:** every answer for these previews carries
-  `Content-Security-Policy: connect-src 'self'`. The preview's code can send
-  what it reads through the relay to its own origin only, by fetch, XHR or
-  WebSocket.
-
-The values go into the relay's lines of the router's `nginx.conf` (the
-blocks between `relay: begin` and `relay: end` in
-[router.yaml.example](router.yaml.example)), one line for each path. The key
-goes into the Secret `preview-relay` (key `key`), which the router reads as
-`PREVIEW_RELAY_KEY` when it starts: it never reaches a preview's Pod, the
-engine or the browser. The Service has to answer on port 80, the only port
-the router's egress allows in the Service range. To relay the API of a
-second name, copy every block between the markers and give the copy's
-variables, location and key other names.
-
-The example the tests run, as its lines read once filled in:
-
-```nginx
-map $preview_label $relay_label { default 0; "~^(?:sample-example-[0-9]+)$" 1; }
-map "$relay_label:$relay_path" $relay_on { default 0; "~^1:/api/" 1; }
-map "$request_method:$relay_path" $relay_refusal {
-  "~^(GET|HEAD):.*[^A-Za-z0-9/._~-]" "確認用の画面では使えない操作です";
-  "~^(GET|HEAD):/api/account/keys(/|$)" "確認用の画面では使えない操作です";
-  "~^(GET|HEAD):/api/items/[0-9]+/export$" "確認用の画面では使えない操作です";
-  "~^(GET|HEAD):/api/items$" "";
-  "~^(GET|HEAD):/api/items/[0-9]+$" "";
-  "~^(GET|HEAD):/api/projects/[0-9]+/items$" "";
-  "~^(GET|HEAD):" "確認用の画面では使えない操作です";
-  default "確認用の画面では保存できません";
-}
-map "$relay_path?$args" $relay_args_refusal {
-  "~^[^?]*\?$" "";
-  "~^/api/projects/[0-9]+/items[?]owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?$" "";
-  default "確認用の画面では使えない操作です";
-}
-```
-
-with `proxy_pass http://api.example-dev.svc.cluster.local$relay_uri;`,
-`proxy_set_header X-Act-As "";` and `proxy_set_header X-Example-Key
-$relay_key;` in the relay's location.
-
-**Checked:** `harnesses/test_preview_k8s_manifests.py` reads the relay's
-blocks as text everywhere, and runs the router's whole configuration with
-this example filled in on an nginx with the njs and auth_request modules
-(`PREVIEW_NGINX`), skipping that where none is named. It sends real requests
-to stand-ins for the API and the Pod: the cases above, the labels that are
-and are not relayed, the headers the API receives, and controls that show
-each check sees the relay's pieces taken out. That run was nginx 1.28.0 with
-njs 1.0.1 on macOS; the router's image and the real Service are checked on
-the cluster (see [Checking a running preview](#checking-a-running-preview)).
-
 ## Exit status and output
 
 | Status | When |
@@ -732,6 +624,114 @@ another namespace no. It exits 0 when every check came out as expected.
 Every one of these came out as expected on a local kube-apiserver v1.36.0
 with this directory's manifests applied. That is not the cluster the
 previews will run on: run it there after applying.
+
+## Relaying an API
+
+A preview whose page reads data from an API (the development environment of
+the same product, say) cannot reach it itself: the preview's Pod has no
+egress while it runs, and the API needs a key the preview's code must never
+hold. The router can relay that API instead. A request of the preview's page
+to a path under one prefix is sent by the router to a Service of the
+cluster, with a key only the router holds, and only when it reads.
+
+- **Which previews:** those whose label (the preview's name, `-`, and the
+  issue key in lowercase) matches `<relay-label-pattern>` whole. Write the
+  name and the form of the key, `sample-example-[0-9]+` for the name
+  `sample` and keys like `EXAMPLE-12`. A pattern that only starts with the
+  name would also relay another installation whose name starts the same
+  (`sample-stg-example-12`).
+- **Which paths:** those under `<relay-path-prefix>`. Every other path of
+  these previews goes to the preview as before.
+- **Only GET and HEAD of an allowed path.** Each allowed path is one line,
+  `<relay-allowed-path>`, a regular expression of the whole path
+  (`/api/items/[0-9]+`). Every other method is refused, and so is every GET
+  not on the list.
+- **Refused first.** Each refused path is one line, `<relay-refused-path>`, a
+  regular expression of the start of the path (`/api/account/keys(/|$)`).
+  They are checked before the allowed ones, so a path on both lists is
+  refused. Put there every path that answers with a credential and every GET
+  that changes something, even when nobody would allow it: the allowed list
+  is the guard, and this is the guard behind it.
+- **Characters.** A path with a character other than `A-Z a-z 0-9 / . _ ~ -`
+  after nginx decoded it is refused before both lists: it would have to be
+  encoded again to be sent.
+- **The query:** an allowed path is relayed with no query, or with the one
+  form listed for it, `<relay-allowed-query>` on a line of its own beside the
+  path. Write each name once, in a fixed order, with values from a set
+  without `%`: then a repeated name, a name or value written with `%`, a
+  name not listed, and another value of a fixed one are all refused. Any
+  other query is refused.
+- **The path decided on is the path sent.** nginx decodes and normalizes the
+  path first (`/../`, `%2F`); the lists are checked on that path, and that
+  path is what the API receives, with the query as it came. The relay keeps
+  the path in `$relay_path` before it moves the request to its own location,
+  because after the move `$uri` is that location's name and every allowed
+  path would be refused.
+- **What the API receives:** the request with `<relay-header>` set to the
+  key and `Host` the Service's name. `Authorization` (the shared password),
+  `Cookie` (the router's and the page's) and each `<relay-cleared-header>`
+  are sent empty. Every header is set in the relay's location: nginx carries
+  none of the location `/`'s over once one is set there.
+- **What the page receives:** the API's answer as it is, status and body,
+  without `Set-Cookie`.
+- **Refusals** are 403 with `Content-Type: application/json` and a fixed
+  sentence: `{"error":"確認用の画面では保存できません"}` for another method,
+  `{"error":"確認用の画面では使えない操作です"}` for a path or a query not
+  allowed, `{"error":"この画面は課題に投稿された URL から開いてください"}`
+  without the signed URL's cookie. When the API does not answer, or the
+  router has no key, 503 with `{"error":"API に届きません"}`. Never the
+  router's HTML pages. A refused path can carry a sentence of its own on its
+  line (a login path, say); keep sentences free of `"` and `\`.
+- **The page's own requests:** every answer for these previews carries
+  `Content-Security-Policy: connect-src 'self'`. The preview's code can send
+  what it reads through the relay to its own origin only, by fetch, XHR or
+  WebSocket.
+
+The values go into the relay's lines of the router's `nginx.conf` (the
+blocks between `relay: begin` and `relay: end` in
+[router.yaml.example](router.yaml.example)), one line for each path. The key
+goes into the Secret `preview-relay` (key `key`), which the router reads as
+`PREVIEW_RELAY_KEY` when it starts: it never reaches a preview's Pod, the
+engine or the browser. The Service has to answer on port 80, the only port
+the router's egress allows in the Service range. To relay the API of a
+second name, copy every block between the markers and give the copy's
+variables, location and key other names.
+
+The example the tests run, as its lines read once filled in:
+
+```nginx
+map $preview_label $relay_label { default 0; "~^(?:sample-example-[0-9]+)$" 1; }
+map "$relay_label:$relay_path" $relay_on { default 0; "~^1:/api/" 1; }
+map "$request_method:$relay_path" $relay_refusal {
+  "~^(GET|HEAD):.*[^A-Za-z0-9/._~-]" "確認用の画面では使えない操作です";
+  "~^(GET|HEAD):/api/account/keys(/|$)" "確認用の画面では使えない操作です";
+  "~^(GET|HEAD):/api/items/[0-9]+/export$" "確認用の画面では使えない操作です";
+  "~^(GET|HEAD):/api/items$" "";
+  "~^(GET|HEAD):/api/items/[0-9]+$" "";
+  "~^(GET|HEAD):/api/projects/[0-9]+/items$" "";
+  "~^(GET|HEAD):" "確認用の画面では使えない操作です";
+  default "確認用の画面では保存できません";
+}
+map "$relay_path?$args" $relay_args_refusal {
+  "~^[^?]*\?$" "";
+  "~^/api/projects/[0-9]+/items[?]owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?$" "";
+  default "確認用の画面では使えない操作です";
+}
+```
+
+with `proxy_pass http://api.example-dev.svc.cluster.local$relay_uri;`,
+`proxy_set_header X-Act-As "";` and `proxy_set_header X-Example-Key
+$relay_key;` in the relay's location.
+
+**Checked:** `harnesses/test_preview_k8s_manifests.py` reads the relay's
+blocks as text everywhere, and runs the router's whole configuration with
+this example filled in on an nginx with the njs and auth_request modules
+(`PREVIEW_NGINX`), skipping that where none is named. It sends real requests
+to stand-ins for the API and the Pod: the cases above, the labels that are
+and are not relayed, the headers the API receives, and controls that show
+each check sees the relay's pieces taken out. That run was nginx 1.28.0 with
+njs 1.0.1 on macOS; the router's image and the real Service are checked on
+the cluster (see [Checking a running preview](#checking-a-running-preview)).
 
 ## Checking a running preview
 
