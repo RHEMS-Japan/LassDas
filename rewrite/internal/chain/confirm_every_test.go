@@ -247,9 +247,10 @@ func TestAlwaysAskCountsAReplyForTheStageWhoseQuestionItAnswered(t *testing.T) {
 
 // A stage after the one that asks, run after the requester's reply, also has
 // the change asked about again: a delivery whose failure returns the work to
-// the asking stage itself leaves a change the reply was not about. The shape
-// the shipped examples use, a failure sent back to the first stage, does the
-// same through the first stage.
+// the asking stage itself leaves a change the reply was not about. The check
+// refuses that shape before work is accepted (below); the count holds as well,
+// should a record ever take it. The shape the shipped examples use, a failure
+// sent back to the first stage, does the same through the first stage.
 func TestAlwaysAskAsksAgainAfterALaterStageRanSinceTheReply(t *testing.T) {
 	model := func(name string) Stage { return Stage{Name: name, Kind: ModelStage} }
 	ran := func(role string) Result { return Result{Role: role, Speaker: "worker", Output: "done"} }
@@ -267,8 +268,8 @@ func TestAlwaysAskAsksAgainAfterALaterStageRanSinceTheReply(t *testing.T) {
 		t.Run(shape.name, func(t *testing.T) {
 			flow := &Workflow{Question: "ask", Stages: []Stage{model("e"), model("w"),
 				{Name: "c", Kind: ModelStage, Confirm: true, AlwaysAsk: true}, {Name: "d", Kind: CommandStage, OnFailure: shape.onFailure}}}
-			if err := flow.validateStages(map[string]string{"e": "", "w": "", "c": "", "d": "", "ask": ""}); err != nil {
-				t.Fatal(err)
+			if err := flow.validateStages(map[string]string{"e": "", "w": "", "c": "", "d": "", "ask": ""}); (err == nil) != (shape.onFailure == "e") {
+				t.Fatalf("the check of the shape: %v", err)
 			}
 			state := State{Request: "r", Workflow: flow, History: shape.history}
 			if actions := state.stageActions(); !slices.Equal(actions, []string{"e", "ask"}) {
@@ -366,7 +367,13 @@ func TestAlwaysAskRefusesAModelStageRightAfterIt(t *testing.T) {
 			}
 		})
 	}
-	// The shipped examples with the setting turned on.
+	shippedExamplesAcceptAlwaysAsk(t)
+}
+
+// shippedExamplesAcceptAlwaysAsk checks the two shipped ordered runs with
+// always_ask turned on at their stage that confirms the change.
+func shippedExamplesAcceptAlwaysAsk(t *testing.T) {
+	t.Helper()
 	for _, file := range []string{"operator-stages.json", "operator-github-stages.json"} {
 		t.Run(file, func(t *testing.T) {
 			raw, err := os.ReadFile(filepath.Join("..", "..", "examples", file))
@@ -404,6 +411,45 @@ func TestAlwaysAskRefusesAModelStageRightAfterIt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The delivery right after a stage that asks about every change sends its
+// failure back to a stage before that one. A failure sent to a later model
+// stage, such as the report, would run that stage and then deliver what it
+// changed with nothing asking about it; one sent to the asking stage itself
+// leaves the same gap for the count to close. Both are refused, naming the
+// stages. A failure sent to a stage before it, the shipped examples, and the
+// refused shape without the setting are accepted.
+func TestAlwaysAskRefusesADeliveryFailingPastIt(t *testing.T) {
+	model := func(name string) Stage { return Stage{Name: name, Kind: ModelStage} }
+	confirm := func(always bool) Stage { return Stage{Name: "c", Kind: ModelStage, Confirm: true, AlwaysAsk: always} }
+	command := func(name, onFailure string) Stage { return Stage{Name: name, Kind: CommandStage, OnFailure: onFailure} }
+	roles := map[string]string{"e": "", "w": "", "c": "", "d": "", "r": "", "k": "", "ask": ""}
+	for _, shape := range []struct {
+		name    string
+		stages  []Stage
+		refused string
+	}{
+		{"failure-to-a-later-model-stage", []Stage{model("e"), model("w"), confirm(true), command("d", "r"), model("r"), command("k", "r")}, `"r"`},
+		{"failure-to-the-asking-stage", []Stage{model("e"), model("w"), confirm(true), command("d", "c")}, `"c"`},
+		{"failure-to-a-stage-before-it", []Stage{model("e"), model("w"), confirm(true), command("d", "w"), model("r"), command("k", "r")}, ""},
+		{"failure-to-a-later-model-stage-without-the-setting", []Stage{model("e"), model("w"), confirm(false), command("d", "r"), model("r"), command("k", "r")}, ""},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			err := (&Workflow{Question: "ask", Stages: shape.stages}).validateStages(roles)
+			if shape.refused == "" {
+				if err != nil {
+					t.Fatalf("the run was refused: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), `stage "c"`) || !strings.Contains(err.Error(), `stage "d"`) ||
+				!strings.Contains(err.Error(), shape.refused) || !strings.Contains(err.Error(), "on_failure") {
+				t.Fatalf("the delivery failing past the stage that asks about every change was not refused by name: %v", err)
+			}
+		})
+	}
+	shippedExamplesAcceptAlwaysAsk(t)
 }
 
 // A question that posted nothing, or whose launch failed, still holds the

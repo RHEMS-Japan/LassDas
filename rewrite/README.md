@@ -1320,9 +1320,10 @@ has run since that reply. It applies to the change the stages before it
 made, so the stage right after it must not be a model stage, which could
 change the checkout between the reply and the delivery; such a run is refused
 before work is accepted, naming both stages. Put the delivery right after it,
-and send a failure of the delivery back to a stage before it. A stage after
-it that runs after the reply all the same, such as a delivery whose
-`on_failure` names this stage, has the change asked about again. A model
+and send a failure of the delivery back to a stage before it; a delivery
+right after it whose `on_failure` names this stage or a later one is refused
+the same way. A stage after it that runs after the reply all the same has the
+change asked about again. A model
 stage after a command stage that follows it is not refused: one that changes
 what is delivered there would go unasked, so keep such stages after the
 delivery, as the shipped examples keep their report. Until then the decision is offered the first stage and the

@@ -639,6 +639,14 @@ func (w *Workflow) validateStages(roles map[string]string) error {
 		if stage.AlwaysAsk && index+1 < len(w.Stages) && w.Stages[index+1].Kind == ModelStage {
 			return fmt.Errorf("stage %q has always_ask, but stage %q right after it is a model stage: what it changed after the requester's reply would be delivered without being asked about; put a command stage, such as the delivery, right after it", stage.Name, w.Stages[index+1].Name)
 		}
+		// The same holds for the stage the delivery right after it sends a
+		// failure to: only a stage before this one has its change asked about.
+		if stage.AlwaysAsk && index+1 < len(w.Stages) && w.Stages[index+1].Kind == CommandStage {
+			after := w.Stages[index+1]
+			if _, at := stageAt(w.Stages, after.OnFailure); at >= index {
+				return fmt.Errorf("stage %q has always_ask, but stage %q right after it sends a failure (on_failure) to stage %q, which is not before it: what that stage changed would be delivered without being asked about; name a stage before %q in on_failure", stage.Name, after.Name, after.OnFailure, stage.Name)
+			}
+		}
 	}
 	if w.ConfirmationReworkLimit != 0 && !confirms {
 		return errors.New("workflow.confirmation_rework_limit needs a stage marked confirm")
