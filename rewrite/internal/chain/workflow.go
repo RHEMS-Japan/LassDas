@@ -295,7 +295,12 @@ func (s State) launchLimitNotes() []Result {
 		note := fmt.Sprintf("%s reached the entrance rework limit after %d repeats; this choice stays unavailable until a new requester reply. Choose among the remaining actions without weakening the original requirements.", role, s.entranceReworks())
 		if s.confirmationDecision() {
 			limit = "confirmation rework limit"
-			note = fmt.Sprintf("%s reached the confirmation rework limit after %d returns from the stage that confirms the change; after that stage this choice stays unavailable until a new requester reply. Ask the requester or go on to the next stage, without weakening the original requirements.", role, s.confirmationReworks())
+			next := "Ask the requester or go on to the next stage"
+			if s.awaitingReplyAboutChange() {
+				// The next stage waits for the requester's reply about this change.
+				next = "Ask the requester"
+			}
+			note = fmt.Sprintf("%s reached the confirmation rework limit after %d returns from the stage that confirms the change; after that stage this choice stays unavailable until a new requester reply. %s, without weakening the original requirements.", role, s.confirmationReworks(), next)
 		}
 		for i := len(s.History) - 1; i >= 0; i-- {
 			result := s.History[i]

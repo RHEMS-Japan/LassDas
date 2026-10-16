@@ -284,7 +284,8 @@ next stage, never done. `workflow.entrance_rework_limit` bounds how often the
 first stage can be chosen again straight away, twice unless it is set, and
 `workflow.confirmation_rework_limit` how often it can be chosen after a stage
 marked `confirm`, also twice; a new answer from the requester starts both
-counts over.
+counts over. With `always_ask` on a stage marked `confirm`, the next stage is
+not offered after it until the requester has answered about the change.
 
 - Used in: README.md:82, README.md:1087, START.md:78
 - Avoid: none.

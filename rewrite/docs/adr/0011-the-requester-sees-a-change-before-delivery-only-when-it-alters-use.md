@@ -41,7 +41,11 @@ after the report, when the change has already been merged. Connected routing
 for every stage, which would change how unrelated stages progress for the sake
 of one condition. A classifier that looks for fixed words in a role's text, and
 a separate record of approvals. Asking about every change, against the
-owner's decision that only these three kinds of change go to a person.
+owner's decision that only these three kinds of change go to a person. On
+2026-10-16 asking about every change was added as a setting that is off
+unless an installation turns it on (`always_ask` on the stage marked
+`confirm`), for an owner who decides that every change goes to a person;
+without it this decision stands as written.
 Counting a confirmation question that posted nothing toward the existing
 no-post limit and going on: that would deliver without the requester's words.
 Launching the question role again up to a separate limit before waiting: one
