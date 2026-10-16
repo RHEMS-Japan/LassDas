@@ -88,9 +88,25 @@ jobs:
           cache: false
       - name: Say which Go the Python harnesses use
         run: go version
+      # The preview router's tests run its nginx configuration and its njs
+      # script on 127.0.0.1 (test_preview_k8s_manifests.py); without these
+      # programs they are skipped. Ubuntu's packages put the njs module in
+      # /usr/lib/nginx/modules, and the router's configuration loads it from
+      # /etc/nginx/modules, where nginx.org's images keep it.
+      - name: Install nginx and njs for the preview router's tests
+        if: matrix.group == 'remaining'
+        working-directory: .
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends nginx libnginx-mod-http-js njs
+          if [ ! -e /etc/nginx/modules ]; then sudo ln -s /usr/lib/nginx/modules /etc/nginx/modules; fi
+          dpkg-query -W -f '${Package} ${Version}\n' nginx libnginx-mod-http-js njs
+          ls -l /etc/nginx/modules/ngx_http_js_module.so
+          /usr/sbin/nginx -V 2>&1 | tr ' ' '\n' | grep -E '^nginx/|auth_request'
       - name: Test the selected Python harness group
         env:
           HARNESS_GROUP: ${{ matrix.group }}
+          PREVIEW_NGINX: ${{ matrix.group == 'remaining' && '/usr/sbin/nginx' || '' }}
         run: bash ../.github/scripts/test-harness-group.sh "$HARNESS_GROUP"
 
   # Preserve the existing required result: Go and both Python groups must pass.

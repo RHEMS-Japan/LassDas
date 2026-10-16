@@ -48,6 +48,32 @@ class CIPartitionTests(unittest.TestCase):
                         self.assertEqual(result.returncode == 0, not failure, result.stderr)
                         self.assertEqual(sorted(log.read_text().splitlines()), names)
 
+    def test_skipped_tests_are_counted_by_reason(self):
+        with tempfile.TemporaryDirectory(prefix="ci-skips-") as temporary:
+            root = Path(temporary)
+            script, harnesses = self.fixture(root)
+            (harnesses / "test_needs_tools.py").write_text(textwrap.dedent("""\
+                import unittest
+                class Needs(unittest.TestCase):
+                    @unittest.skip("no frobnicator is installed")
+                    def test_one(self):
+                        pass
+                    @unittest.skip("no frobnicator is installed")
+                    def test_two(self):
+                        pass
+                    @unittest.skip("only on another platform")
+                    def test_three(self):
+                        pass
+                """))
+            env = dict(os.environ, SELECTION_LOG=str(root / "selection.log"), FAIL_SELECTED="")
+            result = subprocess.run(["bash", str(script), "remaining"], cwd=root, env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("OK (skipped=3)", result.stderr)
+            lines = result.stderr.splitlines()
+            self.assertEqual([line for line in lines if line.startswith("skipped ")],
+                             ["skipped 2: no frobnicator is installed", "skipped 1: only on another platform"])
+
     def test_empty_unknown_or_missing_groups_never_report_success(self):
         with tempfile.TemporaryDirectory(prefix="ci-empty-group-") as temporary:
             root = Path(temporary)
