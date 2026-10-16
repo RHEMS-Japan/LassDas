@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"sort"
@@ -225,7 +226,8 @@ func TestAlwaysAskCountsAReplyForTheStageWhoseQuestionItAnswered(t *testing.T) {
 		{Role: "confirm_change", Speaker: "fixture"}, {Role: "ask_requester", Speaker: "questioner"},
 		{Role: "ask_requester", Speaker: "requester", Output: "このまま納品してください。"},
 		{Role: "confirm_change", Speaker: "fixture"}, {Role: "confirm_again", Speaker: "fixture"}}}
-	if !state.changeAnswered(3) {
+	// At the first stage's own decision, after it read the reply.
+	if first := (State{Request: "r", Workflow: flow, History: state.History[:7]}); !first.changeAnswered(3) {
 		t.Fatal("the reply to the first stage's question was not counted for it")
 	}
 	if state.changeAnswered(4) {
@@ -233,6 +235,94 @@ func TestAlwaysAskCountsAReplyForTheStageWhoseQuestionItAnswered(t *testing.T) {
 	}
 	if actions := state.stageActions(); slices.Contains(actions, "deliver") {
 		t.Fatalf("the second stage's decision was offered the next stage: %v", actions)
+	}
+}
+
+// A stage after the one that asks, run after the requester's reply, also has
+// the change asked about again: a delivery whose failure returns the work to
+// the asking stage itself leaves a change the reply was not about. The shape
+// the shipped examples use, a failure sent back to the first stage, does the
+// same through the first stage.
+func TestAlwaysAskAsksAgainAfterALaterStageRanSinceTheReply(t *testing.T) {
+	model := func(name string) Stage { return Stage{Name: name, Kind: ModelStage} }
+	ran := func(role string) Result { return Result{Role: role, Speaker: "worker", Output: "done"} }
+	failed := func(role string) Result { return Result{Role: role, Speaker: "worker", Error: "exit status 1"} }
+	asked := Result{Role: "ask", Speaker: "questioner", Output: "asked"}
+	accepted := Result{Role: "ask", Speaker: "requester", Output: "deliver it"}
+	for _, shape := range []struct {
+		name      string
+		onFailure string
+		history   []Result
+	}{
+		{"failure-back-to-the-asking-stage", "c", []Result{ran("e"), ran("w"), ran("c"), asked, accepted, ran("c"), failed("d"), ran("c")}},
+		{"failure-back-to-the-first-stage", "e", []Result{ran("e"), ran("w"), ran("c"), asked, accepted, ran("c"), failed("d"), ran("e"), ran("w"), ran("c")}},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			flow := &Workflow{Question: "ask", Stages: []Stage{model("e"), model("w"),
+				{Name: "c", Kind: ModelStage, Confirm: true, AlwaysAsk: true}, {Name: "d", Kind: CommandStage, OnFailure: shape.onFailure}}}
+			if err := flow.validateStages(map[string]string{"e": "", "w": "", "c": "", "d": "", "ask": ""}); err != nil {
+				t.Fatal(err)
+			}
+			state := State{Request: "r", Workflow: flow, History: shape.history}
+			if actions := state.stageActions(); !slices.Equal(actions, []string{"e", "ask"}) {
+				t.Fatalf("after a later stage ran since the reply the decision is offered %v", actions)
+			}
+			// Before the failure the reply let the change go on.
+			before := State{Request: "r", Workflow: flow, History: shape.history[:6]}
+			if actions := before.stageActions(); !slices.Contains(actions, "d") {
+				t.Fatalf("the reply about the change did not offer the delivery: %v", actions)
+			}
+		})
+	}
+}
+
+// When the first stage has reached the confirmation rework limit, the note
+// says what is left: with always_ask and no reply about this change, only the
+// question, since the next stage is not offered either.
+func TestAlwaysAskReworkLimitNoteNamesOnlyTheQuestion(t *testing.T) {
+	cycle := []Result{{Role: "elicit", Speaker: "fixture"}, {Role: "work", Speaker: "fixture"}, {Role: "review", Speaker: "fixture"}, {Role: "confirm_change", Speaker: "fixture"}}
+	var history []Result
+	for i := 0; i < 3; i++ {
+		history = append(history, cycle...)
+	}
+	for _, setting := range []string{"always-ask", "without"} {
+		t.Run(setting, func(t *testing.T) {
+			flow := confirmFlow(t)
+			if setting == "always-ask" {
+				flow = alwaysAskFlow(t)
+			}
+			state := State{Request: "r", Workflow: flow, Step: "confirm_change", History: append([]Result(nil), history...)}
+			notes := state.launchLimitNotes()
+			if len(notes) != 1 || !strings.Contains(notes[0].Output, "confirmation rework limit") {
+				t.Fatalf("no note of the reached limit: %+v (actions %v)", notes, state.stageActions())
+			}
+			nextStage := strings.Contains(notes[0].Output, "go on to the next stage")
+			if setting == "always-ask" && (nextStage || !strings.Contains(notes[0].Output, "Ask the requester, without weakening the original requirements.")) {
+				t.Fatalf("the note offers the next stage, which is not offered: %q", notes[0].Output)
+			}
+			if setting == "without" && !nextStage {
+				t.Fatalf("the note without the setting changed: %q", notes[0].Output)
+			}
+		})
+	}
+}
+
+// The setting is written only where it is on: a run without it saves the same
+// copy of its workflow as before the setting existed.
+func TestAlwaysAskIsLeftOutOfTheCopyWhenItIsOff(t *testing.T) {
+	off, err := json.Marshal(confirmFlow(t).clone())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(off), "always_ask") {
+		t.Fatalf("a workflow without the setting writes it: %s", off)
+	}
+	on, err := json.Marshal(alwaysAskFlow(t).clone())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(on), `"confirm":true,"always_ask":true`) {
+		t.Fatalf("a workflow with the setting does not write it: %s", on)
 	}
 }
 

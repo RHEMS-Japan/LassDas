@@ -1307,16 +1307,20 @@ costs one working-role launch and one decision, for an internal change too.
 Connected workflows have no such stage.
 
 **Asking about every change.** `"always_ask": true` on the stage marked
-`"confirm": true` has the requester see every change before it is delivered,
-whatever it alters:
+`"confirm": true` has the requester see every change the stages before it
+made, whatever it alters, before it is delivered:
 
 ```json
 { "name": "confirm_change", "kind": "model", "confirm": true, "always_ask": true }
 ```
 
 The decision after that stage is then offered the next stage only once the
-requester has replied to a question put right after it, and no stage before
-it has run since that reply. Until then it is offered the first stage and the
+requester has replied to a question put right after it, and no other stage
+has run since that reply. It applies to the change the stages before it
+made: put no model stage after it, and send a failure after it back to a
+stage before it. A stage after it that runs after the reply all the same,
+such as a delivery whose `on_failure` names this stage, has the change asked
+about again. Until then the decision is offered the first stage and the
 question role only, and a next stage named all the same is refused by the
 runtime as any choice not offered is. Whether a reply accepts the change is
 still the decision service's reading: an acceptance lets the change go on, a

@@ -274,12 +274,14 @@ func (s State) stageActions() []string {
 }
 
 // changeAnswered reports that the requester has replied to a question put to
-// them since a stage before the one that confirms the change, at index, last
-// ran: the reply is about the change as it now stands. A question is put
-// after the first stage or after a stage that confirms the change, and the
-// stage that asked runs again on the reply, so a reply to a question put
-// before this stage is always followed by a stage before it. Only records
-// are read, never what any of them says.
+// them since a stage other than the one that confirms the change, at index,
+// last ran: the reply is about the change as it now stands. A stage before it
+// makes or settles the change again, and one after it, such as a delivery
+// whose failure is sent back to this stage, leaves a change the reply was not
+// about. A question is put after the first stage or after a stage that
+// confirms the change, and the stage that asked runs again on the reply, so a
+// reply to another stage's question is always followed by another stage.
+// Only records are read, never what any of them says.
 func (s State) changeAnswered(index int) bool {
 	asked, answered := false, false
 	for _, record := range s.History {
@@ -291,8 +293,7 @@ func (s State) changeAnswered(index int) bool {
 			continue
 		}
 		if _, at := stageAt(s.Workflow.Stages, record.Role); at >= 0 {
-			// A stage before this one makes or settles the change again.
-			if at < index {
+			if at != index {
 				asked, answered = false, false
 			}
 			continue
@@ -300,6 +301,18 @@ func (s State) changeAnswered(index int) bool {
 		asked = asked || record.Role == s.Workflow.Question
 	}
 	return answered
+}
+
+// awaitingReplyAboutChange reports a decision after a stage that asks about
+// every change, before the requester has replied about this change: the next
+// stage is not offered there.
+func (s State) awaitingReplyAboutChange() bool {
+	if !s.confirmationDecision() {
+		return false
+	}
+	runs := s.stageRuns()
+	stage, index := stageAt(s.Workflow.Stages, runs[len(runs)-1].role)
+	return stage.AlwaysAsk && !s.changeAnswered(index)
 }
 
 // asksEveryChange reports that the requester is to see every change: at the
