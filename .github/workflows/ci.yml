@@ -90,19 +90,35 @@ jobs:
         run: go version
       # The preview router's tests run its nginx configuration and its njs
       # script on 127.0.0.1 (test_preview_k8s_manifests.py); without these
-      # programs they are skipped. Ubuntu's packages put the njs module in
-      # /usr/lib/nginx/modules, and the router's configuration loads it from
-      # /etc/nginx/modules, where nginx.org's images keep it.
+      # programs they are skipped. They need nginx.org's packages: Ubuntu's
+      # njs 0.8.2 looks for the router's script only beside nginx.conf, and
+      # its command line has no -m. The runner's own nginx is removed first,
+      # so that nginx.org's package does not stop to ask about Ubuntu's
+      # configuration files. The key file must hold exactly the keys it held
+      # on 2026-10-16: the one nginx.org's instructions name
+      # (nginx.org/en/linux_packages.html) and two newer ones, one of which
+      # signs the noble repository. A changed file stops the step.
       - name: Install nginx and njs for the preview router's tests
         if: matrix.group == 'remaining'
         working-directory: .
         run: |
+          sudo apt-get purge -y -qq nginx nginx-common
+          curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor \
+            | sudo tee /usr/share/keyrings/nginx-archive-keyring.gpg > /dev/null
+          keys=$(gpg --dry-run --quiet --no-keyring --import --import-options import-show --with-colons \
+            /usr/share/keyrings/nginx-archive-keyring.gpg | awk -F: '$1 == "fpr" { print $10 }' | sort | paste -sd ' ' -)
+          echo "keys: $keys"
+          test "$keys" = "573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62 8540A6F18833A80E9C1653A42FD21310B49F6B46 9E9BE90EACBCDE69FE9B204CBCDCD8A38D88A2B3"
+          codename=$(lsb_release -cs)
+          echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/ubuntu $codename nginx" \
+            | sudo tee /etc/apt/sources.list.d/nginx.list
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends nginx libnginx-mod-http-js njs
-          if [ ! -e /etc/nginx/modules ]; then sudo ln -s /usr/lib/nginx/modules /etc/nginx/modules; fi
-          dpkg-query -W -f '${Package} ${Version}\n' nginx libnginx-mod-http-js njs
-          ls -l /etc/nginx/modules/ngx_http_js_module.so
+          sudo apt-get install -y -qq --no-install-recommends -o Dpkg::Options::=--force-confnew \
+            "nginx=1.30.6-1~$codename" "nginx-module-njs=1.30.6+1.0.2-1~$codename"
+          dpkg-query -W -f '${Package} ${Version}\n' nginx nginx-module-njs
+          ls -l /etc/nginx/modules/ngx_http_js_module.so /usr/bin/njs
           /usr/sbin/nginx -V 2>&1 | tr ' ' '\n' | grep -E '^nginx/|auth_request'
+          /usr/bin/njs -v
       - name: Test the selected Python harness group
         env:
           HARNESS_GROUP: ${{ matrix.group }}

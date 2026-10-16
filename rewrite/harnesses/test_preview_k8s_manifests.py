@@ -27,12 +27,13 @@ import time
 import unittest
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "preview-k8s"
-# The njs command line, to run the router's script. CI has none, and those
-# tests are skipped there; the README says how they were run.
+# The njs command line, to run the router's script. CI's remaining group
+# installs nginx.org's (.github/workflows/ci.yml); without one, those tests
+# are skipped. The README says how they were run.
 NJS = os.environ.get("PREVIEW_NJS") or shutil.which("njs")
 # An nginx with the njs and auth_request modules, to run the router's
-# configuration on 127.0.0.1 (PREVIEW_NGINX). CI has none either, and those
-# tests are skipped there; the README says how they were run.
+# configuration on 127.0.0.1 (PREVIEW_NGINX). CI's remaining group installs
+# nginx.org's and names it; without one, those tests are skipped.
 NGINX = os.environ.get("PREVIEW_NGINX")
 # The commands a test starts get the fake's directory and the programs
 # named only, a kubeconfig naming no real server and an empty home (as-8):
