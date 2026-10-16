@@ -237,7 +237,7 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
 | `<relay-label-pattern>` | router, relay | The labels whose API is relayed, as a regular expression of the whole label, for example `sample-example-[0-9]+`. |
 | `<relay-path-prefix>` | router, relay | The paths relayed, as the start of the path, for example `/api/`. |
 | `<relay-allowed-path>` | router, relay | One allowed path, a regular expression of the whole path, for example `/api/items/[0-9]+`. One line for each. |
-| `<relay-allowed-query>` | router, relay | The one query form of an allowed path that takes a query, for example `owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?`. One line for each such path. |
+| `<relay-allowed-query>` | router, relay | A query form of an allowed path, for example `owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?`. One line for each form; a path without one is relayed with no query only. |
 | `<relay-refused-path>` | router, relay | One refused path, a regular expression of the start of the path, for example `/api/account/keys(/\|$)`. One line for each. |
 | `<relay-service>` | router, relay | The API's Service as `<name>.<namespace>`, answering on port 80, for example `api.example-dev`. |
 | `<relay-header>` | router, relay | The header the API reads the key from, for example `X-Example-Key`. |
@@ -655,12 +655,14 @@ cluster, with a key only the router holds, and only when it reads.
 - **Characters.** A path with a character other than `A-Z a-z 0-9 / . _ ~ -`
   after nginx decoded it is refused before both lists: it would have to be
   encoded again to be sent.
-- **The query:** an allowed path is relayed with no query, or with the one
-  form listed for it, `<relay-allowed-query>` on a line of its own beside the
-  path. Write each name once, in a fixed order, with values from a set
-  without `%`: then a repeated name, a name or value written with `%`, a
-  name not listed, and another value of a fixed one are all refused. Any
-  other query is refused.
+- **The query:** an allowed path is relayed with no query, or with one of
+  the forms listed for it, each `<relay-allowed-query>` on a line of its own
+  beside the path. Write each name once, in a fixed order, with values from
+  a set without `%`: then a repeated name, a name or value written with `%`,
+  a name not listed, and another value of a fixed one are all refused. Any
+  other query is refused. The order is the one the page builds its query
+  in: after writing the list, open the page once and check that none of its
+  requests answers 403.
 - **The path decided on is the path sent.** nginx decodes and normalizes the
   path first (`/../`, `%2F`); the lists are checked on that path, and that
   path is what the API receives, with the query as it came. The relay keeps

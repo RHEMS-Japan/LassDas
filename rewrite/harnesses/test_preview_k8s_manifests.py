@@ -664,7 +664,8 @@ RELAY_VALUES = {"relay-label-pattern": "sample-example-[0-9]+", "relay-path-pref
 RELAY_ALLOWED = ("/api/session", "/api/items", "/api/items/[0-9]+", "/api/projects/[0-9]+/items", "/api/status/[0-9]+",
                  "/api/tags/[^/]+")
 RELAY_REFUSED = ("/api/account/keys(/|$)", "/api/items/[0-9]+/export$")
-RELAY_QUERIES = (("/api/projects/[0-9]+/items", "owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?"),)
+RELAY_QUERIES = (("/api/projects/[0-9]+/items", "owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?"),
+                 ("/api/projects/[0-9]+/items", "owner=demo&q=[a-z]{1,20}"))
 RELAY_KEY = "example-relay-key-0123456789"
 REFUSED_SENTENCE = "確認用の画面では使えない操作です"
 SAVING_SENTENCE = "確認用の画面では保存できません"
@@ -1006,6 +1007,9 @@ class RelayNginxTests(unittest.TestCase):
                 ("/api/projects/3/items", "/api/projects/3/items"),
                 ("/api/projects/3/items?owner=demo", "/api/projects/3/items?owner=demo"),
                 ("/api/projects/3/items?owner=demo&page=2&limit=50", "/api/projects/3/items?owner=demo&page=2&limit=50"),
+                ("/api/projects/3/items?owner=demo&q=abc", "/api/projects/3/items?owner=demo&q=abc"),
+                ("/api/projects/3/items?owner=demo&q=abc&page=1", None),
+                ("/api/projects/3/items?owner=demo&q=a%62c", None),
                 ("/api/projects/3/items?owner=other", None),
                 ("/api/projects/3/items?owner=demo&owner=other", None),
                 ("/api/projects/3/items?owner=demo&page=1&page=2", None),
