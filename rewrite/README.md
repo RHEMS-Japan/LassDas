@@ -1306,6 +1306,33 @@ any role is told anything about such a stage. Each pass through the stage
 costs one working-role launch and one decision, for an internal change too.
 Connected workflows have no such stage.
 
+**Asking about every change.** `"always_ask": true` on the stage marked
+`"confirm": true` has the requester see every change before it is delivered,
+whatever it alters:
+
+```json
+{ "name": "confirm_change", "kind": "model", "confirm": true, "always_ask": true }
+```
+
+The decision after that stage is then offered the next stage only once the
+requester has replied to a question put right after it, and no stage before
+it has run since that reply. Until then it is offered the first stage and the
+question role only, and a next stage named all the same is refused by the
+runtime as any choice not offered is. Whether a reply accepts the change is
+still the decision service's reading: an acceptance lets the change go on, a
+correction returns the work to the first stage, and the change made again is
+asked about again. The stage, the question role and the decision service are
+told that every change is shown: the stage is not told to say that no
+confirmation is needed, and the question shows the change whatever it
+alters, pointing to a page to see it when the runtime gives one. A question
+that posted nothing, or whose launch did not exit 0, holds the request for the
+requester as any question after this stage does, so it is not launched over
+and over. The operator's own instructions to these roles are theirs to bring
+in line: the shipped examples tell the stage to write `依頼者の確認: なし`,
+which a run with this setting does not use. `always_ask` on any other stage is
+refused before work is accepted, and a request keeps the stages it was
+accepted with. Without it nothing changes.
+
 The two ordered examples have this stage as `confirm_change`, with
 `workflow.confirmation_rework_limit` set to its default of 2 and
 `intake.question_reminder_minutes` set to 1440, so a question that waits a
