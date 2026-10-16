@@ -15,6 +15,9 @@
 //                  without spaces around "=") names something other than
 //                  this host. nginx's proxy_cookie_domain has rewritten the
 //                  Domain to the host before; this catches what it left.
+//   relayKey       the key the API relay adds (README.md, "Relaying an API"),
+//                  from the environment variable PREVIEW_RELAY_KEY; empty
+//                  when there is none, and the relay then sends nothing.
 // The key is the environment variable PREVIEW_SIGNING_KEY of the nginx
 // process (nginx.conf says "env PREVIEW_SIGNING_KEY;"). Without a key of 32
 // characters or more every token is refused. Nothing here writes a token to
@@ -153,4 +156,8 @@ function filterCookies(r) {
     }
 }
 
-export default {open, check, otherCookies, filterCookies, sign, valid, same};
+function relayKey(r) {
+    return process.env.PREVIEW_RELAY_KEY || '';
+}
+
+export default {open, check, otherCookies, filterCookies, relayKey, sign, valid, same};

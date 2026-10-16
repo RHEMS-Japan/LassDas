@@ -99,8 +99,8 @@ public repository.
 | [namespaces.yaml.example](namespaces.yaml.example) | The preview namespace and the router namespace. |
 | [preview-namespace.yaml.example](preview-namespace.yaml.example) | The quota (five previews, 3 GiB of memory between them), the default limits and the egress rules `preview-egress`. Nothing else is ever put there by a person. |
 | [admission-policy.yaml.example](admission-policy.yaml.example) | The admission policies for Deployments, Pods and Services in the preview namespace, and their bindings. |
-| [router.yaml.example](router.yaml.example) | The router (nginx with the password check and the signed URL's check), its egress rules, its Service and the one Ingress for `*.<preview-domain>`. |
-| [preview-router.js](preview-router.js) | The router's check of the signed URLs, for nginx's njs module (see [The signed URL](#the-signed-url)). |
+| [router.yaml.example](router.yaml.example) | The router (nginx with the password check and the signed URL's check), its egress rules, its Service and the one Ingress for `*.<preview-domain>`; and the relay of an API, for previews whose page reads one (see [Relaying an API](#relaying-an-api)). |
+| [preview-router.js](preview-router.js) | The router's check of the signed URLs, for nginx's njs module (see [The signed URL](#the-signed-url)), and the relay's key. |
 | [access.yaml.example](access.yaml.example) | The ServiceAccount of the preview commands with its token and Role, and the cleanup's ServiceAccount and Role. |
 | [cleanup.yaml.example](cleanup.yaml.example) and [cleanup.sh](cleanup.sh) | The CronJob that removes what is past its lifetime, never got ready, or whose dependency step restarted, every ten minutes. |
 | [dry_run.py](dry_run.py) | The check of the policy, with dry runs only (see [Checking the policy](#checking-the-policy)). |
@@ -164,6 +164,19 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
    kubectl apply -f router.yaml
    ```
 
+   If a preview's page reads an API through the router, fill in the relay
+   (see [Relaying an API](#relaying-an-api)) and put its key in the Secret
+   `preview-relay` before applying the router:
+
+   ```sh
+   kubectl -n <router-namespace> create secret generic preview-relay --from-file=key=relay-key
+   rm relay-key
+   ```
+
+   Otherwise delete every block between `relay: begin` and `relay: end` in
+   the copy of [router.yaml.example](router.yaml.example): what is left is
+   the router without a relay.
+
    The nginx image needs the njs module (loaded from
    `/etc/nginx/modules/ngx_http_js_module.so`) and the auth_request module;
    the official images have both. If the image has njs built in, drop the
@@ -221,6 +234,14 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
 | `<net-image>` | policy, router, `PREVIEW_NET_IMAGE` | The rules image, by digest (`name@sha256:...`). It needs `iptables-restore` and must run on the preview's nodes. |
 | `<nginx-image>` | router | An nginx image that runs as a user other than root (uid 101), by digest. |
 | `<kubectl-image>` | cleanup | An image with kubectl, a POSIX sh, a `date` that reads `-d @SECONDS`, `expr`, `mktemp`, `cut`, `grep` and `rm`, by digest. Without one of them the cleanup ends 1 and removes nothing. |
+| `<relay-label-pattern>` | router, relay | The labels whose API is relayed, as a regular expression of the whole label, for example `sample-example-[0-9]+`. |
+| `<relay-path-prefix>` | router, relay | The paths relayed, as the start of the path, for example `/api/`. |
+| `<relay-allowed-path>` | router, relay | One allowed path, a regular expression of the whole path, for example `/api/items/[0-9]+`. One line for each. |
+| `<relay-allowed-query>` | router, relay | The one query form of an allowed path that takes a query, for example `owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?`. One line for each such path. |
+| `<relay-refused-path>` | router, relay | One refused path, a regular expression of the start of the path, for example `/api/account/keys(/\|$)`. One line for each. |
+| `<relay-service>` | router, relay | The API's Service as `<name>.<namespace>`, answering on port 80, for example `api.example-dev`. |
+| `<relay-header>` | router, relay | The header the API reads the key from, for example `X-Example-Key`. |
+| `<relay-cleared-header>` | router, relay | A header a browser can send that the API acts on (one that changes whom a request acts as, for example `X-Act-As`); the relay sends it empty. One line for each, or delete the line. |
 | `<region>` | step 1 only | The region of the load balancer. |
 | `<api-server>` | `PREVIEW_K8S_SERVER` | The address of the cluster's API server. The engine's Pod has to reach it. |
 
@@ -378,6 +399,114 @@ address stops opening at the preview's end.
   own cookie from the `Cookie` header; in the answer, it rewrites the
   `Domain` of every `Set-Cookie` to the host and drops one of its own name or
   with a `Domain` that still names something else.
+
+## Relaying an API
+
+A preview whose page reads data from an API (the development environment of
+the same product, say) cannot reach it itself: the preview's Pod has no
+egress while it runs, and the API needs a key the preview's code must never
+hold. The router can relay that API instead. A request of the preview's page
+to a path under one prefix is sent by the router to a Service of the
+cluster, with a key only the router holds, and only when it reads.
+
+- **Which previews:** those whose label (the preview's name, `-`, and the
+  issue key in lowercase) matches `<relay-label-pattern>` whole. Write the
+  name and the form of the key, `sample-example-[0-9]+` for the name
+  `sample` and keys like `EXAMPLE-12`. A pattern that only starts with the
+  name would also relay another installation whose name starts the same
+  (`sample-stg-example-12`).
+- **Which paths:** those under `<relay-path-prefix>`. Every other path of
+  these previews goes to the preview as before.
+- **Only GET and HEAD of an allowed path.** Each allowed path is one line,
+  `<relay-allowed-path>`, a regular expression of the whole path
+  (`/api/items/[0-9]+`). Every other method is refused, and so is every GET
+  not on the list.
+- **Refused first.** Each refused path is one line, `<relay-refused-path>`, a
+  regular expression of the start of the path (`/api/account/keys(/|$)`).
+  They are checked before the allowed ones, so a path on both lists is
+  refused. Put there every path that answers with a credential and every GET
+  that changes something, even when nobody would allow it: the allowed list
+  is the guard, and this is the guard behind it.
+- **Characters.** A path with a character other than `A-Z a-z 0-9 / . _ ~ -`
+  after nginx decoded it is refused before both lists: it would have to be
+  encoded again to be sent.
+- **The query:** an allowed path is relayed with no query, or with the one
+  form listed for it, `<relay-allowed-query>` on a line of its own beside the
+  path. Write each name once, in a fixed order, with values from a set
+  without `%`: then a repeated name, a name or value written with `%`, a
+  name not listed, and another value of a fixed one are all refused. Any
+  other query is refused.
+- **The path decided on is the path sent.** nginx decodes and normalizes the
+  path first (`/../`, `%2F`); the lists are checked on that path, and that
+  path is what the API receives, with the query as it came. The relay keeps
+  the path in `$relay_path` before it moves the request to its own location,
+  because after the move `$uri` is that location's name and every allowed
+  path would be refused.
+- **What the API receives:** the request with `<relay-header>` set to the
+  key and `Host` the Service's name. `Authorization` (the shared password),
+  `Cookie` (the router's and the page's) and each `<relay-cleared-header>`
+  are sent empty. Every header is set in the relay's location: nginx carries
+  none of the location `/`'s over once one is set there.
+- **What the page receives:** the API's answer as it is, status and body,
+  without `Set-Cookie`.
+- **Refusals** are 403 with `Content-Type: application/json` and a fixed
+  sentence: `{"error":"確認用の画面では保存できません"}` for another method,
+  `{"error":"確認用の画面では使えない操作です"}` for a path or a query not
+  allowed, `{"error":"この画面は課題に投稿された URL から開いてください"}`
+  without the signed URL's cookie. When the API does not answer, or the
+  router has no key, 503 with `{"error":"API に届きません"}`. Never the
+  router's HTML pages. A refused path can carry a sentence of its own on its
+  line (a login path, say); keep sentences free of `"` and `\`.
+- **The page's own requests:** every answer for these previews carries
+  `Content-Security-Policy: connect-src 'self'`. The preview's code can send
+  what it reads through the relay to its own origin only, by fetch, XHR or
+  WebSocket.
+
+The values go into the relay's lines of the router's `nginx.conf` (the
+blocks between `relay: begin` and `relay: end` in
+[router.yaml.example](router.yaml.example)), one line for each path. The key
+goes into the Secret `preview-relay` (key `key`), which the router reads as
+`PREVIEW_RELAY_KEY` when it starts: it never reaches a preview's Pod, the
+engine or the browser. The Service has to answer on port 80, the only port
+the router's egress allows in the Service range. To relay the API of a
+second name, copy every block between the markers and give the copy's
+variables, location and key other names.
+
+The example the tests run, as its lines read once filled in:
+
+```nginx
+map $preview_label $relay_label { default 0; "~^(?:sample-example-[0-9]+)$" 1; }
+map "$relay_label:$relay_path" $relay_on { default 0; "~^1:/api/" 1; }
+map "$request_method:$relay_path" $relay_refusal {
+  "~^(GET|HEAD):.*[^A-Za-z0-9/._~-]" "確認用の画面では使えない操作です";
+  "~^(GET|HEAD):/api/account/keys(/|$)" "確認用の画面では使えない操作です";
+  "~^(GET|HEAD):/api/items/[0-9]+/export$" "確認用の画面では使えない操作です";
+  "~^(GET|HEAD):/api/items$" "";
+  "~^(GET|HEAD):/api/items/[0-9]+$" "";
+  "~^(GET|HEAD):/api/projects/[0-9]+/items$" "";
+  "~^(GET|HEAD):" "確認用の画面では使えない操作です";
+  default "確認用の画面では保存できません";
+}
+map "$relay_path?$args" $relay_args_refusal {
+  "~^[^?]*\?$" "";
+  "~^/api/projects/[0-9]+/items[?]owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?$" "";
+  default "確認用の画面では使えない操作です";
+}
+```
+
+with `proxy_pass http://api.example-dev.svc.cluster.local$relay_uri;`,
+`proxy_set_header X-Act-As "";` and `proxy_set_header X-Example-Key
+$relay_key;` in the relay's location.
+
+**Checked:** `harnesses/test_preview_k8s_manifests.py` reads the relay's
+blocks as text everywhere, and runs the router's whole configuration with
+this example filled in on an nginx with the njs and auth_request modules
+(`PREVIEW_NGINX`), skipping that where none is named. It sends real requests
+to stand-ins for the API and the Pod: the cases above, the labels that are
+and are not relayed, the headers the API receives, and controls that show
+each check sees the relay's pieces taken out. That run was nginx 1.28.0 with
+njs 1.0.1 on macOS; the router's image and the real Service are checked on
+the cluster (see [Checking a running preview](#checking-a-running-preview)).
 
 ## Exit status and output
 
@@ -623,6 +752,12 @@ preview is up (the name below is an example):
 - **The password never reaches the application.** Bring up a checkout whose
   application answers with the headers it received, open it, and look for
   `Authorization` and `__Host-preview`: neither may be there.
+- **The relay, when there is one.** With the password and a signed URL of a
+  relayed preview, an allowed GET answers 200 with the API's JSON (the router
+  reaches the Service on port 80 and the key works), a refused path and
+  `POST` answer 403 with their JSON sentence, the same path through a preview
+  of another name reaches that preview, and the page's answers carry
+  `Content-Security-Policy: connect-src 'self'`.
 - **No token in the router's log.**
   `kubectl -n <router-namespace> logs deploy/preview-router | grep -c 't='`
   has to print 0 after a signed URL was opened.
@@ -705,6 +840,18 @@ fails its check with 403 and the requester gets the question in words.
   line, with its token, there either; such failures are not logged at all.
 - One password file for every installation the router serves: a requester of
   one installation can open another's previews.
+- The relay refuses before the password is checked: a request without it gets
+  the refusal's sentence for a path not allowed and 401 for an allowed one,
+  and can tell the allowed paths from that. Nothing is sent to the API.
+- The relay takes each query form in its listed order only: a page that
+  sends the same names in another order is refused.
+- The relay acts with its key's rights. Whatever an allowed path reads with
+  it, the preview's code can read too, and `connect-src 'self'` stops only
+  fetch, XHR and WebSocket: an image or a navigation can still carry it
+  elsewhere. Allow only what the page needs, and fix every identifier in an
+  allowed path or query that the API does not check against the key.
+- The API's answers are served from the preview's host as they are: an API
+  that answers with HTML has it shown there.
 - Nothing stops other Pods of the cluster from connecting to a preview: the
   cluster's NetworkPolicy may not be enforced, and a preview holds no
   credential to take.
