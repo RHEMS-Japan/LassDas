@@ -174,6 +174,9 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
    rm relay-key
    ```
 
+   The router starts without that Secret too (its reference is optional);
+   the relay then answers 503 and sends nothing.
+
    Otherwise delete every block between `relay: begin` and `relay: end` in
    the copy of [router.yaml.example](router.yaml.example): what is left is
    the router without a relay.
@@ -239,6 +242,7 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
 | `<relay-path-prefix>` | router, relay | The paths relayed, as the start of the path, for example `/api/`. |
 | `<relay-allowed-path>` | router, relay | One allowed path, a regular expression of the whole path, for example `/api/items/[0-9]+`. One line for each. |
 | `<relay-allowed-query>` | router, relay | A query form of an allowed path, for example `owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?`. One line for each form; a path without one is relayed with no query only. |
+| `<relay-id-query-path>` | router, relay | An allowed path that needs its query (it takes an identifier there), refused without one, for example `/api/projects/[0-9]+/items`. One line for each, above the line that lets an empty query through; or delete the line. |
 | `<relay-refused-path>` | router, relay | One refused path, a regular expression of the start of the path, for example `/api/account/keys(/\|$)`. One line for each. |
 | `<relay-service>` | router, relay | The API's Service as `<name>.<namespace>`, answering on port 80, for example `api.example-dev`. |
 | `<relay-header>` | router, relay | The header the API reads the key from, for example `X-Example-Key`. |
@@ -686,7 +690,12 @@ cluster, with a key only the router holds, and only when it reads.
   a name not listed, and another value of a fixed one are all refused. Any
   other query is refused. The order is the one the page builds its query
   in: after writing the list, open the page once and check that none of its
-  requests answers 403.
+  requests answers 403. A path that takes an identifier in its query is
+  also listed as `<relay-id-query-path>`, and is then refused without a
+  query; these lines stay above the one that lets an empty query through,
+  since the lines are checked from the top. A query with a second `?` is
+  refused first of all, so a path written with `[^/]+`, which takes any
+  character but `/`, cannot take in part of the query.
 - **The path decided on is the path sent.** nginx decodes and normalizes the
   path first (`/../`, `%2F`); the lists are checked on that path, and that
   path is what the API receives, with the query as it came. The relay keeps
@@ -712,6 +721,9 @@ cluster, with a key only the router holds, and only when it reads.
   `Content-Security-Policy: connect-src 'self'`. The preview's code can send
   what it reads through the relay to its own origin only, by fetch, XHR or
   WebSocket.
+
+The router's access log writes a relayed request with the path the relay
+decided on, without its query, and never the key.
 
 The values go into the relay's lines of the router's `nginx.conf` (the
 blocks between `relay: begin` and `relay: end` in
@@ -739,6 +751,8 @@ map "$request_method:$relay_path" $relay_refusal {
   default "確認用の画面では保存できません";
 }
 map "$relay_path?$args" $relay_args_refusal {
+  "~^[^?]*[?][^?]*[?]" "確認用の画面では使えない操作です";
+  "~^/api/projects/[0-9]+/items[?]$" "確認用の画面では使えない操作です";
   "~^[^?]*\?$" "";
   "~^/api/projects/[0-9]+/items[?]owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?$" "";
   default "確認用の画面では使えない操作です";

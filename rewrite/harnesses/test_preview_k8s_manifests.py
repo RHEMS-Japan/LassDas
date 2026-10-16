@@ -199,17 +199,22 @@ class ManifestTests(unittest.TestCase):
     def test_the_router_logs_no_query_and_no_referer(self):
         router = (EXAMPLE / "router.yaml.example").read_text()
         config = router[router.index("  nginx.conf: |"):router.index("  ended.html: |")]
-        formats = re.findall(r"log_format (\S+) ((?:'[^']*'\s*)+);", config)
-        self.assertEqual([name for name, _ in formats], ["preview"])
-        written = formats[0][1]
-        self.assertIn("$uri", written)
-        for variable in ("$request ", "$request\"", "$request_uri", "$args", "$query_string", "$arg_", "$http_referer",
-                         "$http_cookie", "$cookie_"):
-            self.assertNotIn(variable, written)
+        formats = dict(re.findall(r"log_format (\S+) ((?:'[^']*'\s*)+);", config))
+        self.assertEqual(sorted(formats), ["preview", "preview_relay"])
+        self.assertIn("$uri", formats["preview"])
+        self.assertIn("$relay_path", formats["preview_relay"], "the relay's line names the path it decided on")
+        for written in formats.values():
+            for variable in ("$request ", "$request\"", "$request_uri", "$args", "$query_string", "$arg_", "$http_referer",
+                             "$http_cookie", "$cookie_", "$relay_uri", "$relay_key", "$http_authorization"):
+                self.assertNotIn(variable, written)
         logs = re.findall(r"access_log ([^;]+);", config)
         self.assertTrue(logs)
         for line in logs:
-            self.assertTrue(line.strip() == "off" or line.split()[-1] == "preview", line)
+            self.assertTrue(line.strip() == "off" or line.split()[-1] in formats, line)
+        start = config.index("location = /_relay/api {")
+        relay = config[start:config.index("location / {", start)]
+        self.assertEqual(relay.count("access_log /dev/stdout preview_relay;"), 3,
+                         "the relay's location and its two answers write the relay's line")
 
     def test_the_router_drops_the_password_and_makes_no_dns_record(self):
         router = (EXAMPLE / "router.yaml.example").read_text()
@@ -665,7 +670,11 @@ RELAY_ALLOWED = ("/api/session", "/api/items", "/api/items/[0-9]+", "/api/projec
                  "/api/tags/[^/]+")
 RELAY_REFUSED = ("/api/account/keys(/|$)", "/api/items/[0-9]+/export$")
 RELAY_QUERIES = (("/api/projects/[0-9]+/items", "owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?"),
-                 ("/api/projects/[0-9]+/items", "owner=demo&q=[a-z]{1,20}"))
+                 ("/api/projects/[0-9]+/items", "owner=demo&q=[a-z]{1,20}"),
+                 ("/api/tags/[^/]+", "owner=demo"), ("/api/tags/[^/]+", "owner=demo&q=[a-z]{1,20}"))
+# The allowed paths that take an identifier in their query, and so are
+# refused without one.
+RELAY_ID_QUERY_PATHS = ("/api/projects/[0-9]+/items",)
 RELAY_KEY = "example-relay-key-0123456789"
 REFUSED_SENTENCE = "確認用の画面では使えない操作です"
 SAVING_SENTENCE = "確認用の画面では保存できません"
@@ -685,12 +694,15 @@ def without_relay(text):
     return re.sub(r"(?ms)^[ \t]*# relay: begin.*?# relay: end\n", "", text)
 
 
-def fill_relay(config, allowed=RELAY_ALLOWED, refused=RELAY_REFUSED, queries=RELAY_QUERIES, values=None):
+def fill_relay(config, allowed=RELAY_ALLOWED, refused=RELAY_REFUSED, queries=RELAY_QUERIES,
+               id_query_paths=RELAY_ID_QUERY_PATHS, values=None):
     """The relay's placeholders filled: one line for each path and each query."""
     values = dict(RELAY_VALUES, **(values or {}))
     lines = []
     for line in config.splitlines():
-        if "<relay-allowed-query>" in line:
+        if "<relay-id-query-path>" in line:
+            lines += [line.replace("<relay-id-query-path>", path) for path in id_query_paths]
+        elif "<relay-allowed-query>" in line:
             lines += [line.replace("<relay-allowed-path>", path).replace("<relay-allowed-query>", query)
                       for path, query in queries]
         elif "<relay-allowed-path>" in line:
@@ -749,7 +761,9 @@ class RelayTemplateTests(unittest.TestCase):
         self.assertEqual(lines[4], 'default "%s";' % SAVING_SENTENCE)
         query = self.config[self.config.index('map "$relay_path?$args" $relay_args_refusal {'):]
         query = [line.strip() for line in query[:query.index("\n  }\n")].splitlines()[1:]]
-        self.assertEqual(query, ['"~^[^?]*\\?$" "";', '"~^<relay-allowed-path>[?]<relay-allowed-query>$" "";',
+        self.assertEqual(query, ['"~^[^?]*[?][^?]*[?]" "%s";' % REFUSED_SENTENCE,
+                                 '"~^<relay-id-query-path>[?]$" "%s";' % REFUSED_SENTENCE,
+                                 '"~^[^?]*\\?$" "";', '"~^<relay-allowed-path>[?]<relay-allowed-query>$" "";',
                                  'default "%s";' % REFUSED_SENTENCE])
         self.assertIn('"~^(?:<relay-label-pattern>)$" 1;', self.config, "the whole label has to match")
 
@@ -773,7 +787,7 @@ class RelayTemplateTests(unittest.TestCase):
         self.assertIn("env PREVIEW_RELAY_KEY;", self.config)
         self.assertIn("js_set $relay_key preview.relayKey;", self.config)
         self.assertIn("- name: PREVIEW_RELAY_KEY\n              valueFrom:\n"
-                      "                secretKeyRef: { name: preview-relay, key: key }", self.router)
+                      "                secretKeyRef: { name: preview-relay, key: key, optional: true }", self.router)
         script = (EXAMPLE / "preview-router.js").read_text()
         self.assertIn("return process.env.PREVIEW_RELAY_KEY || '';", script)
         preview = (EXAMPLE / "preview.py").read_text()
@@ -882,7 +896,7 @@ class RelayNginxTests(unittest.TestCase):
                 .replace("listen 8080 default_server;", "listen 127.0.0.1:%d default_server;" % port)
                 .replace("listen 8080;", "listen 127.0.0.1:%d;" % port)
                 .replace("/etc/preview-router/", str(base) + "/").replace("/tmp/", str(base / "tmp") + "/")
-                .replace("access_log /dev/stdout preview;", "access_log %s/access.log preview;" % base)
+                .replace("access_log /dev/stdout ", "access_log %s/access.log " % base)
                 .replace("http://pv-$preview_label.preview-apps.svc.cluster.local",
                          "http://127.0.0.1:%d" % self.pod.server_address[1])
                 .replace("http://api.example-dev.svc.cluster.local$relay_uri",
@@ -913,6 +927,10 @@ class RelayNginxTests(unittest.TestCase):
             except OSError:
                 time.sleep(0.05)
         self.port = port
+        self.base = base
+
+    def access_log(self):
+        return (self.base / "access.log").read_text()
 
     def token(self, host):
         end = int(time.time()) + 3600
@@ -956,6 +974,14 @@ class RelayNginxTests(unittest.TestCase):
         self.assertEqual(received.get("x-act-as", ""), "", "the cleared header reached the API")
         self.assertEqual(self.ask("HEAD", "/api/session")[0], 200)
         self.assertEqual(self.pod.received, [], "the relayed paths reached the Pod")
+        self.ask("GET", "/api/projects/3/items?owner=demo&page=2")
+        self.refused(self.ask("GET", "/api/other?owner=demo"), REFUSED_SENTENCE)
+        written = self.access_log()
+        for line in ('"GET /api/items/7 HTTP/1.1" 200', '"HEAD /api/session HTTP/1.1" 200',
+                     '"GET /api/projects/3/items HTTP/1.1" 200', '"GET /api/other HTTP/1.1" 403'):
+            self.assertIn(line, written)
+        for word in ("/_relay/api", "owner=", "page=", RELAY_KEY, self.PASSWORD):
+            self.assertNotIn(word, written)
 
     def test_what_is_not_allowed_is_refused_before_anything_is_sent(self):
         self.start()
@@ -1004,7 +1030,8 @@ class RelayNginxTests(unittest.TestCase):
         self.start()
         # The target sent, or None where the request is refused.
         for target, sent in (
-                ("/api/projects/3/items", "/api/projects/3/items"),
+                ("/api/projects/3/items", None),
+                ("/api/projects/3/items?", None),
                 ("/api/projects/3/items?owner=demo", "/api/projects/3/items?owner=demo"),
                 ("/api/projects/3/items?owner=demo&page=2&limit=50", "/api/projects/3/items?owner=demo&page=2&limit=50"),
                 ("/api/projects/3/items?owner=demo&q=abc", "/api/projects/3/items?owner=demo&q=abc"),
@@ -1020,7 +1047,18 @@ class RelayNginxTests(unittest.TestCase):
                 ("/api/projects/3/items?page=1", None),
                 ("/api/items?page=1", None),
                 ("/api/items?", "/api/items"),
-                ("/api/session?x", None)):
+                ("/api/session?x", None),
+                # [^/]+ at the end of an allowed path takes any character but
+                # "/", the "?" of the query too; a second "?" is refused first.
+                ("/api/tags/3", "/api/tags/3"),
+                ("/api/tags/3?owner=demo", "/api/tags/3?owner=demo"),
+                ("/api/tags/3?owner=demo&q=abc", "/api/tags/3?owner=demo&q=abc"),
+                ("/api/tags/3?owner=other&z=?owner=demo", None),
+                ("/api/tags/3?sort=name?owner=demo", None),
+                ("/api/tags/3?owner=other&z=?owner=demo&q=abc", None),
+                ("/api/tags/3?owner=demo?", None),
+                ("/api/tags/3??owner=demo", None),
+                ("/api/projects/3/items?owner=other&z=?owner=demo", None)):
             with self.subTest(target=target):
                 if sent:
                     code, _, body, _ = self.ask("GET", target)
@@ -1080,6 +1118,20 @@ class RelayNginxTests(unittest.TestCase):
         self.assertIn("この画面は課題に投稿された URL から開いてください", body)
         self.start(config.replace('map "$request_method:$relay_path" $relay_refusal', 'map "$request_method:$uri" $relay_refusal', 1))
         self.refused(self.ask("GET", "/api/items/7"), REFUSED_SENTENCE)
+        # Without the second "?" line, [^/]+ takes in part of the query.
+        second = '    "~^[^?]*[?][^?]*[?]" "%s";\n' % REFUSED_SENTENCE
+        self.assertEqual(config.count(second), 1)
+        self.start(config.replace(second, ""))
+        code, _, body, _ = self.ask("GET", "/api/tags/3?owner=other&z=?owner=demo")
+        self.assertEqual(code, 200, body)
+        self.assertEqual(self.api.received[-1]["target"], "/api/tags/3?owner=other&z=?owner=demo")
+        # A path that needs its query, listed below the line that lets an
+        # empty query through, lets one through.
+        needs = '    "~^/api/projects/[0-9]+/items[?]$" "%s";\n' % REFUSED_SENTENCE
+        empty = '    "~^[^?]*\\?$" "";\n'
+        self.assertEqual((config.count(needs), config.count(empty)), (1, 1))
+        self.start(config.replace(needs, "").replace(empty, empty + needs))
+        self.assertEqual(self.ask("GET", "/api/projects/3/items")[0], 200)
 
 
 if __name__ == "__main__":

@@ -94,15 +94,24 @@ data:
         "~^(GET|HEAD):" "確認用の画面では使えない操作です";
         default "確認用の画面では保存できません";
       }
-      # The query of an allowed path: none, or the one form listed for that
-      # path (each name once, in a fixed order, values without %).
+      # The query of an allowed path: none, or one of the forms listed for
+      # that path (each name once, in a fixed order, values without %).
+      # Checked from the top: a second "?" first, so a path written with
+      # [^/]+ cannot take in part of the query; then the paths that need
+      # their query, which have to stay above the line that lets an empty
+      # query through.
       map "$relay_path?$args" $relay_args_refusal {
+        "~^[^?]*[?][^?]*[?]" "確認用の画面では使えない操作です";
+        "~^<relay-id-query-path>[?]$" "確認用の画面では使えない操作です";
         "~^[^?]*\?$" "";
         "~^<relay-allowed-path>[?]<relay-allowed-query>$" "";
         default "確認用の画面では使えない操作です";
       }
       map $relay_args_refusal $relay_args_message { "" "この画面は課題に投稿された URL から開いてください"; default $relay_args_refusal; }
       map $relay_refusal $relay_message { "" $relay_args_message; default $relay_refusal; }
+      # The relay's log line names the path it decided on, without the query.
+      log_format preview_relay '$remote_addr - $remote_user [$time_local] "$request_method $relay_path $server_protocol" '
+                               '$status $body_bytes_sent "$http_user_agent"';
       # relay: end
 
       # Every other host, and the load balancer's health check (which names
@@ -155,9 +164,10 @@ data:
           proxy_set_header X-Forwarded-Proto https;
           proxy_hide_header Set-Cookie;
           proxy_connect_timeout 5s;
+          access_log /dev/stdout preview_relay;
         }
-        location @relay_refused { default_type application/json; return 403 '{"error":"$relay_message"}'; }
-        location @relay_down { default_type application/json; return 503 '{"error":"API に届きません"}'; }
+        location @relay_refused { access_log /dev/stdout preview_relay; default_type application/json; return 403 '{"error":"$relay_message"}'; }
+        location @relay_down { access_log /dev/stdout preview_relay; default_type application/json; return 503 '{"error":"API に届きません"}'; }
         # relay: end
         location / {
           if ($preview_label = "") { return 404; }
@@ -290,7 +300,7 @@ spec:
             # relay: begin
             - name: PREVIEW_RELAY_KEY
               valueFrom:
-                secretKeyRef: { name: preview-relay, key: key }
+                secretKeyRef: { name: preview-relay, key: key, optional: true }
             # relay: end
           volumeMounts:
             - { name: config, mountPath: /etc/preview-router/conf, readOnly: true }
