@@ -1317,10 +1317,15 @@ made, whatever it alters, before it is delivered:
 The decision after that stage is then offered the next stage only once the
 requester has replied to a question put right after it, and no other stage
 has run since that reply. It applies to the change the stages before it
-made: put no model stage after it, and send a failure after it back to a
-stage before it. A stage after it that runs after the reply all the same,
-such as a delivery whose `on_failure` names this stage, has the change asked
-about again. Until then the decision is offered the first stage and the
+made, so the stage right after it must not be a model stage, which could
+change the checkout between the reply and the delivery; such a run is refused
+before work is accepted, naming both stages. Put the delivery right after it,
+and send a failure of the delivery back to a stage before it. A stage after
+it that runs after the reply all the same, such as a delivery whose
+`on_failure` names this stage, has the change asked about again. A model
+stage after a command stage that follows it is not refused: one that changes
+what is delivered there would go unasked, so keep such stages after the
+delivery, as the shipped examples keep their report. Until then the decision is offered the first stage and the
 question role only, and a next stage named all the same is refused by the
 runtime as any choice not offered is. Whether a reply accepts the change is
 still the decision service's reading: an acceptance lets the change go on, a

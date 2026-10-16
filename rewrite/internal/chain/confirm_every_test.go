@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -215,12 +217,17 @@ func TestAlwaysAskCountsOnlyAReplyToTheQuestionAboutTheChange(t *testing.T) {
 }
 
 // A reply counts for the stage whose question it answered. With two stages
-// that confirm the change one after the other, the reply to the first one's
-// question does not let the second one's decision go on.
+// that confirm the change one after the other, the second asking about every
+// change, the reply to the first one's question does not let the second
+// one's decision go on.
 func TestAlwaysAskCountsAReplyForTheStageWhoseQuestionItAnswered(t *testing.T) {
 	flow := confirmFlow(t)
 	flow.Stages = append(flow.Stages[:4:4], append([]Stage{{Name: "confirm_again", Kind: ModelStage, Confirm: true, AlwaysAsk: true}}, flow.Stages[4:]...)...)
-	flow.Stages[3].AlwaysAsk = true
+	purposes := confirmPurposes()
+	purposes["confirm_again"] = "Read the change again."
+	if err := flow.Validate(purposes); err != nil {
+		t.Fatal(err)
+	}
 	state := State{Request: "r", Workflow: flow, History: []Result{
 		{Role: "elicit", Speaker: "fixture"}, {Role: "work", Speaker: "fixture"}, {Role: "review", Speaker: "fixture"},
 		{Role: "confirm_change", Speaker: "fixture"}, {Role: "ask_requester", Speaker: "questioner"},
@@ -323,6 +330,79 @@ func TestAlwaysAskIsLeftOutOfTheCopyWhenItIsOff(t *testing.T) {
 	}
 	if !strings.Contains(string(on), `"confirm":true,"always_ask":true`) {
 		t.Fatalf("a workflow with the setting does not write it: %s", on)
+	}
+}
+
+// A model stage right after a stage that asks about every change could change
+// the checkout after the requester's reply, and nothing would ask about that:
+// such a run is refused, naming both stages. A command stage right after it,
+// as in the shipped examples, whose later model stage writes the report after
+// the delivery, is accepted, and so is the refused shape without the setting.
+func TestAlwaysAskRefusesAModelStageRightAfterIt(t *testing.T) {
+	model := func(name string) Stage { return Stage{Name: name, Kind: ModelStage} }
+	confirm := func(always bool) Stage { return Stage{Name: "c", Kind: ModelStage, Confirm: true, AlwaysAsk: always} }
+	command := func(name, onFailure string) Stage { return Stage{Name: name, Kind: CommandStage, OnFailure: onFailure} }
+	roles := map[string]string{"e": "", "w": "", "c": "", "m": "", "d": "", "r": "", "k": "", "ask": ""}
+	for _, shape := range []struct {
+		name    string
+		stages  []Stage
+		refused bool
+	}{
+		{"model-stage-right-after", []Stage{model("e"), model("w"), confirm(true), model("m"), command("d", "e")}, true},
+		{"command-stage-right-after", []Stage{model("e"), model("w"), confirm(true), command("d", "e")}, false},
+		{"model-stage-after-the-delivery", []Stage{model("e"), model("w"), confirm(true), command("d", "e"), model("r"), command("k", "r")}, false},
+		{"model-stage-right-after-without-the-setting", []Stage{model("e"), model("w"), confirm(false), model("m"), command("d", "e")}, false},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			err := (&Workflow{Question: "ask", Stages: shape.stages}).validateStages(roles)
+			if !shape.refused {
+				if err != nil {
+					t.Fatalf("the run was refused: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), `stage "c"`) || !strings.Contains(err.Error(), `"m"`) || !strings.Contains(err.Error(), "always_ask") {
+				t.Fatalf("the model stage right after the stage that asks about every change was not refused by name: %v", err)
+			}
+		})
+	}
+	// The shipped examples with the setting turned on.
+	for _, file := range []string{"operator-stages.json", "operator-github-stages.json"} {
+		t.Run(file, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("..", "..", "examples", file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var shipped struct {
+				Workflow Workflow
+				Intake   struct {
+					QuestionRole string `json:"question_role"`
+				}
+				Roles []struct{ Name string }
+			}
+			if err := json.Unmarshal(raw, &shipped); err != nil {
+				t.Fatal(err)
+			}
+			named := map[string]string{}
+			for _, role := range shipped.Roles {
+				named[role.Name] = ""
+			}
+			flow := shipped.Workflow
+			flow.Question = shipped.Intake.QuestionRole
+			turned := 0
+			for i := range flow.Stages {
+				if flow.Stages[i].Confirm {
+					flow.Stages[i].AlwaysAsk = true
+					turned++
+				}
+			}
+			if turned != 1 {
+				t.Fatalf("the example has %d stages that confirm the change", turned)
+			}
+			if err := flow.validateStages(named); err != nil {
+				t.Fatalf("the shipped example with always_ask was refused: %v", err)
+			}
+		})
 	}
 }
 

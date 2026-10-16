@@ -633,6 +633,12 @@ func (w *Workflow) validateStages(roles map[string]string) error {
 		case w.Question == "":
 			return fmt.Errorf("stage %q confirms the change, but no question role is configured (intake.question_role), so the choice after it could only deliver", stage.Name)
 		}
+		// The requester's reply is about the change this stage read. A model
+		// stage right after it could change the checkout after that reply,
+		// and nothing would ask about what it changed.
+		if stage.AlwaysAsk && index+1 < len(w.Stages) && w.Stages[index+1].Kind == ModelStage {
+			return fmt.Errorf("stage %q has always_ask, but stage %q right after it is a model stage: what it changed after the requester's reply would be delivered without being asked about; put a command stage, such as the delivery, right after it", stage.Name, w.Stages[index+1].Name)
+		}
 	}
 	if w.ConfirmationReworkLimit != 0 && !confirms {
 		return errors.New("workflow.confirmation_rework_limit needs a stage marked confirm")
