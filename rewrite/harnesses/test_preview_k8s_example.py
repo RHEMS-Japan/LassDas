@@ -1130,6 +1130,192 @@ class PreviewExampleTests(unittest.TestCase):
         second = self.tool.write_tar(str(self.checkout), paths, str(self.base / "two.tar"))
         self.assertEqual(first, second)
 
+    # -- PREVIEW_PACK_DIR: one ignored directory instead of the checkout -----
+
+    def ignored_dist(self):
+        """client/dist, ignored by client/.gitignore, as a build leaves it:
+        a page, a script, a link to a file beside it, a link to a secret
+        outside and a link to a directory outside."""
+        dist = self.checkout / "client" / "dist"
+        (dist / "assets").mkdir(parents=True)
+        (self.checkout / "client" / ".gitignore").write_text("dist/\n")
+        (dist / "index.html").write_text("<h1>built</h1>\n")
+        (dist / "assets" / "app.js").write_text("fetch('/api/x')\n")
+        os.symlink("index.html", dist / "alias.html")
+        os.symlink(str(self.outside / "environ"), dist / "secret")
+        os.symlink(str(self.outside), dist / "outdir")
+        return dist
+
+    def handed_over(self):
+        with tarfile.open(self.streams()[-1]) as opened:
+            return {member.name: member for member in opened.getmembers()}, self.streams()[-1].read_bytes()
+
+    def test_the_pack_dir_alone_is_carried_from_its_own_root(self):
+        self.ignored_dist()
+        status, output = self.up(PREVIEW_PACK_DIR="client/dist")
+        self.assertEqual(status, 0, output)
+        members, data = self.handed_over()
+        self.assertEqual(sorted(members), ["alias.html", "assets/app.js", "index.html", "outdir", "secret"])
+        self.assertTrue(members["index.html"].isfile())
+        self.assertTrue(members["alias.html"].issym())
+        self.assertEqual(members["alias.html"].linkname, "index.html")
+        self.assertTrue(members["secret"].issym())
+        self.assertEqual(members["secret"].linkname, str(self.outside / "environ"))
+        self.assertTrue(members["outdir"].issym())
+        self.assertNotIn(TOKEN.encode(), data, "a link inside the directory was read through")
+        self.assertNotIn(SIGNING_KEY.encode(), data, "a link inside the directory was read through")
+        self.assertFalse([call for call in self.git_calls() if "ls-files" in call["argv"]],
+                         "the checkout's git listing was used")
+        self.assertTrue([call for call in self.git_calls() if "check-ignore" in call["argv"]],
+                        "git was not asked whether the directory is ignored")
+        # The control: without the setting the checkout's files are carried.
+        self.reset_cluster()
+        status, output = self.up()
+        self.assertEqual(status, 0, output)
+        members, _ = self.handed_over()
+        self.assertIn("site/index.html", members)
+        self.assertNotIn("index.html", members)
+
+    def test_a_pack_dir_that_cannot_be_carried_ends_1_before_the_cluster(self):
+        self.ignored_dist()
+        (self.checkout / "client" / "empty").mkdir()
+        # "linked" without a slash also matches the link itself: git would
+        # call it ignored, so only the refusal to follow it stops it.
+        (self.checkout / "client" / ".gitignore").write_text("dist/\nempty/\nlinked\n")
+        (self.base / "elsewhere" / "dist").mkdir(parents=True)
+        (self.base / "elsewhere" / "dist" / "index.html").write_text("<h1>elsewhere</h1>\n")
+        (self.base / "elsewhere" / ".gitignore").write_text("")
+        os.symlink(str(self.base / "elsewhere"), self.checkout / "client" / "via")
+        os.symlink(str(self.base / "elsewhere" / "dist"), self.checkout / "client" / "linked")
+        (self.checkout / "loose").mkdir()
+        (self.checkout / "loose" / "page.html").write_text("<h1>neither tracked nor ignored</h1>\n")
+        cases = [
+            ("a directory git tracks", {"PREVIEW_PACK_DIR": "site"}, "is not ignored by git"),
+            ("a directory neither tracked nor ignored", {"PREVIEW_PACK_DIR": "loose"}, "is not ignored by git"),
+            ("an empty directory", {"PREVIEW_PACK_DIR": "client/empty"}, "holds nothing to carry"),
+            ("a value with ..", {"PREVIEW_PACK_DIR": "client/../client/dist"}, "without . or .."),
+            ("a path leaving the checkout", {"PREVIEW_PACK_DIR": "../outside"}, "without . or .."),
+            ("an absolute path", {"PREVIEW_PACK_DIR": str(self.outside)}, "inside the checkout"),
+            ("a link on the way", {"PREVIEW_PACK_DIR": "client/via/dist"}, "client/via/dist is not a directory"),
+            ("the directory itself a link", {"PREVIEW_PACK_DIR": "client/linked"}, "is a symbolic link"),
+        ]
+        for label, changes, reason in cases:
+            with self.subTest(label):
+                self.reset_cluster()
+                status, output = self.up(**changes)
+                self.assertEqual(status, 1, output)
+                self.assertIn(reason, output.strip().splitlines()[-1])
+                self.assertEqual(self.calls(), [], "kubectl was called for a directory that cannot be carried")
+        with self.subTest("more than 1 GiB"):
+            self.reset_cluster()
+            limit = self.tool.ARCHIVE_LIMIT
+            self.addCleanup(setattr, self.tool, "ARCHIVE_LIMIT", limit)
+            self.tool.ARCHIVE_LIMIT = 10  # stands for 1 GiB: the same check, a smaller file
+            status, output = self.up(PREVIEW_PACK_DIR="client/dist")
+            self.assertEqual(status, 1, output)
+            self.assertIn("PREVIEW_PACK_DIR client/dist holds more than the preview's 1 GiB",
+                          output.strip().splitlines()[-1])
+            self.assertEqual(self.calls(), [])
+            self.tool.ARCHIVE_LIMIT = limit
+        with self.subTest("a tracked file in an ignored directory"):
+            # git does not count a directory with a tracked file in it as
+            # ignored: its files would be delivered, so it is refused too.
+            self.reset_cluster()
+            self.git("add", "-f", "client/dist/index.html")
+            status, output = self.up(PREVIEW_PACK_DIR="client/dist")
+            self.assertEqual(status, 1, output)
+            self.assertIn("is not ignored by git", output.strip().splitlines()[-1])
+            self.assertEqual(self.calls(), [])
+            self.git("rm", "-q", "--cached", "client/dist/index.html")
+
+    def test_the_pack_dir_checks_are_the_ones_that_refuse(self):
+        """Positive controls: with git's answer ignored or links followed, the
+        cases above would be carried."""
+        self.ignored_dist()
+        (self.checkout / "loose").mkdir()
+        (self.checkout / "loose" / "page.html").write_text("<h1>neither tracked nor ignored</h1>\n")
+        careless = load_tool(self.mutated([("    if ignored.returncode == 1:\n", "    if False:\n"),
+                                           ("    if ignored.returncode != 0:\n", "    if ignored.returncode > 1:\n")],
+                                          "careless"), "careless")
+        status, output = self.up(tool=careless, PREVIEW_PACK_DIR="loose")
+        self.assertEqual(status, 0, "without git's answer a directory git does not ignore was still refused: "
+                         + output)
+        self.assertIn("page.html", self.handed_over()[0])
+        # A link as the directory itself, its name ignored: git calls it
+        # ignored, and only the refusal to follow it stops the walk. (A link
+        # further up, client/via/dist, git refuses as well: "beyond a symbolic
+        # link".)
+        (self.base / "elsewhere" / "dist").mkdir(parents=True)
+        (self.base / "elsewhere" / "dist" / "index.html").write_text("<h1>elsewhere</h1>\n")
+        os.symlink(str(self.base / "elsewhere" / "dist"), self.checkout / "client" / "linked")
+        (self.checkout / "client" / ".gitignore").write_text("dist/\nlinked\n")
+        self.reset_cluster()
+        status, output = self.up(PREVIEW_PACK_DIR="client/linked")
+        self.assertEqual(status, 1, output)
+        following = load_tool(self.mutated([("os.O_NOFOLLOW", "0")], "following-pack"), "following_pack")
+        self.reset_cluster()
+        status, output = self.up(tool=following, PREVIEW_PACK_DIR="client/linked")
+        self.assertEqual(status, 0, "with links followed the directory behind one was still refused: " + output)
+        self.assertIn("index.html", self.handed_over()[0])
+
+    def test_the_same_pack_dir_gives_the_same_identifier(self):
+        dist = self.ignored_dist()
+        status, output = self.up(PREVIEW_PACK_DIR="client/dist")
+        self.assertEqual(status, 0, output)
+        first = self.applied_deployments()[-1]["spec"]["template"]["metadata"]["annotations"]["preview-change"]
+        time.sleep(1.1)
+        os.utime(dist / "index.html")
+        (self.checkout / "site" / "index.html").write_text("<h1>not carried</h1>\n")
+        status, output = self.up(PREVIEW_PACK_DIR="client/dist")
+        self.assertEqual(status, 0, output)
+        self.assertEqual(len(self.streams()), 1, "the same directory was handed over again")
+        self.assertIn("the same change is running already", output)
+        (dist / "index.html").write_text("<h1>built again</h1>\n")
+        status, output = self.up(PREVIEW_PACK_DIR="client/dist")
+        self.assertEqual(status, 0, output)
+        second = self.applied_deployments()[-1]["spec"]["template"]["metadata"]["annotations"]["preview-change"]
+        self.assertNotEqual(first, second, "a changed file in the directory kept the identifier")
+        self.assertEqual(len(self.streams()), 2)
+
+    # -- preview.py origin -------------------------------------------------
+
+    def origin(self, environment):
+        done = subprocess.run([sys.executable, "-B", str(TOOL), "origin"], cwd=self.checkout, env=environment,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        return done.returncode, done.stdout, done.stderr
+
+    def test_origin_is_the_host_up_opens(self):
+        status, output = self.up()
+        self.assertEqual(status, 0, output)
+        opened = urllib.parse.urlsplit(self.checks[-1][0])
+        code, out, err = self.origin(self.environment())
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out, "https://%s\n" % opened.netloc)
+        long_issue = "PROJ-" + "9" * 70
+        for site, issue in (("sample", "12"), ("demo", "PROJ-81"), ("demo", "Proj_81 x"), ("sample", long_issue)):
+            with self.subTest(issue=issue):
+                names = self.tool.preview_names(site, issue, "preview.example.invalid")
+                code, out, err = self.origin(self.environment(PREVIEW_NAME=site, TASK_ISSUE=issue))
+                self.assertEqual((code, out, err), (0, "https://%s\n" % names.host, ""))
+        self.assertNoLeak(out, "the origin")
+
+    def test_origin_without_its_settings_ends_2_with_nothing_on_standard_output(self):
+        cases = [
+            ("no request number", {"TASK_ISSUE": None}),
+            ("no preview name", {"PREVIEW_NAME": None}),
+            ("no domain", {"PREVIEW_DOMAIN": None}),
+            ("an empty domain", {"PREVIEW_DOMAIN": ""}),
+            ("a wrong preview name", {"PREVIEW_NAME": "Sample"}),
+            ("a wrong domain", {"PREVIEW_DOMAIN": "https://preview.example.invalid"}),
+        ]
+        for label, changes in cases:
+            with self.subTest(label):
+                code, out, err = self.origin(self.environment(**changes))
+                self.assertEqual(code, 2, err)
+                self.assertEqual(out, "")
+                self.assertTrue(err.strip(), "no reason on standard error")
+        self.assertEqual(self.calls(), [], "origin called kubectl")
+
     # -- credentials -----------------------------------------------------
 
     def test_no_child_receives_a_credential_and_the_output_carries_none(self):

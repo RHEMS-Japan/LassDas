@@ -3,6 +3,7 @@
 
   preview.py up      run the request's checkout as a preview and write its URL
   preview.py down    remove the request's preview
+  preview.py origin  print the origin of the request's preview, one line
 
 An example of the commands the engine's preview setting names: README.md
 beside this file says how to install it and what each setting means. It uses
@@ -17,8 +18,20 @@ identifier of the change it runs. The same change already running is not
 started again; only its lifetime is extended, with a new signed URL. down
 removes the Deployment and the Service and reads back that they are gone.
 
-Exit status: 0 when the preview is up (up) or gone (down); 1 otherwise, the
-reason on the last line of the output; 2 for a wrong command line. Nothing
+What up hands over is the checkout's tracked and untracked, not ignored
+files, or, with PREVIEW_PACK_DIR, only what is inside that directory of the
+checkout: one git ignores, such as a build's output, carried with that
+directory as the root.
+
+origin prints https://<label>.<domain>, the address up gives the request's
+preview, from TASK_ISSUE, PREVIEW_NAME and PREVIEW_DOMAIN alone: a build can
+put it into what it builds before up runs. It reads no credential and calls
+nothing.
+
+Exit status: 0 when the preview is up (up), gone (down) or its origin printed
+(origin); 1 otherwise, the reason on the last line of the output; 2 for a
+wrong command line, and for origin when a setting it needs is missing or
+wrong (the reason on standard error, nothing on standard output). Nothing
 is removed after a failure, except a Deployment whose Pod's last rules
 container (net) had not ended with status 0 when the wait ended for any
 reason: until then the dependency step could still run with public addresses
@@ -96,9 +109,14 @@ ROUTER_STATUSES = (404, 502, 503, 504)
 STUCK = ("CrashLoopBackOff", "ErrImagePull", "ImagePullBackOff", "InvalidImageName",
          "CreateContainerConfigError", "CreateContainerError", "RunContainerError")
 
+DNS_LABEL = r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+DOMAIN = r"%s(\.%s)+" % (DNS_LABEL, DNS_LABEL)
+DOMAIN_DESCRIPTION = "a lowercase domain name such as preview.example.invalid"
+
 Settings = collections.namedtuple(
     "Settings", "workspace result issue site start port ready_path lifetime image memory install "
-                "install_seconds env_file domain namespace server ca_file net_image wait_seconds")
+                "install_seconds env_file domain namespace server ca_file net_image wait_seconds pack_dir",
+    defaults=(None,))
 Names = collections.namedtuple("Names", "name label host url")
 
 
@@ -158,9 +176,7 @@ def read_settings(environment, command):
     if command == "down":
         return Settings(workspace, None, issue, site, None, None, None, None, None, None, None, None, None,
                         None, namespace, server, ca_file, None, wait_seconds)
-    label = r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-    domain = matching(environment, "PREVIEW_DOMAIN", r"%s(\.%s)+" % (label, label),
-                      "a lowercase domain name such as preview.example.invalid")
+    domain = matching(environment, "PREVIEW_DOMAIN", DOMAIN, DOMAIN_DESCRIPTION)
     result = required(environment, "TASK_PREVIEW")
     if not os.path.isabs(result):
         raise Failure("TASK_PREVIEW must be an absolute path")
@@ -188,10 +204,17 @@ def read_settings(environment, command):
         parts = env_file.split("/")
         if env_file.startswith("/") or any(part in ("", ".", "..") for part in parts):
             raise Failure("PREVIEW_ENV_FILE must be a path inside the checkout, relative to it, without . or ..")
+    pack_dir = environment.get("PREVIEW_PACK_DIR") or None
+    if pack_dir is not None:
+        parts = pack_dir.split("/")
+        if "\0" in pack_dir or pack_dir.startswith("/") or any(part in ("", ".", "..") for part in parts):
+            raise Failure("PREVIEW_PACK_DIR must be a directory inside the checkout, relative to it, "
+                          "without . or ..")
     net_image = matching(environment, "PREVIEW_NET_IMAGE", r"[^\s@]+@sha256:[0-9a-f]{64}",
                          "the rules image named by its digest (name@sha256:...)")
     return Settings(workspace, result, issue, site, start, port, ready_path, lifetime, image, memory, install,
-                    install_seconds, env_file, domain, namespace, server, ca_file, net_image, wait_seconds)
+                    install_seconds, env_file, domain, namespace, server, ca_file, net_image, wait_seconds,
+                    pack_dir)
 
 
 def preview_names(site, issue, domain=None):
@@ -285,34 +308,95 @@ def tool_environment(environment, home):
             "HOME": home}
 
 
-def checkout_paths(root, environment):
-    """The tracked and the untracked, not ignored paths of the checkout."""
+def git(root, environment, arguments, what):
+    """git in the checkout with no configuration but the repository's own and
+    no credential; the finished process."""
     home = tempfile.mkdtemp(prefix="preview-git-", dir=environment.get("TMPDIR") or "/tmp")
     try:
         variables = dict(tool_environment(environment, home), GIT_CONFIG_NOSYSTEM="1",
                          GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
         try:
-            done = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", root, "ls-files", "-z", "-co",
-                                   "--exclude-standard"], env=variables, stdin=subprocess.DEVNULL,
-                                  capture_output=True, timeout=300)
+            return subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", root, *arguments], env=variables,
+                                  stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
         except (OSError, subprocess.TimeoutExpired) as error:
-            raise Failure("git ls-files could not list the checkout: %s" % error) from None
+            raise Failure("%s: %s" % (what, error)) from None
     finally:
         shutil.rmtree(home, ignore_errors=True)
+
+
+def checkout_paths(root, environment):
+    """The tracked and the untracked, not ignored paths of the checkout."""
+    done = git(root, environment, ["ls-files", "-z", "-co", "--exclude-standard"],
+               "git ls-files could not list the checkout")
     if done.returncode != 0:
         raise Failure("git ls-files could not list the checkout: " + last_line(done.stderr))
     return sorted({os.fsdecode(path) for path in done.stdout.split(b"\0") if path})
 
 
-def write_tar(root, paths, destination):
+def pack_paths(root, relative, environment):
+    """The files and links inside PREVIEW_PACK_DIR, relative to it. The
+    directory has to be one git ignores (git check-ignore; git does not count
+    a directory with a tracked file in it as ignored): what it holds is then
+    never part of a delivery, only of the preview. Every directory on the way
+    to it and under it is opened without following a symbolic link; a link
+    inside is listed as a link, to be carried as one."""
+    name = "PREVIEW_PACK_DIR %s" % relative
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in relative.split("/"):
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            except OSError:
+                raise Failure("%s is not a directory of the checkout: %s on its way is a symbolic link, missing "
+                              "or not a directory" % (name, part)) from None
+            os.close(directory)
+            directory = child
+        found = []
+
+        def walk(descriptor, prefix):
+            with os.scandir(descriptor) as listing:
+                entries = sorted(listing, key=lambda entry: entry.name)
+            for entry in entries:
+                path = prefix + entry.name
+                if entry.is_symlink():
+                    found.append(path)
+                elif entry.is_dir(follow_symlinks=False):
+                    try:
+                        child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+                    except OSError:
+                        continue  # changed while it was read: left out, as write_tar leaves it out
+                    try:
+                        walk(child, path + "/")
+                    finally:
+                        os.close(child)
+                elif entry.is_file(follow_symlinks=False):
+                    found.append(path)
+
+        walk(directory, "")
+    finally:
+        os.close(directory)
+    ignored = git(root, environment, ["check-ignore", "-q", "--", relative], "git check-ignore could not run")
+    if ignored.returncode == 1:
+        raise Failure("%s is not ignored by git: what it holds would be delivered too, so it is not carried "
+                      "to the preview alone" % name)
+    if ignored.returncode != 0:
+        raise Failure("git check-ignore could not read %s: %s" % (relative, last_line(ignored.stderr)))
+    if not found:
+        raise Failure("%s holds nothing to carry to the preview" % name)
+    return found
+
+
+def write_tar(root, paths, destination, inside=None):
     """The checkout as a tar file at destination, the same bytes for the same
     files: links stay links, regular files are read through lookup, anything
-    else and anything under a linked directory is left out. Returns the
-    sha256 of the file."""
+    else and anything under a linked directory is left out. With inside (a
+    directory of the checkout, PREVIEW_PACK_DIR), paths are relative to it and
+    it is the archive's root. Returns the sha256 of the file."""
     total = 0
+    what = "PREVIEW_PACK_DIR %s" % inside if inside else "the checkout"
     with tarfile.open(destination, "w", format=tarfile.GNU_FORMAT) as archive:
         for relative in paths:
-            kind, found = lookup(root, relative)
+            kind, found = lookup(root, inside + "/" + relative if inside else relative)
             if kind is None:
                 continue
             info = tarfile.TarInfo(relative)
@@ -327,7 +411,7 @@ def write_tar(root, paths, destination):
                 info.mode = 0o755 if status.st_mode & 0o111 else 0o644
                 total += info.size
                 if total > ARCHIVE_LIMIT:
-                    raise Failure("the checkout holds more than the preview's 1 GiB")
+                    raise Failure("%s holds more than the preview's 1 GiB" % what)
                 archive.addfile(info, handle)
     digest = hashlib.sha256()
     with open(destination, "rb") as handle:
@@ -852,9 +936,12 @@ def up(environment, credentials, *, check=None):
         names = preview_names(settings.site, settings.issue, settings.domain)
         entries = read_env_file(settings.workspace, settings.env_file) if settings.env_file else []
         directory = private_directory(environment)
-        paths = checkout_paths(settings.workspace, environment)
+        if settings.pack_dir:
+            paths = pack_paths(settings.workspace, settings.pack_dir, environment)
+        else:
+            paths = checkout_paths(settings.workspace, environment)
         archive = os.path.join(directory, "checkout.tar")
-        archive_digest = write_tar(settings.workspace, paths, archive)
+        archive_digest = write_tar(settings.workspace, paths, archive, settings.pack_dir)
         expires = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0) + \
             datetime.timedelta(hours=settings.lifetime)
         deployment, service = manifests(settings, names, entries, expires)
@@ -934,6 +1021,24 @@ def run(command, credentials, environment):
     return up(environment, credentials) if command == "up" else down(environment, credentials)
 
 
+def origin(environment):
+    """Prints the origin of the request's preview, https://<label>.<domain>,
+    named as up names it (preview_names), from TASK_ISSUE, PREVIEW_NAME and
+    PREVIEW_DOMAIN. Reads no credential and calls nothing. 2, with the reason
+    on standard error and nothing on standard output, when one of them is
+    missing or wrong."""
+    try:
+        issue = required(environment, "TASK_ISSUE")
+        site = required(environment, "PREVIEW_NAME")
+        domain = matching(environment, "PREVIEW_DOMAIN", DOMAIN, DOMAIN_DESCRIPTION)
+        names = preview_names(site, issue, domain)
+    except Failure as failure:
+        print(failure, file=sys.stderr, flush=True)
+        return 2
+    print("https://" + names.host, flush=True)
+    return 0
+
+
 # -- step 0: the credentials out of the environment ---------------------------
 
 def take_credentials(environ):
@@ -1002,7 +1107,7 @@ def hand_over(command):
 
 
 def usage():
-    print("usage: preview.py up|down", file=sys.stderr)
+    print("usage: preview.py up|down|origin", file=sys.stderr)
     return 2
 
 
@@ -1021,6 +1126,9 @@ def main(argv=None):
             say("credentials are still in the environment after the restart: %s" % ", ".join(left))
             return 1
         return run(argv[2], credentials, dict(os.environ))
+    if argv == ["origin"]:
+        # No credential is read or needed: nothing to hand over.
+        return origin(dict(os.environ))
     if len(argv) != 1 or argv[0] not in COMMANDS:
         return usage()
     return hand_over(argv[0])

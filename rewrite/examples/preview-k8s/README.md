@@ -3,7 +3,8 @@
 An example of the two commands the engine's preview setting names: one that
 runs a request's checkout where the requester can open it, and one that
 removes it again. [preview.py](preview.py) is both (`preview.py up`,
-`preview.py down`). It needs Python 3.11 or later with its standard library,
+`preview.py down`), and prints a preview's address for a build that has to
+know it (`preview.py origin`). It needs Python 3.11 or later with its standard library,
 and kubectl; nothing else.
 
 The engine looks for none of the names used here. Another installation can
@@ -300,6 +301,7 @@ Set in the role's `env`. The engine reads none of them.
 | `PREVIEW_INSTALL` | `npm ci` | no | A dependency step, run with `sh -c` in the checkout before the application. Only during this step can the Pod reach public addresses. |
 | `PREVIEW_INSTALL_SECONDS` | `240` | no (`240`) | The step's time limit: digits only, 1 to 480, and, when `PREVIEW_INSTALL` is set, at most `PREVIEW_WAIT_SECONDS` − 180 (see Time above). Anything else ends `up` before the cluster is called. |
 | `PREVIEW_ENV_FILE` | `.env.preview` | no | A file in the checkout, relative to it, of `KEY=VALUE` lines for the application's environment. No secrets: the file is in the branch. At most 64 KiB; a line that is not `KEY=VALUE` (blank lines and `#` lines aside) ends `up`. `PORT` is always the script's. |
+| `PREVIEW_PACK_DIR` | `web/dist` | no | A directory of the checkout, relative to it, that git ignores, such as the output a build of the verification stage left there. With it, `up` carries only what is inside it, with the directory as the root (`web/dist/index.html` is `/src/index.html` in the Pod), instead of the checkout's tracked and untracked files. `up` ends 1 before the cluster is called when the value starts with `/` or has an empty, `.` or `..` part; when the directory, or a directory on its way, is a symbolic link or missing; when git does not ignore it (git does not count a directory with a tracked file in it as ignored); when it holds no file; and when it holds more than 1 GiB. A link inside is carried as a link. The same contents give the same change identifier, so the same build again only extends the lifetime. |
 | `PREVIEW_WAIT_SECONDS` | `420` | no (420 for up, 60 for down) | How long to wait for the Pod to be ready (up) or for the objects to be gone (down): 1 to 3600. With `PREVIEW_INSTALL`, at least `PREVIEW_INSTALL_SECONDS` + 180. Above 1800 the cleanup, which removes a Deployment that has had no ready Pod for 30 minutes, may remove the preview while `up` still waits. |
 | `PREVIEW_DOMAIN` | `preview.example.invalid` | yes (up) | The domain under which every preview gets one label: `sample-12.preview.example.invalid`. The same for every installation using the router. |
 | `PREVIEW_NAMESPACE` | `preview-apps` | yes | The preview namespace. |
@@ -379,13 +381,31 @@ address stops opening at the preview's end.
   `Domain` of every `Set-Cookie` to the host and drops one of its own name or
   with a `Domain` that still names something else.
 
+## The origin of a preview
+
+`preview.py origin` prints, as one line, the origin `up` gives the request's
+preview: `https://<label>.<PREVIEW_DOMAIN>`, the label named as `up` names
+it (`PREVIEW_NAME`, a hyphen and the request number, lowercased, every run of
+other characters made one hyphen, a long one cut and given part of its
+hash). It reads `TASK_ISSUE`, `PREVIEW_NAME` and `PREVIEW_DOMAIN` only, no
+credential, and calls nothing. A build that has to know where its page will
+be served, such as a page whose API address is fixed when it is built, can
+ask for it before `up` runs instead of writing the naming rule a second time:
+
+```sh
+origin="$(python3 -I /opt/ticket-automation/operator/preview.py origin)" || origin=""
+```
+
+When one of the three is missing or wrong it ends with 2, the reason on
+standard error and nothing on standard output.
+
 ## Exit status and output
 
 | Status | When |
 | --- | --- |
-| 0 | `up`: the preview answers on its public address and `TASK_PREVIEW` is written. `down`: neither the Deployment nor the Service of the request is left, also when there was none. |
+| 0 | `up`: the preview answers on its public address and `TASK_PREVIEW` is written. `down`: neither the Deployment nor the Service of the request is left, also when there was none. `origin`: the origin is printed. |
 | 1 | Anything else. The last line of the output is the reason, with the cluster's own message where it gave one (a policy refusal names the policy). `TASK_PREVIEW` is not written. |
-| 2 | A wrong command line. The engine never starts it so with this configuration. |
+| 2 | A wrong command line. The engine never starts it so with this configuration. Also `origin` without one of its settings. |
 
 After a failure nothing is removed, except a Deployment whose Pod's last
 rules container (`net`) had not ended with status 0 when the wait ended, for
@@ -404,6 +424,9 @@ one. Nothing of the checkout is read through one:
   same files give the same archive.
 - `PREVIEW_ENV_FILE` is read the same way, and a link there, or a linked
   directory on its way, ends `up`: it is not packed as a link instead.
+- With `PREVIEW_PACK_DIR`, the directory and every directory on its way and
+  inside it are opened the same way. The directory being a link, or a link
+  on its way, ends `up`; a link inside is packed as a link.
 - In the Pod, a link is unpacked as a link. Following it there finds only
   the preview Pod's own files, which hold no credential.
 
