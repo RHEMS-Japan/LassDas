@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -37,6 +38,10 @@ type Stage struct {
 	// first stage: the first stage, the question role or the next stage. A
 	// question chosen there holds the request until the requester comments.
 	Confirm bool `json:"confirm,omitempty"`
+	// AlwaysAsk, on a stage that confirms the change, has the requester see
+	// every change before it is delivered: after this stage the next stage
+	// is offered only once the requester has replied about this change.
+	AlwaysAsk bool `json:"always_ask,omitempty"`
 	// Announce is the operator's own sentence for the requester, posted once
 	// when this stage first begins; empty says nothing.
 	Announce string `json:"announce,omitempty"`
@@ -253,7 +258,12 @@ func (s State) stageActions() []string {
 		return []string{stage.Name, s.Workflow.Question, next}
 	case index > 0 && stage.Confirm && s.Workflow.Question != "" && next != "done":
 		// The change has been read: requirements again, the requester, or the
-		// next stage, as after the first stage.
+		// next stage, as after the first stage. A stage that asks about every
+		// change offers the next stage only once the requester has replied
+		// about this one.
+		if stage.AlwaysAsk && !s.changeAnswered(index) {
+			return []string{stages[0].Name, s.Workflow.Question}
+		}
 		return []string{stages[0].Name, s.Workflow.Question, next}
 	case index == 0 && next != "done" && s.environmentPauseOpen():
 		// Nobody can be asked: the request may pause for the operator before
@@ -261,6 +271,66 @@ func (s State) stageActions() []string {
 		return []string{EnvironmentPause, next}
 	}
 	return []string{next}
+}
+
+// changeAnswered reports that the requester has replied to a question put to
+// them since a stage other than the one that confirms the change, at index,
+// last ran: the reply is about the change as it now stands. A stage before it
+// makes or settles the change again, and one after it, such as a delivery
+// whose failure is sent back to this stage, leaves a change the reply was not
+// about. A question is put after the first stage or after a stage that
+// confirms the change, and the stage that asked runs again on the reply, so a
+// reply to another stage's question is always followed by another stage.
+// Only records are read, never what any of them says.
+func (s State) changeAnswered(index int) bool {
+	asked, answered := false, false
+	for _, record := range s.History {
+		if record.Role == "router" {
+			continue
+		}
+		if record.Speaker == "requester" {
+			answered = answered || asked && record.Role == s.Workflow.Question
+			continue
+		}
+		if _, at := stageAt(s.Workflow.Stages, record.Role); at >= 0 {
+			if at != index {
+				asked, answered = false, false
+			}
+			continue
+		}
+		asked = asked || record.Role == s.Workflow.Question
+	}
+	return answered
+}
+
+// awaitingReplyAboutChange reports a decision after a stage that asks about
+// every change, before the requester has replied about this change: the next
+// stage is not offered there.
+func (s State) awaitingReplyAboutChange() bool {
+	if !s.confirmationDecision() {
+		return false
+	}
+	runs := s.stageRuns()
+	stage, index := stageAt(s.Workflow.Stages, runs[len(runs)-1].role)
+	return stage.AlwaysAsk && !s.changeAnswered(index)
+}
+
+// asksEveryChange reports that the requester is to see every change: at the
+// decision after a stage that confirms the change, that stage asks about
+// every change; anywhere else, some such stage does.
+func (s State) asksEveryChange() bool {
+	if s.Workflow == nil {
+		return false
+	}
+	if s.confirmationDecision() {
+		runs := s.stageRuns()
+		stage, _ := stageAt(s.Workflow.Stages, runs[len(runs)-1].role)
+		return stage.AlwaysAsk
+	}
+	if stage, index := s.askingStage(); index > 0 && stage.Confirm {
+		return stage.AlwaysAsk
+	}
+	return slices.ContainsFunc(s.Workflow.Stages, func(stage Stage) bool { return stage.Confirm && stage.AlwaysAsk })
 }
 
 // environmentPauseOpen reports that the decision after the first stage may
@@ -290,6 +360,9 @@ func (s State) stageInstruction(name string) string {
 	stage, index := stageAt(stages, name)
 	if index < 0 {
 		if name != "" && name == s.Workflow.Question && s.confirmationDecision() {
+			if s.asksEveryChange() {
+				return everyChangeQuestionInstruction
+			}
 			return confirmationQuestionInstruction
 		}
 		return ""
@@ -302,6 +375,8 @@ func (s State) stageInstruction(name string) string {
 		text.WriteString("The configured decision model reads your requirements report and chooses another requirements pass, a question or the next stage. Use ordinary prose; the runtime does not grade its wording. A later command stage proves completed work.\n")
 	} else if index == 0 && s.environmentPauseOpen() {
 		text.WriteString(environmentPauseStageInstruction)
+	} else if stage.Confirm && s.Workflow.Question != "" && stage.AlwaysAsk {
+		fmt.Fprintf(&text, everyChangeStageInstruction, stages[index+1].Name)
 	} else if stage.Confirm && s.Workflow.Question != "" {
 		fmt.Fprintf(&text, confirmationStageInstruction, stages[index+1].Name)
 	} else {
@@ -472,6 +547,14 @@ const confirmationStageInstruction = "Read the change actually made in the check
 
 const confirmationQuestionInstruction = "The decision after the stage that confirms the change chose to ask the requester before the change is delivered. Post one comment that shows the requester what the change does to how they operate the product, to its screens or to its public API, as that stage's report and the change itself show it, and ask them to choose: to deliver it as it is, to name what to change, or not to deliver it. Nothing is delivered before their reply; say so. Ask about this change only. Whatever this launch posts, the request then waits for the requester's comment.\n"
 
+// What the runtime tells a stage that asks about every change, and the
+// question chosen after it, in place of the two above: every change is shown
+// to the requester, whatever it alters, and nothing says no confirmation is
+// needed.
+const everyChangeStageInstruction = "Read the change actually made in the checkout before it is delivered: what Git lists as changed, the diff, new files, and commits the integration branch does not have. Read the settled requirements and the project's knowledge. Say in ordinary prose what the change does: whether it alters how a person operates the product, what a screen shows or does, or the public API, and what it does when it alters none of them. Name the material you read and what you could not read; when you cannot tell, say so. In this run the requester sees every change before it is delivered, so do not say that their confirmation is not needed: say what the question to them should show. A requester's reply in the record covers only the change it was given about. The configured decision model reads your report and chooses the first stage again or a question to the requester; the next stage (%s) is offered only after the requester has replied about this same change. A question holds the request until the requester comments. Use ordinary prose; the runtime does not grade its wording.\n"
+
+const everyChangeQuestionInstruction = "The decision after the stage that confirms the change chose to ask the requester before the change is delivered; in this run the requester sees every change, whatever it alters. Post one comment that shows the requester what the change does, as that stage's report and the change itself show it: where the runtime gives an address at which the change can be seen, point the requester to it; otherwise describe the change in words. Ask them to choose: to deliver it as it is, to name what to change, or not to deliver it. Nothing is delivered before their reply; say so. Ask about this change only. Whatever this launch posts, the request then waits for the requester's comment.\n"
+
 func followingCommand(stages []Stage, index int) (string, bool) {
 	for _, stage := range stages[index+1:] {
 		if stage.Kind == CommandStage {
@@ -535,6 +618,9 @@ func (w *Workflow) validateStages(roles map[string]string) error {
 	}
 	confirms := false
 	for index, stage := range w.Stages {
+		if stage.AlwaysAsk && !stage.Confirm {
+			return fmt.Errorf("stage %q has always_ask, which belongs to a stage marked confirm: the requester is asked about the change after that stage", stage.Name)
+		}
 		if !stage.Confirm {
 			continue
 		}
@@ -546,6 +632,20 @@ func (w *Workflow) validateStages(roles map[string]string) error {
 			return fmt.Errorf("stage %q is the first stage, which a choice already follows; confirm marks a later model stage", stage.Name)
 		case w.Question == "":
 			return fmt.Errorf("stage %q confirms the change, but no question role is configured (intake.question_role), so the choice after it could only deliver", stage.Name)
+		}
+		// The requester's reply is about the change this stage read. A model
+		// stage right after it could change the checkout after that reply,
+		// and nothing would ask about what it changed.
+		if stage.AlwaysAsk && index+1 < len(w.Stages) && w.Stages[index+1].Kind == ModelStage {
+			return fmt.Errorf("stage %q has always_ask, but stage %q right after it is a model stage: what it changed after the requester's reply would be delivered without being asked about; put a command stage, such as the delivery, right after it", stage.Name, w.Stages[index+1].Name)
+		}
+		// The same holds for the stage the delivery right after it sends a
+		// failure to: only a stage before this one has its change asked about.
+		if stage.AlwaysAsk && index+1 < len(w.Stages) && w.Stages[index+1].Kind == CommandStage {
+			after := w.Stages[index+1]
+			if _, at := stageAt(w.Stages, after.OnFailure); at >= index {
+				return fmt.Errorf("stage %q has always_ask, but stage %q right after it sends a failure (on_failure) to stage %q, which is not before it: what that stage changed would be delivered without being asked about; name a stage before %q in on_failure", stage.Name, after.Name, after.OnFailure, stage.Name)
+			}
 		}
 	}
 	if w.ConfirmationReworkLimit != 0 && !confirms {

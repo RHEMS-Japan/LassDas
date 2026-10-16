@@ -3,7 +3,8 @@
 An example of the two commands the engine's preview setting names: one that
 runs a request's checkout where the requester can open it, and one that
 removes it again. [preview.py](preview.py) is both (`preview.py up`,
-`preview.py down`). It needs Python 3.11 or later with its standard library,
+`preview.py down`), and prints a preview's address for a build that has to
+know it (`preview.py origin`). It needs Python 3.11 or later with its standard library,
 and kubectl; nothing else.
 
 The engine looks for none of the names used here. Another installation can
@@ -173,6 +174,9 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
    rm relay-key
    ```
 
+   The router starts without that Secret too (its reference is optional);
+   the relay then answers 503 and sends nothing.
+
    Otherwise delete every block between `relay: begin` and `relay: end` in
    the copy of [router.yaml.example](router.yaml.example): what is left is
    the router without a relay.
@@ -238,6 +242,7 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
 | `<relay-path-prefix>` | router, relay | The paths relayed, as the start of the path, for example `/api/`. |
 | `<relay-allowed-path>` | router, relay | One allowed path, a regular expression of the whole path, for example `/api/items/[0-9]+`. One line for each. |
 | `<relay-allowed-query>` | router, relay | A query form of an allowed path, for example `owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?`. One line for each form; a path without one is relayed with no query only. |
+| `<relay-id-query-path>` | router, relay | An allowed path that needs its query (it takes an identifier there), refused without one, for example `/api/projects/[0-9]+/items`. One line for each, or delete the line. The template keeps the query lines in their order: the line that refuses a second `?` first, then these, the line that lets an empty query through, and the forms. |
 | `<relay-refused-path>` | router, relay | One refused path, a regular expression of the start of the path, for example `/api/account/keys(/\|$)`. One line for each. |
 | `<relay-service>` | router, relay | The API's Service as `<name>.<namespace>`, answering on port 80, for example `api.example-dev`. |
 | `<relay-header>` | router, relay | The header the API reads the key from, for example `X-Example-Key`. |
@@ -321,6 +326,7 @@ Set in the role's `env`. The engine reads none of them.
 | `PREVIEW_INSTALL` | `npm ci` | no | A dependency step, run with `sh -c` in the checkout before the application. Only during this step can the Pod reach public addresses. |
 | `PREVIEW_INSTALL_SECONDS` | `240` | no (`240`) | The step's time limit: digits only, 1 to 480, and, when `PREVIEW_INSTALL` is set, at most `PREVIEW_WAIT_SECONDS` − 180 (see Time above). Anything else ends `up` before the cluster is called. |
 | `PREVIEW_ENV_FILE` | `.env.preview` | no | A file in the checkout, relative to it, of `KEY=VALUE` lines for the application's environment. No secrets: the file is in the branch. At most 64 KiB; a line that is not `KEY=VALUE` (blank lines and `#` lines aside) ends `up`. `PORT` is always the script's. |
+| `PREVIEW_PACK_DIR` | `web/dist` | no | A directory of the checkout, relative to it, that git ignores, such as the output a build of the verification stage left there. With it, `up` carries only what is inside it, with the directory as the root (`web/dist/index.html` is `/src/index.html` in the Pod), instead of the checkout's tracked and untracked files. The directory itself has to be ignored, as `dist` or `dist/` in a `.gitignore` ignores it: `dist/*` ignores only what is inside, and git does not count a directory with a tracked file in it as ignored either. One trailing `/` is allowed. `up` ends 1 before the cluster is called when the value starts with `/` or has a doubled `/` or a `.` or `..` part; when the directory, or a directory on its way, is a symbolic link or missing; when git does not ignore the directory itself; when it holds no file or link; and when it holds more than 1 GiB. A link inside is carried as a link. The same contents give the same change identifier, so the same build again only extends the lifetime. |
 | `PREVIEW_WAIT_SECONDS` | `420` | no (420 for up, 60 for down) | How long to wait for the Pod to be ready (up) or for the objects to be gone (down): 1 to 3600. With `PREVIEW_INSTALL`, at least `PREVIEW_INSTALL_SECONDS` + 180. Above 1800 the cleanup, which removes a Deployment that has had no ready Pod for 30 minutes, may remove the preview while `up` still waits. |
 | `PREVIEW_DOMAIN` | `preview.example.invalid` | yes (up) | The domain under which every preview gets one label: `sample-12.preview.example.invalid`. The same for every installation using the router. |
 | `PREVIEW_NAMESPACE` | `preview-apps` | yes | The preview namespace. |
@@ -348,12 +354,13 @@ hash, so two long request numbers never share a preview.
 
 What the command does with them:
 
-- Before anything else it removes every name listed in
-  `TASK_CREDENTIAL_NAMES` (and these three, listed or not) from its
-  environment, writes the values into a pipe and starts itself again
+- Before anything else `up` and `down` remove every name listed in
+  `TASK_CREDENTIAL_NAMES` (and these three, listed or not) from their
+  environment, write the values into a pipe and start the program again
   without them, reading them from the pipe. `/proc/self/environ` shows the
   environment a program started with, so removing a value is not enough;
-  after the restart the running program's environment holds none.
+  after the restart the running program's environment holds none. `origin`
+  reads no credential and does none of this.
 - git and kubectl start with `PATH`, `LANG` and a temporary `HOME` only;
   kubectl also gets `KUBECONFIG`.
 - The kubeconfig is written with mode 0600 into a new directory under the
@@ -400,13 +407,31 @@ address stops opening at the preview's end.
   `Domain` of every `Set-Cookie` to the host and drops one of its own name or
   with a `Domain` that still names something else.
 
+## The origin of a preview
+
+`preview.py origin` prints, as one line, the origin `up` gives the request's
+preview: `https://<label>.<PREVIEW_DOMAIN>`, the label named as `up` names
+it (`PREVIEW_NAME`, a hyphen and the request number, lowercased, every run of
+other characters made one hyphen, a long one cut and given part of its
+hash). It reads `TASK_ISSUE`, `PREVIEW_NAME` and `PREVIEW_DOMAIN` only, no
+credential, and calls nothing. A build that has to know where its page will
+be served, such as a page whose API address is fixed when it is built, can
+ask for it before `up` runs instead of writing the naming rule a second time:
+
+```sh
+origin="$(python3 -I /opt/ticket-automation/operator/preview.py origin)" || origin=""
+```
+
+When one of the three is missing or wrong it ends with 2, the reason on
+standard error and nothing on standard output.
+
 ## Exit status and output
 
 | Status | When |
 | --- | --- |
-| 0 | `up`: the preview answers on its public address and `TASK_PREVIEW` is written. `down`: neither the Deployment nor the Service of the request is left, also when there was none. |
+| 0 | `up`: the preview answers on its public address and `TASK_PREVIEW` is written. `down`: neither the Deployment nor the Service of the request is left, also when there was none. `origin`: the origin is printed. |
 | 1 | Anything else. The last line of the output is the reason, with the cluster's own message where it gave one (a policy refusal names the policy). `TASK_PREVIEW` is not written. |
-| 2 | A wrong command line. The engine never starts it so with this configuration. |
+| 2 | A wrong command line. The engine never starts it so with this configuration. Also `origin` without one of its settings, or with a wrong one. |
 
 After a failure nothing is removed, except a Deployment whose Pod's last
 rules container (`net`) had not ended with status 0 when the wait ended, for
@@ -425,6 +450,9 @@ one. Nothing of the checkout is read through one:
   same files give the same archive.
 - `PREVIEW_ENV_FILE` is read the same way, and a link there, or a linked
   directory on its way, ends `up`: it is not packed as a link instead.
+- With `PREVIEW_PACK_DIR`, the directory and every directory on its way and
+  inside it are opened the same way. The directory being a link, or a link
+  on its way, ends `up`; a link inside is packed as a link.
 - In the Pod, a link is unpacked as a link. Following it there finds only
   the preview Pod's own files, which hold no credential.
 
@@ -662,7 +690,12 @@ cluster, with a key only the router holds, and only when it reads.
   a name not listed, and another value of a fixed one are all refused. Any
   other query is refused. The order is the one the page builds its query
   in: after writing the list, open the page once and check that none of its
-  requests answers 403.
+  requests answers 403. A path that takes an identifier in its query is
+  also listed as `<relay-id-query-path>`, and is then refused without a
+  query. The lines are checked from the top, and the template keeps their
+  order: first the line that refuses a query with a second `?`, then the
+  paths that need their query, the line that lets an empty query through,
+  and the forms.
 - **The path decided on is the path sent.** nginx decodes and normalizes the
   path first (`/../`, `%2F`); the lists are checked on that path, and that
   path is what the API receives, with the query as it came. The relay keeps
@@ -688,6 +721,11 @@ cluster, with a key only the router holds, and only when it reads.
   `Content-Security-Policy: connect-src 'self'`. The preview's code can send
   what it reads through the relay to its own origin only, by fetch, XHR or
   WebSocket.
+
+The router's access log writes a relayed request with the path the relay
+decided on, without its query, and never the key. Its error log keeps only
+critical errors of the relay, so an API that does not answer leaves no
+relayed address or query there; the access log still has the 503.
 
 The values go into the relay's lines of the router's `nginx.conf` (the
 blocks between `relay: begin` and `relay: end` in
@@ -715,9 +753,11 @@ map "$request_method:$relay_path" $relay_refusal {
   default "確認用の画面では保存できません";
 }
 map "$relay_path?$args" $relay_args_refusal {
+  default "確認用の画面では使えない操作です";
+  "~^[^?]*[?][^?]*[?]" "確認用の画面では使えない操作です";
+  "~^/api/projects/[0-9]+/items[?]$" "確認用の画面では使えない操作です";
   "~^[^?]*\?$" "";
   "~^/api/projects/[0-9]+/items[?]owner=demo(&page=[0-9]{1,4})?(&limit=[0-9]{1,4})?$" "";
-  default "確認用の画面では使えない操作です";
 }
 ```
 
