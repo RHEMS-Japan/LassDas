@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -568,9 +569,12 @@ func TestThePagesAddressAndTheWatchersRetryDoNotPostTwice(t *testing.T) {
 }
 
 // Each request's notices are said one at a time and no request waits for
-// another's: two notices of one request take the time of two posts, also on
-// an installation without the preview setting, and notices of two requests
-// take the time of one.
+// another's. Every post takes a fixed time, and each one's start and end are
+// kept: of two notices of one request, the second is posted only after the
+// first has been, also on an installation without the preview setting; of
+// notices of two requests, the second is posted while the first still is.
+// The order of the posts is what is read, not how long the whole took, so a
+// slow machine only moves both ends.
 func TestNoticesOfOneRequestAreSaidOneAtATime(t *testing.T) {
 	const delay = 400 * time.Millisecond
 	for _, scene := range []string{"one-request", "one-request-without-the-setting", "two-requests"} {
@@ -582,11 +586,20 @@ func TestNoticesOfOneRequestAreSaidOneAtATime(t *testing.T) {
 			fixture := &noticeTracker{}
 			fixture.install(t, alwaysChoose("done"))
 			slow := http.DefaultTransport
+			var mu sync.Mutex
+			type post struct{ began, ended time.Time }
+			var posts []post
 			useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
-				if r.Method == http.MethodPost {
-					time.Sleep(delay)
+				if r.Method != http.MethodPost {
+					return slow.RoundTrip(r)
 				}
-				return slow.RoundTrip(r)
+				began := time.Now()
+				time.Sleep(delay)
+				response, err := slow.RoundTrip(r)
+				mu.Lock()
+				posts = append(posts, post{began, time.Now()})
+				mu.Unlock()
+				return response, err
 			})
 			root, first := noticeJob(t, chain.State{})
 			second := first
@@ -597,7 +610,6 @@ func TestNoticesOfOneRequestAreSaidOneAtATime(t *testing.T) {
 				}
 			}
 			var group sync.WaitGroup
-			began := time.Now()
 			for i, directory := range []string{first, second} {
 				group.Add(1)
 				go func(i int, directory string) {
@@ -610,16 +622,16 @@ func TestNoticesOfOneRequestAreSaidOneAtATime(t *testing.T) {
 				}(i, directory)
 			}
 			group.Wait()
-			took := time.Since(began)
-			if posted := len(fixture.all()); posted != 2 {
-				t.Fatalf("%d notices were posted", posted)
+			if posted := len(fixture.all()); posted != 2 || len(posts) != 2 {
+				t.Fatalf("%d notices were posted in %d posts", posted, len(posts))
 			}
-			if scene == "two-requests" {
-				if took >= 2*delay-50*time.Millisecond {
-					t.Fatalf("notices of two requests waited for each other: %v for two posts of %v", took, delay)
-				}
-			} else if took < 2*delay {
-				t.Fatalf("two notices of one request were said at once: %v for two posts of %v", took, delay)
+			sort.Slice(posts, func(i, j int) bool { return posts[i].began.Before(posts[j].began) })
+			overlapped := posts[1].began.Before(posts[0].ended)
+			if scene == "two-requests" && !overlapped {
+				t.Fatalf("notices of two requests waited for each other: the second post began %v after the first ended", posts[1].began.Sub(posts[0].ended))
+			}
+			if scene != "two-requests" && overlapped {
+				t.Fatalf("two notices of one request were posted at once: the second post began %v before the first ended", posts[0].ended.Sub(posts[1].began))
 			}
 		})
 	}
