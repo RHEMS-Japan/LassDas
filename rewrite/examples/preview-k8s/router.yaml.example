@@ -128,6 +128,7 @@ data:
       server {
         listen 8080;
         server_name *.<preview-domain>;
+        absolute_redirect off;
         auth_basic "preview";
         auth_basic_user_file /etc/preview-router/auth/htpasswd;
         error_page 404 502 503 /ended.html;
