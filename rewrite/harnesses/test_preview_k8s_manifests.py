@@ -963,6 +963,16 @@ class RelayNginxTests(unittest.TestCase):
         self.assertEqual((code, kind), (status, "application/json"), body)
         self.assertEqual(json.loads(body), {"error": sentence})
 
+    def test_sign_in_keeps_the_public_origin_behind_tls_termination(self):
+        self.start()
+        code, _, _, headers = self.ask("GET", "/_preview/open?t=" + self.token(self.HOST), cookie=False)
+        self.assertEqual(code, 302)
+        self.assertEqual(headers["location"], "/", "the internal HTTP listener must not become the browser's destination")
+        cookie = headers["set-cookie"].split(";", 1)[0]
+        code, _, body, _ = self.ask("GET", headers["location"], cookie=False, headers={"Cookie": cookie})
+        self.assertEqual(code, 200, body)
+        self.assertEqual(json.loads(body)["from"], "pod")
+
     def test_an_allowed_get_reaches_the_api_with_the_key_and_nothing_of_the_browser(self):
         self.start()
         code, kind, body, headers = self.ask("GET", "/api/items/7", headers={"X-Act-As": "someone-else"})

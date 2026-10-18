@@ -27,6 +27,11 @@ is removed, and the address shows a page that says the preview has ended and
 how to ask for it again. When no preview could be made the question is asked
 as before, in words, with one line saying so.
 
+The router returns a relative `Location: /` after sign-in. Keep
+`absolute_redirect off` in its preview server: TLS ends at the load balancer,
+so nginx's internal HTTP address and port must not become the browser's
+destination. The browser stays on the same public HTTPS origin.
+
 ## What runs where
 
 | Where | What |
