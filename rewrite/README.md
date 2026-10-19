@@ -1694,16 +1694,28 @@ local stand-ins. Neither shows that a real model follows the sentences.
 
 ### A read-only status page
 
-`--stalled-after` sets how long a running request may have no new run-history
-record before the overview shows `stalled` under **Needs attention** (default
-`30m`; positive Go duration syntax such as `45m` or `1h`). The clock uses the
-latest history row's finish time, or its start time if unfinished. A new row
-clears this indication; this measures recorded activity, not proof that a model
-is making useful progress. The card also shows the latest recorded error when
-one exists. A failure that could not be written into history still needs the
-runtime log; the page does not invent a cause. Queued, requester-waiting,
-explicitly paused, stopped and completed requests are not classified as stalled.
-This changes only the read-only display, never execution or retry decisions.
+`--stalled-after` adds a `stalled` badge under **Needs attention** when an active
+request has no new run-history record for `30m` by default (positive Go duration
+syntax such as `45m` or `1h`). Its existing stage and retry status stay visible.
+The clock starts at the later of the newest history row's finish time (start
+time when unfinished) and `pending_since`, the current launch's recorded start.
+Without either time the page does not guess from file modification times.
+Requests with neither a live process nor a pending launch are not classified as
+stalled: they may be waiting for a slot or choosing the next stage. Requester
+waits, model-credit waits, explicit pauses, stops and completion are also
+excluded. A new row or launch resets the clock; this measures recorded
+activity, not proof that a model is making useful progress.
+
+The page shows the latest line explicitly attributed to that request in the
+last 20,000 bytes of `engine.log`, separately from failures in the run history.
+The log has no timestamps: its line may predate recovery and is not asserted
+to be the current cause. Unattributed lines and other request IDs are never
+assigned to a request. Missing log evidence is shown as missing, not inferred
+from an earlier failed stage. The engine's separate
+`intake.stall_notice_minutes` (default 90) measures time without a completed step
+within the current launch for tracker notices; this page's clock instead measures time since a
+new record or launch. Neither this badge nor its threshold changes execution,
+retry decisions or tracker notices.
 
 `bin/ticket-status` serves what the queue directory holds, as it is, over
 HTTP: every accepted request with its state (done, waiting for the requester,

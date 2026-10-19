@@ -102,12 +102,14 @@ details{margin:.4em 0}details summary{cursor:pointer;color:var(--accent);font-si
 {{define "foot"}}<p class="meta">{{t .Lang "Rendered"}} {{.Now}} · {{t .Lang "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only."}}</p></main></body></html>{{end}}
 
 {{define "card"}}<article class="card {{.Lane}}" data-key="{{.Key}}"><a class="key" href="/jobs/{{.ID}}">{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}}</a> <span class="badge {{.Lane}}">{{st .Lang .Status}}</span>
+{{if .Stalled}}<span class="badge attention">{{t .Lang "stalled"}}</span>{{end}}
 <div class="title">{{.Title}}</div>
 {{if .StageCount}}<div class="bar"><i style="width:{{pct .StageIndex .StageCount}}%"></i></div><div class="line">{{st .Lang .Position}}</div>{{else}}{{if .Position}}<div class="line">{{st .Lang .Position}}</div>{{end}}{{end}}
 {{if .Model}}<div class="line model">{{.Model}}</div>{{end}}
 {{if .Attention}}<div class="attn">{{t .Lang .Attention}}</div>{{end}}
 {{if .WorkTime}}<div class="line">{{t .Lang .WorkTime}}</div>{{end}}
 {{if .Failure}}<div class="fail">{{t .Lang "last failure"}}: {{.Failure}}</div>{{end}}
+{{if .Stalled}}<div class="line">{{t .Lang "Latest request line in engine.log (time unknown; not confirmed as the current cause)"}}: {{if .EngineLine}}{{.EngineLine}}{{else}}{{t .Lang "No attributed line in the available log tail"}}{{end}}</div>{{end}}
 <div class="line">{{t .Lang "elapsed"}} {{.Elapsed}} · {{t .Lang "last change"}} {{ago .Lang .Updated}}{{if .Requester}} · {{.Requester}}{{end}}</div></article>{{end}}
 
 {{define "column"}}<section class="col{{if .Col.Done}} done{{end}}" data-stage="{{.Col.Key}}"><h3><span>{{sn .Lang .Col.Key}}{{if and (ne .Col.Key "done") (ne .Col.Key "other")}}<small>{{.Col.Key}}</small>{{end}}</span><span class="count">{{len .Col.Jobs}}</span></h3>
@@ -138,10 +140,11 @@ details{margin:.4em 0}details summary{cursor:pointer;color:var(--accent);font-si
 
 {{define "job"}}{{with .Job}}{{template "head" (head $.Lang (printf "%s %s" .Key (t $.Lang "status")) .Refresh)}}{{template "top" $}}<main id="main">
 <h1><a class="key" href="/jobs/{{.ID}}">{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}}</a> {{.Title}}</h1>
-<div class="strip"><span class="badge {{.Lane}}">{{st $.Lang .Status}}</span>{{if .State}}{{if and .State.Waiting (ne .Lane "awaiting") (not .Stopped)}}<span class="badge awaiting">{{t $.Lang "waiting for the requester"}}</span>{{end}}{{end}}</div>
+<div class="strip"><span class="badge {{.Lane}}">{{st $.Lang .Status}}</span>{{if .Stalled}}<span class="badge attention">{{t $.Lang "stalled"}}</span>{{end}}{{if .State}}{{if and .State.Waiting (ne .Lane "awaiting") (not .Stopped)}}<span class="badge awaiting">{{t $.Lang "waiting for the requester"}}</span>{{end}}{{end}}</div>
 {{if .Attention}}<p class="attn">{{t $.Lang .Attention}}</p>{{end}}
 {{if .WorkTime}}<p class="meta">{{t $.Lang .WorkTime}}</p>{{end}}
 {{if .Failure}}<p class="fail">{{t $.Lang "last failure"}}: {{.Failure}}</p>{{end}}
+{{if .Stalled}}<p class="meta">{{t $.Lang "Latest request line in engine.log (time unknown; not confirmed as the current cause)"}}: {{if .EngineLine}}{{.EngineLine}}{{else}}{{t $.Lang "No attributed line in the available log tail"}}{{end}}</p>{{end}}
 {{range .Notes}}<p class="err">{{.}}</p>{{end}}
 <div class="panel"><dl class="grid">
 <dt>{{t $.Lang "Position"}}</dt><dd>{{if .Position}}{{st $.Lang .Position}}{{else}}—{{end}}</dd>

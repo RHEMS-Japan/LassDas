@@ -51,14 +51,14 @@ func run(ctx context.Context, args []string, log io.Writer) error {
 	runDir := flags.String("run-dir", "", "the runtime's queue directory, read only")
 	configPath := flags.String("config", "", "the runtime's configuration file, shown as it is read; optional")
 	listen := flags.String("listen", "127.0.0.1:9200", "address to serve on")
-	stalledAfter := flags.Duration("stalled-after", 30*time.Minute, "show an active request as stalled after this long without a new history record")
+	stalledAfter := flags.Duration("stalled-after", defaultStalledAfter, "show an active request as stalled after this long without a new record or launch")
 	userEnv := flags.String("auth-user-env", "", "environment variable holding the user name for HTTP basic authentication; empty serves without one")
 	passwordEnv := flags.String("auth-password-env", "", "environment variable holding the password for HTTP basic authentication")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *runDir == "" || flags.NArg() != 0 {
-		return errors.New("provide --run-dir and optionally --config, --listen, --auth-user-env and --auth-password-env")
+		return errors.New("provide --run-dir and optionally --config, --listen, --stalled-after, --auth-user-env and --auth-password-env")
 	}
 	s, err := newServer(*runDir, *configPath, *userEnv, *passwordEnv)
 	if err != nil {
@@ -101,7 +101,7 @@ type server struct {
 
 func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error) {
 	s := &server{runDir: runDir, location: time.Local, diskPercent: diskusage.Percent}
-	s.stalledAfter = 30 * time.Minute
+	s.stalledAfter = defaultStalledAfter
 	if configPath != "" {
 		raw, err := os.ReadFile(configPath)
 		if err != nil {
@@ -138,7 +138,7 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 		"card": func(p page, j *job) cardData {
 			return cardData{Lang: p.Lang, ID: j.ID, Key: j.Key, Title: j.Title, Lane: j.Lane, Status: j.Status,
 				Position: j.Position, StageIndex: j.StageIndex, StageCount: j.StageCount, Model: j.Model, Attention: j.Attention, Failure: j.Failure,
-				Elapsed: j.Elapsed, Updated: j.Updated, Requester: j.Requester, WorkTime: j.WorkTime}
+				Elapsed: j.Elapsed, Updated: j.Updated, Requester: j.Requester, WorkTime: j.WorkTime, Stalled: j.Stalled, EngineLine: j.EngineLine}
 		},
 	}).Parse(pageTemplates))
 	return s, nil
@@ -283,6 +283,8 @@ type job struct {
 	Current     string
 	Stage       string
 	Failure     string
+	Stalled     bool
+	EngineLine  string
 	Stopped     bool
 	Reported    bool
 	StopBroken  bool
@@ -795,8 +797,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 				j.Receipt = string(raw)
 			}
 		}
-		j.derive(now)
-		s.markStalled(j, now)
+		j.derive(now, s.stalledAfter)
 		return j
 	}
 	if names, _ := filepath.Glob(filepath.Join(dir, "answer-*.json")); len(names) > 0 {
@@ -924,8 +925,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 			j.Homes = append(j.Homes, logs)
 		}
 	}
-	j.derive(now)
-	s.markStalled(j, now)
+	j.derive(now, s.stalledAfter)
 	j.Workspace = s.readWorkspace(id)
 	return j
 }
@@ -980,7 +980,11 @@ func (j *job) endedUnmerged() bool {
 	return j.Receipt != "" && json.Unmarshal([]byte(j.Receipt), &receipt) == nil && receipt.LeftToPerson && receipt.MergeSHA == ""
 }
 
-func (j *job) derive(now time.Time) {
+func (j *job) derive(now time.Time, stalledAfter time.Duration) {
+	j.Stalled = false
+	if stalledAfter <= 0 {
+		stalledAfter = defaultStalledAfter
+	}
 	end := now
 	if state := j.State; state != nil {
 		var last time.Time
@@ -1172,12 +1176,18 @@ func (j *job) derive(now time.Time) {
 		if n := len(state.History); n > 0 {
 			last = state.History[n-1].FinishedAt
 			record := state.History[n-1]
+			if last.IsZero() {
+				last = record.StartedAt
+			}
 			// The runtime's own failure (a router it could not reach) needs a
 			// person; its note that a stopped action is being taken up again
 			// after a restart is the run going on, not a call for attention.
 			if record.Speaker == "runtime" && record.Error != "" && !record.Interrupted && len(j.Live) == 0 {
 				j.Lane, j.Attention = "attention", record.Error
 			}
+		}
+		if state.PendingSince.After(last) {
+			last = state.PendingSince
 		}
 		// A budget pause holds the request until the runtime says the budget
 		// is back, so the later of the two lines is the one that stands; a
@@ -1191,6 +1201,12 @@ func (j *job) derive(now time.Time) {
 				continue
 			}
 			switch stringOf(notice["kind"]) {
+			case "accepted", "resumed":
+				text := stringOf(notice["text"])
+				budgetWait := "モデル利用枠の残りが設定の下限を下回っているため、待機中です。枠が戻り次第、自動で処理を始めます。"
+				if notice["predates"] != true && (strings.HasPrefix(text, "受け付けました。"+budgetWait) || strings.HasPrefix(text, "返答を受け取りました。"+budgetWait)) {
+					pause = text
+				}
 			case "budget-paused":
 				pause = stringOf(notice["text"])
 			case "budget-restored":
@@ -1201,17 +1217,27 @@ func (j *job) derive(now time.Time) {
 		}
 		if pause != "" {
 			j.Lane, j.Attention = "attention", pause
-		} else if stall != "" {
-			j.Lane, j.Attention = "attention", stall
+		} else {
+			if stall != "" {
+				j.Lane, j.Attention = "attention", stall
+			}
+			if (len(j.Live) > 0 || state.Pending != nil) && !last.IsZero() && now.Sub(last) > stalledAfter {
+				j.Stalled, j.Lane = true, "attention"
+				if j.Attention == "" {
+					j.Attention = "No new record or launch for " + humanDuration(now.Sub(last)) + "."
+				}
+			}
 		}
 	}
 	// A controller pause remains unfinished, including while release writes
 	// are being recovered. Old live files do not make it a running request.
 	if j.State == nil || !j.State.Done {
 		if j.PauseBroken {
+			j.Stalled = false
 			j.Lane, j.Attention = "attention", "the saved pause record is unreadable; work remains held until the operator repairs it"
 			j.Status = "held: the saved pause record is unreadable"
 		} else if j.WorkPause != "" {
+			j.Stalled = false
 			j.Lane, j.Attention, j.Status = "awaiting", j.WorkPause, j.PauseStatus
 		}
 	}
@@ -1221,9 +1247,11 @@ func (j *job) derive(now time.Time) {
 	// A stop record the runtime cannot read holds the work, so it needs one.
 	switch {
 	case j.StopBroken && (j.State == nil || !j.State.Done):
+		j.Stalled = false
 		j.Lane, j.Attention = "attention", "the saved stop instruction is unreadable; the work is held"
 		j.Status = "held: the saved stop instruction is unreadable"
 	case j.Stopped && (j.State == nil || !j.State.Done):
+		j.Stalled = false
 		j.Lane, j.Attention = "stopped", ""
 		j.Status = "stopped by the requester; report pending"
 		if j.Reported {
@@ -1655,6 +1683,11 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 	data.Columns = columns(data.Stages, jobs)
 	if log, err := s.readIn("engine.log", 20000); err == nil {
 		data.Log = log
+		for _, j := range jobs {
+			if j.Stalled {
+				j.EngineLine = latestRequestLog(log, j.ID)
+			}
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		data.Notes = append(data.Notes, "engine.log could not be read: "+err.Error())
 	} else {
@@ -1682,7 +1715,13 @@ func (s *server) jobPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
-	s.render(w, "job", page{Lang: language(r), Now: s.formatTime(now), RunDir: s.runDir, Job: s.loadJob(id, now, true), Config: s.configRaw != nil})
+	j := s.loadJob(id, now, true)
+	if j.Stalled {
+		if log, err := s.readIn("engine.log", 20000); err == nil {
+			j.EngineLine = latestRequestLog(log, id)
+		}
+	}
+	s.render(w, "job", page{Lang: language(r), Now: s.formatTime(now), RunDir: s.runDir, Job: j, Config: s.configRaw != nil})
 }
 
 func (s *server) rawFile(w http.ResponseWriter, r *http.Request) {
@@ -1823,6 +1862,8 @@ type columnData struct {
 }
 
 type cardData struct {
+	Stalled    bool
+	EngineLine string
 	Lang       string
 	ID         string
 	Key        string
@@ -1920,6 +1961,9 @@ var japanese = map[string]string{
 	"new file:": "新規ファイル:", "(symbolic link; not followed, the page stays inside the queue)": "(シンボリックリンク。たどらない。画面は queue の中だけを見せる)",
 	"Name": "名前", "Size": "サイズ", "Modified": "更新", "files": "ファイル",
 	"done": "完了", "waiting for the requester's reply": "依頼者の返事待ち", "between steps": "工程の切れ目", "no run record yet": "実行記録なし",
+	"stalled": "停滞中",
+	"Latest request line in engine.log (time unknown; not confirmed as the current cause)": "本体ログ engine.log の最新の依頼行 (時刻不明・現在の原因とは未確認)",
+	"No attributed line in the available log tail":                                         "読めたログ末尾に、この依頼の行がありません",
 	"Done without a change": "変更なしで完了", "done without a change; nothing was delivered": "変更なしで完了 (何も納品していません)",
 	"Done with the pull request open": "PR を開いて完了", "Done, the pull request closed unmerged": "PR が閉じられて終了",
 	"done; the pull request was closed without being merged, so nothing was delivered": "完了 (PR はマージされずに閉じられたので、何も納品していません)", "done; the pull request is open, its merge left to a person": "完了 (PR は開いたまま。merge は人に任せています)",
@@ -1948,6 +1992,9 @@ func stageName(lang, name string) string {
 
 func translate(lang, text string) string {
 	if lang == "ja" {
+		if strings.HasPrefix(text, "No new record or launch for ") {
+			return "新しい実行記録・起動がない時間: " + strings.TrimSuffix(strings.TrimPrefix(text, "No new record or launch for "), ".") + "。"
+		}
 		if strings.Contains(text, "\n") {
 			lines := strings.Split(text, "\n")
 			for i := range lines {
@@ -1991,8 +2038,6 @@ func localize(lang, status string) string {
 		prefix, status = "中断した工程の再開中。", rest
 	}
 	switch {
-	case status == "stalled":
-		return "停滞中 (stalled)"
 	case strings.HasPrefix(status, "running "):
 		return prefix + "実行中: " + stageName(lang, strings.TrimPrefix(status, "running "))
 	case strings.HasPrefix(status, "assigned to ") && strings.HasSuffix(status, ", no process output yet"):

@@ -190,7 +190,7 @@ func TestWorkLimitStatusSeparatesMeasuredTimeFromAnOpenInterval(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(directory, "work-limit.json"), raw, 0600); err != nil {
 				t.Fatal(err)
 			}
-			s := &server{runDir: root, location: time.UTC}
+			s := &server{runDir: root, location: time.UTC, stalledAfter: 100 * 365 * 24 * time.Hour}
 			j := s.loadJob("7", time.Now(), true)
 			if variant == "delivered" {
 				_, body := get(t, serve(t, root, fixtureConfig(t), "", ""), "/jobs/7")
