@@ -703,21 +703,34 @@ class PreviewExampleTests(unittest.TestCase):
         small = json.dumps(valid).encode()
         cases += [(small + b" " * (1024 - len(small)), "database: start failed"),
                   (small + b" " * (1025 - len(small)), "application did not start"),
+                  (b"[" * 1000, "application did not start"),
                   (b"not-json", "application did not start")]
         for data, expected in cases:
             with self.subTest(data=data[:90], size=len(data)):
                 cluster = Mock()
                 cluster.run.return_value = subprocess.CompletedProcess([], 0, data, b"private error")
-                self.assertEqual(self.tool.startup_diagnostic(cluster, settings, pod, archive), expected)
-                self.assertEqual(cluster.run.call_args.kwargs["output_limit"], 1025)
+                try:
+                    observed = self.tool.startup_diagnostic(cluster, settings, pod, archive)
+                except RecursionError:
+                    self.fail("deeply nested diagnostic must return the safe reason, not a traceback")
+                self.assertEqual(observed, expected)
+                self.assertEqual(cluster.run.call_args.kwargs.get("output_limit"), 1025)
+        cluster.run.return_value = subprocess.CompletedProcess([], 1, small, b"private error")
+        self.assertEqual(self.tool.startup_diagnostic(cluster, settings, pod, archive), "application did not start")
 
     def test_diagnostic_subprocess_output_is_bounded_even_if_head_is_replaced(self):
+        from unittest.mock import patch
         settings = self.tool.read_settings(self.environment(), "up")
         cluster = self.tool.Cluster(settings, self.environment(), str(self.tmp), "unused")
         for size in (1024, 1025, 1000000):
             with self.subTest(size=size):
                 cluster.base = [sys.executable, "-c", "import os; os.write(2, b'e' * 100000); os.write(1, b'x' * " + str(size) + ")"]
-                done = cluster.run([], limited=False, timeout=2, output_limit=1025)
+                with patch.object(self.tool.subprocess, "Popen", wraps=subprocess.Popen) as started:
+                    try:
+                        done = cluster.run(["exec"], limited=False, timeout=2, output_limit=1025)
+                    except self.tool.Failure as failure:
+                        self.fail("bounded diagnostic reader did not finish: " + str(failure))
+                self.assertEqual(started.call_args.kwargs.get("stderr"), subprocess.DEVNULL)
                 self.assertEqual(len(done.stdout), min(size, 1025))
                 self.assertEqual(done.stderr, b"")
                 if size == 1024:

@@ -417,7 +417,8 @@ none set, the Pod template, archive and change identifier are unchanged.
   ordinary container), and, for migration only, `file` (a name actually
   packed under `migrations/`) and `code` (four or five decimal digits).
   Only these fields are printed, up to 300 characters. Missing, unreadable
-  or malformed output becomes `application did not start`, with a known
+  or malformed output, including JSON nested too deeply to read, becomes
+  `application did not start`, with a known
   waiting reason such as `CrashLoopBackOff` and its container when available; neither raw
   output, container error messages nor file contents are printed. A request
   can write this file: this is a constrained diagnostic, not trusted proof
@@ -556,7 +557,8 @@ one. Nothing of the checkout is read through one:
   on its way, ends `up`; a link inside is packed as a link.
 - In the Pod, a link is unpacked as a link. Following it there finds only
   the preview Pod's own files. These can hold private inputs and disposable
-  credentials when optional settings supply them; never real credentials.
+  credentials when optional settings supply them. The operator must keep real
+  credentials out; this program cannot prove that those files contain none.
 
 ## The shape the cluster accepts
 

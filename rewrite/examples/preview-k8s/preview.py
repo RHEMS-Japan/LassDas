@@ -1005,7 +1005,7 @@ def startup_diagnostic(cluster, settings, pod, archive):
         elif "file" in value or "code" in value:
             return fallback
         return message if len(message) <= 300 else fallback
-    except (Failure, OSError, ValueError, KeyError, tarfile.TarError):
+    except (Failure, OSError, ValueError, KeyError, RecursionError, tarfile.TarError):
         return fallback
 
 
