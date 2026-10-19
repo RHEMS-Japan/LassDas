@@ -38,7 +38,7 @@ func TestOverviewShowsQueueUsageAndAnUnavailableReading(t *testing.T) {
 	s.diskPercent = func(string) (float64, error) { return 0, errors.New("fixture usage unavailable") }
 	w := httptest.NewRecorder()
 	s.overview(w, httptest.NewRequest("GET", "/", nil))
-	if !strings.Contains(w.Body.String(), "fixture usage unavailable") || strings.Contains(w.Body.String(), "0.0%") {
+	if !strings.Contains(w.Body.String(), "usage is unknown: fixture usage unavailable") || strings.Contains(w.Body.String(), "0.0%") {
 		t.Fatal("unknown usage was hidden")
 	}
 }

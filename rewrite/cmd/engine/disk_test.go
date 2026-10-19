@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -22,6 +23,15 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func checkQueueDisk(ctx context.Context, cfg config, n notices, percent float64) error {
+	needed, _, err := capacityNoticeNeeded(n, n.recordOnly)
+	if err != nil {
+		return err
+	}
+	_, err = noteQueueDisk(ctx, cfg, n, percent, needed)
+	return err
+}
+
 func TestQueueDiskWarningCrossesThresholdOnceAcrossRestarts(t *testing.T) {
 	for _, threshold := range []int{85, 92, 100} {
 		t.Run(fmt.Sprint(threshold), func(t *testing.T) {
@@ -34,7 +44,7 @@ func TestQueueDiskWarningCrossesThresholdOnceAcrossRestarts(t *testing.T) {
 			limit := float64(threshold)
 			for i, percent := range []float64{limit - 1, limit, limit + 0.5, limit + 1, limit - 1, limit + 1} {
 				// Reconstruct from disk each time, like a controller restart.
-				if err := noteQueueDisk(context.Background(), cfg, requestNotices(cfg, announcedIssue(), directory), percent); err != nil {
+				if err := checkQueueDisk(context.Background(), cfg, requestNotices(cfg, announcedIssue(), directory), percent); err != nil {
 					t.Fatal(err)
 				}
 				want := 0
@@ -71,16 +81,16 @@ func TestQueueDiskRecoversPostAndDoesNotBackdateCurrentCondition(t *testing.T) {
 	tracker := &noticeTracker{postFail: 1}
 	tracker.install(t, func(r *http.Request) (*http.Response, error) { return nil, fmt.Errorf("unexpected request") })
 	n := requestNotices(cfg, announcedIssue(), directory)
-	if err := noteQueueDisk(context.Background(), cfg, n, 100); err == nil {
+	if err := checkQueueDisk(context.Background(), cfg, n, 100); err == nil {
 		t.Fatal("failure hidden")
 	}
-	if err := noteQueueDisk(context.Background(), cfg, n, 100); err != nil {
+	if err := checkQueueDisk(context.Background(), cfg, n, 100); err != nil {
 		t.Fatal(err)
 	}
 	if len(tracker.posted) != 1 {
 		t.Fatalf("posts %v", tracker.posted)
 	}
-	if err := noteQueueDisk(context.Background(), cfg, n, 100); err != nil || len(tracker.posted) != 1 {
+	if err := checkQueueDisk(context.Background(), cfg, n, 100); err != nil || len(tracker.posted) != 1 {
 		t.Fatal("repeated", err)
 	}
 }
@@ -142,9 +152,15 @@ func TestQueueDiskPollCoversWaitingPausedHeldAndActive(t *testing.T) {
 				return 100, nil
 			}
 			defer func() { queueDiskPercent = original }()
-			finish := startStopQueue(t, cfg, root, 20*time.Millisecond, io.Discard)
+			var output bytes.Buffer
+			finish := startStopQueue(t, cfg, root, 20*time.Millisecond, &output)
 			if mode == "done" || mode == "stopped" {
-				waitFor(t, func() bool { return calls.Load() >= 2 })
+				waitFor(t, func() bool { return calls.Load() >= 3 })
+				// A terminal request is no longer re-read by the capacity path.
+				if err := os.WriteFile(filepath.Join(directory, "notices.json"), []byte("broken fixture"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				waitFor(t, func() bool { return calls.Load() >= 5 })
 			} else if mode == "off" {
 				waitFor(t, func() bool { _, err := os.Stat(filepath.Join(directory, "workspace", "active.txt")); return err == nil })
 			} else {
@@ -163,6 +179,9 @@ func TestQueueDiskPollCoversWaitingPausedHeldAndActive(t *testing.T) {
 				waitFor(t, func() bool { _, err := os.Stat(filepath.Join(directory, "workspace", "active.txt")); return err == nil })
 			}
 			finish()
+			if strings.Contains(output.String(), "capacity notice record unavailable") {
+				t.Fatal("terminal capacity record was read again: " + output.String())
+			}
 			warnings := 0
 			for _, text := range tracker.posted {
 				if strings.Contains(text, "保存領域") {
@@ -197,11 +216,117 @@ func TestRecordedCapacityDoesNotReadHistoryOrFlushOtherPendingNotices(t *testing
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "run", "history.json"), []byte("broken"), 0600); err != nil {
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		t.Error("recorded capacity made an unexpected tracker request")
+		return nil, fmt.Errorf("unexpected tracker request")
+	})
+	if err := checkQueueDisk(context.Background(), cfg, n, 100); err != nil {
 		t.Fatal(err)
 	}
-	if err := noteQueueDisk(context.Background(), cfg, n, 100); err != nil {
+}
+
+func TestTerminalCapacitySettlesOnlyItsPendingRecord(t *testing.T) {
+	for _, mode := range []string{"done", "stopped"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := watchConfiguration(t)
+			cfg.Intake.StopUserIDs = []int64{55}
+			_, directory := noticeJob(t, chain.State{})
+			n := requestNotices(cfg, announcedIssue(), directory)
+			n.recordOnly = true
+			if err := n.save(noticeLog{Notices: []noticeRecord{{Kind: resumeNotice, Text: "keep pending"}}}); err != nil {
+				t.Fatal(err)
+			}
+			useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+				t.Error("terminal capacity must not contact the tracker")
+				return nil, fmt.Errorf("unexpected tracker request")
+			})
+			if err := checkQueueDisk(context.Background(), cfg, n, 100); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "done" {
+				writeJobHistory(t, directory, chain.State{Done: true})
+			} else if err := writeRuntimeFile(filepath.Join(directory, "stop-request.json"), stopComment(51, 55, "停止")); err != nil {
+				t.Fatal(err)
+			}
+			n.recordOnly = false
+			unlock := n.hold()
+			settled, err := noteQueueDisk(context.Background(), cfg, n, 100, true)
+			unlock()
+			if err != nil || settled {
+				t.Fatalf("busy terminal record was cached: %v %v", settled, err)
+			}
+			settled, err = noteQueueDisk(context.Background(), cfg, n, 100, true)
+			if err != nil || !settled {
+				t.Fatalf("terminal record not settled: %v %v", settled, err)
+			}
+			saved, err := n.load()
+			if err != nil || len(saved.Notices) != 2 {
+				t.Fatalf("records lost: %+v %v", saved, err)
+			}
+			if pendingNotice(noticeLog{Notices: saved.Notices[1:]}) >= 0 || saved.Notices[1].PostedAt != nil {
+				t.Fatal("terminal capacity was left pending or falsely marked posted")
+			}
+			if pendingNotice(saved) != 0 {
+				t.Fatal("another pending notice was changed")
+			}
+			needed, settled, err := capacityNoticeNeeded(n, false)
+			if err != nil || needed || !settled {
+				t.Fatalf("restart would retry obsolete capacity: %v %v %v", needed, settled, err)
+			}
+		})
+	}
+}
+
+func TestTerminalCapacityIsSettledWhenNewWarningsAreOff(t *testing.T) {
+	for _, mode := range []string{"done", "stopped"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := watchConfiguration(t)
+			off := 0
+			cfg.Intake.DiskNoticePercent = &off
+			root, directory := noticeJob(t, chain.State{Done: mode == "done"})
+			if mode == "stopped" {
+				if err := writeRuntimeFile(filepath.Join(directory, "stop-request.json"), stopComment(51, 55, "停止")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			n := requestNotices(cfg, announcedIssue(), directory)
+			if err := n.save(noticeLog{Notices: []noticeRecord{{Kind: diskNotice, Text: "recorded before the run ended"}}}); err != nil {
+				t.Fatal(err)
+			}
+			tracker := &noticeTracker{}
+			tracker.install(t, func(r *http.Request) (*http.Response, error) { return nil, fmt.Errorf("unexpected tracker request") })
+			finish := startStopQueue(t, cfg, root, 20*time.Millisecond, io.Discard)
+			waitFor(t, func() bool {
+				saved, err := n.load()
+				return err == nil && len(saved.Notices) == 1 && saved.Notices[0].Obsolete
+			})
+			finish()
+			if tracker.attempts() != 0 {
+				t.Fatal("terminal warning was posted")
+			}
+		})
+	}
+}
+
+func TestCapacityOnlyReportsItsOwnConfirmation(t *testing.T) {
+	cfg := watchConfiguration(t)
+	_, directory := noticeJob(t, chain.State{})
+	n := requestNotices(cfg, announcedIssue(), directory)
+	if err := n.save(noticeLog{Notices: []noticeRecord{
+		{Kind: resumeNotice, Text: "another notice"},
+		{Kind: diskNotice, Text: "capacity warning"},
+	}}); err != nil {
 		t.Fatal(err)
+	}
+	tracker := &noticeTracker{}
+	tracker.install(t, func(r *http.Request) (*http.Response, error) { return nil, fmt.Errorf("unexpected tracker request") })
+	settled, err := noteQueueDisk(context.Background(), cfg, n, 100, true)
+	if err != nil || settled || len(tracker.posted) != 1 || tracker.posted[0] != "another notice" {
+		t.Fatalf("another notice counted as capacity: settled=%v posts=%v err=%v", settled, tracker.posted, err)
+	}
+	settled, err = noteQueueDisk(context.Background(), cfg, n, 100, true)
+	if err != nil || !settled || len(tracker.posted) != 2 || tracker.posted[1] != "capacity warning" {
+		t.Fatalf("capacity not confirmed: settled=%v posts=%v err=%v", settled, tracker.posted, err)
 	}
 }
 
@@ -215,7 +340,7 @@ func TestActiveCapacityOnlyRecordsWithoutWaitingForNoticeTraffic(t *testing.T) {
 	if err := n.save(noticeLog{Notices: []noticeRecord{{Kind: resumeNotice, Text: "pending"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := noteQueueDisk(context.Background(), cfg, n, 100); err != nil {
+	if err := checkQueueDisk(context.Background(), cfg, n, 100); err != nil {
 		t.Fatal(err)
 	}
 	saved, err := n.load()
@@ -228,7 +353,7 @@ func TestActiveCapacityOnlyRecordsWithoutWaitingForNoticeTraffic(t *testing.T) {
 	}
 	unlock := n.hold()
 	done := make(chan error, 1)
-	go func() { done <- noteQueueDisk(context.Background(), cfg, n, 100) }()
+	go func() { done <- checkQueueDisk(context.Background(), cfg, n, 100) }()
 	select {
 	case err := <-done:
 		unlock()
@@ -265,7 +390,7 @@ func TestCurrentCapacityConditionDoesNotReviveOtherUndatedEvents(t *testing.T) {
 	if len(tracker.posted) != 0 {
 		t.Fatal("undated historical event was published as new")
 	}
-	if err := noteQueueDisk(context.Background(), cfg, n, 100); err != nil {
+	if err := checkQueueDisk(context.Background(), cfg, n, 100); err != nil {
 		t.Fatal(err)
 	}
 	if len(tracker.posted) != 1 {

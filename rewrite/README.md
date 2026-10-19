@@ -1742,6 +1742,14 @@ The collector skips confirmed capacity notices before reading request history.
 For active requests it only records the new notice, without waiting for a busy
 notice lock or calling the tracker; the request's watcher submits it. Inactive
 requests retry an unconfirmed submission, logging each failure reason once.
+If a request ends between recording and submission, its pending capacity
+notice is marked obsolete without posting; other pending notices are unchanged.
+This also applies if usage has fallen or new capacity warnings are disabled.
+Successfully read done/stopped requests are excluded from further capacity
+checks for that collector's lifetime. A busy notice lock or failed save is
+retried, never treated as a settled warning. Errors while settling another
+notice use a neutral notice label, and a prior send error is cleared only after
+the capacity record is confirmed or becomes obsolete.
 Capacity can be recorded before the acceptance receipt when a request first
 arrives with storage already high. A stop not yet observed by the controller
 can still be followed by this notice; it does not cancel the stop request.

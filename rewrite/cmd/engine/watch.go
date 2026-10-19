@@ -333,6 +333,21 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	diskTrouble := ""
 	diskSaid := map[string]bool{}
 	diskSendTrouble := map[string]string{}
+	retireCapacity := func(name, directory string) {
+		if diskSaid[name] {
+			return
+		}
+		settled, err := obsoleteCapacity(notices{directory: directory})
+		if err != nil {
+			if diskSendTrouble[name] != err.Error() {
+				observe("request " + name + ": capacity notice state not saved: " + err.Error())
+				diskSendTrouble[name] = err.Error()
+			}
+		} else if settled {
+			diskSaid[name] = true
+			delete(diskSendTrouble, name)
+		}
+	}
 	trim := func(name, directory string, say func(string)) {
 		if err := trimFinished(directory); err != nil {
 			reason := err.Error()
@@ -426,6 +441,9 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			if diskNeeded {
 				needed, confirmed, err := capacityNoticeNeeded(notices{directory: directory}, active[entry.Name()])
 				diskSaid[entry.Name()] = confirmed
+				if confirmed {
+					delete(diskSendTrouble, entry.Name())
+				}
 				diskNeeded = needed && err == nil
 				if err != nil && diskSendTrouble[entry.Name()] != err.Error() {
 					say("capacity notice record unavailable: " + err.Error())
@@ -448,12 +466,14 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			if diskNeeded {
 				notice := requestNotices(cfg, issue, directory)
 				notice.recordOnly = active[entry.Name()]
-				if err := noteQueueDisk(ctx, cfg, notice, percent); err != nil {
+				settled, err := noteQueueDisk(ctx, cfg, notice, percent, diskNeeded)
+				if err != nil {
 					if diskSendTrouble[entry.Name()] != err.Error() {
-						say("capacity notice not confirmed: " + err.Error())
+						say("notice not confirmed while checking capacity: " + err.Error())
 						diskSendTrouble[entry.Name()] = err.Error()
 					}
-				} else {
+				} else if settled {
+					diskSaid[entry.Name()] = true
 					delete(diskSendTrouble, entry.Name())
 				}
 			}
@@ -464,6 +484,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				observe("request " + entry.Name() + " held: " + err.Error())
 				continue
 			} else if stopped {
+				retireCapacity(entry.Name(), directory)
 				applyStatus(ctx, cfg, issue, directory, stoppedStatus, say)
 				assignTurn(ctx, cfg, issue, directory, "requester", say)
 				// A page put up for the requester goes down in a launch of
@@ -517,6 +538,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				continue
 			}
 			if state.Done {
+				retireCapacity(entry.Name(), directory)
 				applyStatus(ctx, cfg, issue, directory, deliveredStatus, say)
 				assignTurn(ctx, cfg, issue, directory, "requester", say)
 				pageSettled := downs.settle(issue, directory, entry.Name(), say)

@@ -34,7 +34,7 @@ func (s *server) readDisk() (*diskReading, error) {
 	}
 	percent, err := measure(s.runDir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("usage is unknown: %w", err)
 	}
 	threshold := diskusage.Threshold(intake.DiskNoticePercent)
 	return &diskReading{Usage: fmt.Sprintf("%.1f%%", math.Floor(percent*10)/10), Threshold: threshold, Warning: diskusage.Over(percent, threshold)}, nil

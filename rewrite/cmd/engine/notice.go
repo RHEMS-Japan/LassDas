@@ -160,7 +160,9 @@ type noticeRecord struct {
 	WrittenAt time.Time  `json:"written_at"`
 	PostedAt  *time.Time `json:"posted_at,omitempty"`
 	Predates  bool       `json:"predates,omitempty"`
-	Models    string     `json:"models,omitempty"`
+	// Obsolete keeps a capacity warning that was pending when its request ended.
+	Obsolete bool   `json:"obsolete,omitempty"`
+	Models   string `json:"models,omitempty"`
 	// Event is an optional controller occurrence, separate from a notice's
 	// kind. Notices without one keep their existing interval and once rules.
 	Event string `json:"event,omitempty"`
@@ -248,7 +250,7 @@ func (n notices) save(log noticeLog) error {
 
 func pendingNotice(log noticeLog) int {
 	for i := range log.Notices {
-		if log.Notices[i].PostedAt == nil && !log.Notices[i].Predates {
+		if log.Notices[i].PostedAt == nil && !log.Notices[i].Predates && !log.Notices[i].Obsolete {
 			return i
 		}
 	}
