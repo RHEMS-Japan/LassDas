@@ -65,7 +65,7 @@ h3{font-size:.95em;margin:.8em 0 .3em}
 .attn{color:var(--attn);font-size:.85em;white-space:pre-wrap;margin:.45em 0;background:var(--attn-soft);border-radius:8px;padding:.45em .6em}
 .fail{color:var(--wait);font-size:.82em;white-space:pre-wrap;word-break:break-word;margin:.45em 0;background:var(--wait-soft);border-radius:8px;padding:.45em .6em;line-height:1.45}
 .card .badge{white-space:normal;line-height:1.5;text-align:left}
-.meta{color:var(--muted);font-size:.85em}
+.meta{color:var(--muted);font-size:.85em;overflow-wrap:anywhere}
 .err{color:var(--attn)}
 pre{background:var(--paper-2);border:1px solid var(--line);border-radius:10px;padding:.8em .95em;margin:.4em 0;font:.83em/1.5 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:30em;overflow:auto;color:var(--ink-2)}
 table{border-collapse:collapse;width:100%;background:var(--paper)}
@@ -109,7 +109,7 @@ details{margin:.4em 0}details summary{cursor:pointer;color:var(--accent);font-si
 {{if .Attention}}<div class="attn">{{t .Lang .Attention}}</div>{{end}}
 {{if .WorkTime}}<div class="line">{{t .Lang .WorkTime}}</div>{{end}}
 {{if .Failure}}<div class="fail">{{t .Lang "last failure"}}: {{.Failure}}</div>{{end}}
-{{if .Stalled}}<div class="line">{{t .Lang "Latest request line in engine.log (time unknown; not confirmed as the current cause)"}}: {{if .EngineLine}}{{.EngineLine}}{{else}}{{t .Lang "No attributed line in the available log tail"}}{{end}}</div>{{end}}
+{{if .Stalled}}<div class="line">{{t .Lang "Latest request line in engine.log (time unknown; not confirmed as the current cause)"}}: {{if .EngineLogError}}{{.EngineLogError}}{{else if .EngineLine}}{{.EngineLine}}{{else}}{{t .Lang "No attributed line in the available log tail"}}{{end}}</div>{{end}}
 <div class="line">{{t .Lang "elapsed"}} {{.Elapsed}} · {{t .Lang "last change"}} {{ago .Lang .Updated}}{{if .Requester}} · {{.Requester}}{{end}}</div></article>{{end}}
 
 {{define "column"}}<section class="col{{if .Col.Done}} done{{end}}" data-stage="{{.Col.Key}}"><h3><span>{{sn .Lang .Col.Key}}{{if and (ne .Col.Key "done") (ne .Col.Key "other")}}<small>{{.Col.Key}}</small>{{end}}</span><span class="count">{{len .Col.Jobs}}</span></h3>
@@ -144,7 +144,7 @@ details{margin:.4em 0}details summary{cursor:pointer;color:var(--accent);font-si
 {{if .Attention}}<p class="attn">{{t $.Lang .Attention}}</p>{{end}}
 {{if .WorkTime}}<p class="meta">{{t $.Lang .WorkTime}}</p>{{end}}
 {{if .Failure}}<p class="fail">{{t $.Lang "last failure"}}: {{.Failure}}</p>{{end}}
-{{if .Stalled}}<p class="meta">{{t $.Lang "Latest request line in engine.log (time unknown; not confirmed as the current cause)"}}: {{if .EngineLine}}{{.EngineLine}}{{else}}{{t $.Lang "No attributed line in the available log tail"}}{{end}}</p>{{end}}
+{{if .Stalled}}<p class="meta">{{t $.Lang "Latest request line in engine.log (time unknown; not confirmed as the current cause)"}}: {{if .EngineLogError}}{{.EngineLogError}}{{else if .EngineLine}}{{.EngineLine}}{{else}}{{t $.Lang "No attributed line in the available log tail"}}{{end}}</p>{{end}}
 {{range .Notes}}<p class="err">{{.}}</p>{{end}}
 <div class="panel"><dl class="grid">
 <dt>{{t $.Lang "Position"}}</dt><dd>{{if .Position}}{{st $.Lang .Position}}{{else}}—{{end}}</dd>

@@ -1697,20 +1697,26 @@ local stand-ins. Neither shows that a real model follows the sentences.
 `--stalled-after` adds a `stalled` badge under **Needs attention** when an active
 request has no new run-history record for `30m` by default (positive Go duration
 syntax such as `45m` or `1h`). Its existing stage and retry status stay visible.
-The clock starts at the later of the newest history row's finish time (start
-time when unfinished) and `pending_since`, the current launch's recorded start.
+The clock starts at the latest history timestamp (each row's finish time, or
+start time when unfinished), or `pending_since` if that launch start is later.
 Without either time the page does not guess from file modification times.
 Requests with neither a live process nor a pending launch are not classified as
-stalled: they may be waiting for a slot or choosing the next stage. Requester
-waits, model-credit waits, explicit pauses, stops and completion are also
-excluded. A new row or launch resets the clock; this measures recorded
+stalled: they may be waiting for a slot or choosing the next stage. A restart
+notice after the pending launch, with no live process yet, also excludes the
+request while it waits to be relaunched. Model-credit waits remain held even
+if interrupting the launch adds a later history row; budget recovery or a new
+launch clears that hold. Requester waits, explicit pauses, stops and completion
+are also excluded. A new row or launch resets the clock; this measures recorded
 activity, not proof that a model is making useful progress.
 
 The page shows the latest line explicitly attributed to that request in the
-last 20,000 bytes of `engine.log`, separately from failures in the run history.
-The log has no timestamps: its line may predate recovery and is not asserted
-to be the current cause. Unattributed lines and other request IDs are never
-assigned to a request. Missing log evidence is shown as missing, not inferred
+last 20,000 bytes of `engine.log`, separately from failures in the run history,
+clipped to 300 characters. When that tail includes the request's latest
+`starting accepted request` line, only lines after it are considered.
+The log has no timestamps: without that boundary its line may predate recovery
+and is not asserted to be the current cause. Unattributed lines and other
+request IDs are never assigned to a request. A missing or unreadable log is distinguished from a
+readable tail without an attributed line. Missing evidence is not inferred
 from an earlier failed stage. The engine's separate
 `intake.stall_notice_minutes` (default 90) measures time without a completed step
 within the current launch for tracker notices; this page's clock instead measures time since a

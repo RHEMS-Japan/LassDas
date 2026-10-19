@@ -138,7 +138,7 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 		"card": func(p page, j *job) cardData {
 			return cardData{Lang: p.Lang, ID: j.ID, Key: j.Key, Title: j.Title, Lane: j.Lane, Status: j.Status,
 				Position: j.Position, StageIndex: j.StageIndex, StageCount: j.StageCount, Model: j.Model, Attention: j.Attention, Failure: j.Failure,
-				Elapsed: j.Elapsed, Updated: j.Updated, Requester: j.Requester, WorkTime: j.WorkTime, Stalled: j.Stalled, EngineLine: j.EngineLine}
+				Elapsed: j.Elapsed, Updated: j.Updated, Requester: j.Requester, WorkTime: j.WorkTime, Stalled: j.Stalled, EngineLine: j.EngineLine, EngineLogError: j.EngineLogError}
 		},
 	}).Parse(pageTemplates))
 	return s, nil
@@ -296,6 +296,8 @@ type job struct {
 	StageIndex  int
 	StageCount  int
 	Model       string
+
+	EngineLogError string
 	// GitHub says the issue is a GitHub issue, so the page names GitHub
 	// where it says where the requester wrote.
 	GitHub bool
@@ -986,8 +988,8 @@ func (j *job) derive(now time.Time, stalledAfter time.Duration) {
 		stalledAfter = defaultStalledAfter
 	}
 	end := now
+	var last time.Time
 	if state := j.State; state != nil {
-		var last time.Time
 		for _, result := range state.History {
 			started := result.StartedAt
 			if started.IsZero() {
@@ -996,8 +998,12 @@ func (j *job) derive(now time.Time, stalledAfter time.Duration) {
 			if !started.IsZero() && (j.Started.IsZero() || started.Before(j.Started)) {
 				j.Started = started
 			}
-			if result.FinishedAt.After(last) {
-				last = result.FinishedAt
+			finished := result.FinishedAt
+			if finished.IsZero() {
+				finished = result.StartedAt
+			}
+			if finished.After(last) {
+				last = finished
 			}
 		}
 		switch {
@@ -1172,13 +1178,8 @@ func (j *job) derive(now time.Time, stalledAfter time.Duration) {
 			j.Status = "starting: choosing the first role"
 		}
 	default:
-		var last time.Time
 		if n := len(state.History); n > 0 {
-			last = state.History[n-1].FinishedAt
 			record := state.History[n-1]
-			if last.IsZero() {
-				last = record.StartedAt
-			}
 			// The runtime's own failure (a router it could not reach) needs a
 			// person; its note that a stopped action is being taken up again
 			// after a restart is the run going on, not a call for attention.
@@ -1189,30 +1190,39 @@ func (j *job) derive(now time.Time, stalledAfter time.Duration) {
 		if state.PendingSince.After(last) {
 			last = state.PendingSince
 		}
-		// A budget pause holds the request until the runtime says the budget
-		// is back, so the later of the two lines is the one that stands; a
-		// no-progress notice stands until a step completes after it. "Later"
-		// is the order in the file: the runtime only appends to notices.json,
-		// stamping each line as it is written.
+		// Killing a launch for a credit hold appends an interrupted row. That
+		// row is activity, not recovery: holds last until budget recovery or
+		// a newer launch. Notices are written in append order.
+		launch := last
+		if state.Pending != nil && !state.PendingSince.IsZero() {
+			launch = state.PendingSince
+		}
 		var pause, stall string
+		restartWaiting := false
 		for _, notice := range j.Notices {
 			written, err := time.Parse(time.RFC3339Nano, stringOf(notice["written_at"]))
-			if err != nil || !written.After(last) {
+			if err != nil {
+				continue
+			}
+			if notice["kind"] == "stall" && written.After(last) {
+				stall = stringOf(notice["text"])
+			}
+			if !written.After(launch) {
 				continue
 			}
 			switch stringOf(notice["kind"]) {
 			case "accepted", "resumed":
 				text := stringOf(notice["text"])
 				budgetWait := "モデル利用枠の残りが設定の下限を下回っているため、待機中です。枠が戻り次第、自動で処理を始めます。"
-				if notice["predates"] != true && (strings.HasPrefix(text, "受け付けました。"+budgetWait) || strings.HasPrefix(text, "返答を受け取りました。"+budgetWait)) {
+				if strings.HasPrefix(text, "受け付けました。"+budgetWait) || strings.HasPrefix(text, "返答を受け取りました。"+budgetWait) {
 					pause = text
 				}
 			case "budget-paused":
 				pause = stringOf(notice["text"])
 			case "budget-restored":
 				pause = ""
-			case "stall":
-				stall = stringOf(notice["text"])
+			case "resume":
+				restartWaiting = len(j.Live) == 0 && state.Pending != nil
 			}
 		}
 		if pause != "" {
@@ -1221,7 +1231,7 @@ func (j *job) derive(now time.Time, stalledAfter time.Duration) {
 			if stall != "" {
 				j.Lane, j.Attention = "attention", stall
 			}
-			if (len(j.Live) > 0 || state.Pending != nil) && !last.IsZero() && now.Sub(last) > stalledAfter {
+			if !restartWaiting && (len(j.Live) > 0 || state.Pending != nil) && !last.IsZero() && now.Sub(last) > stalledAfter {
 				j.Stalled, j.Lane = true, "attention"
 				if j.Attention == "" {
 					j.Attention = "No new record or launch for " + humanDuration(now.Sub(last)) + "."
@@ -1681,17 +1691,18 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data.Columns = columns(data.Stages, jobs)
-	if log, err := s.readIn("engine.log", 20000); err == nil {
+	log, logErr := s.readIn("engine.log", 20000)
+	if logErr == nil {
 		data.Log = log
-		for _, j := range jobs {
-			if j.Stalled {
-				j.EngineLine = latestRequestLog(log, j.ID)
-			}
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		data.Notes = append(data.Notes, "engine.log could not be read: "+err.Error())
+	} else if !errors.Is(logErr, os.ErrNotExist) {
+		data.Notes = append(data.Notes, "engine.log could not be read: "+logErr.Error())
 	} else {
 		data.Notes = append(data.Notes, "engine.log is not present: the runtime was started without --log-file, so its own observations are only in its standard error")
+	}
+	for _, j := range jobs {
+		if j.Stalled {
+			j.observeEngineLog(log, logErr)
+		}
 	}
 	s.render(w, "overview", data)
 }
@@ -1717,9 +1728,8 @@ func (s *server) jobPage(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	j := s.loadJob(id, now, true)
 	if j.Stalled {
-		if log, err := s.readIn("engine.log", 20000); err == nil {
-			j.EngineLine = latestRequestLog(log, id)
-		}
+		log, err := s.readIn("engine.log", 20000)
+		j.observeEngineLog(log, err)
 	}
 	s.render(w, "job", page{Lang: language(r), Now: s.formatTime(now), RunDir: s.runDir, Job: j, Config: s.configRaw != nil})
 }
@@ -1880,6 +1890,8 @@ type cardData struct {
 	Updated    time.Time
 	Requester  string
 	WorkTime   string
+
+	EngineLogError string
 }
 
 type headData struct {
