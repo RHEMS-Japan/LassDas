@@ -95,6 +95,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import delivery_support as support
+import added_tests
 from delivery_support import DeliveryError
 
 ISSUE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
@@ -377,6 +378,7 @@ def integration_tip(workspace, url, base):
                     describe="read the integration branch",
                     timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600))
     _, target, _ = support.run(support.git("-C", str(workspace), "rev-parse", "FETCH_HEAD"))
+    support.run(support.git("-C", str(workspace), "update-ref", added_tests.INTEGRATION_REF, target.strip()))
     return target.strip()
 
 
@@ -392,9 +394,9 @@ def catch_up(workspace, url, base, issue, method):
     rebase all the same; a further round then conflicts with the rewritten
     copy of its own earlier change, and that goes to the work stage like any
     other conflict."""
+    target = integration_tip(workspace, url, base)
     if method not in ("merge", "none"):
         return False
-    target = integration_tip(workspace, url, base)
     code, _, _ = support.run(support.git("-C", str(workspace), "merge-base", "--is-ancestor", target, "HEAD"),
                              check=False)
     if code == 0:
@@ -431,6 +433,18 @@ def catch_up(workspace, url, base, issue, method):
         "delivery completes the merge."
         % (base, len(conflicted), "" if len(conflicted) == 1 else "s",
            ", ".join(support.readable(path) for path in conflicted[:20])))
+
+
+def record_integration_base(workspace, receipt, previous_head):
+    """Keep this head's attribution when a publication retry sees it merged."""
+    if receipt["head"] != previous_head:
+        receipt.pop("integration_base", None)
+    try:
+        base = added_tests.workspace_base(workspace)
+    except DeliveryError:
+        return
+    if base != receipt["head"]:
+        receipt["integration_base"] = base
 
 
 def push_branch(workspace, url, branch, commit):
@@ -1090,7 +1104,9 @@ def publish_only(workspace, issue, owner, name, base, branch, url, allowed, unch
         return finish_unchanged(workspace, issue, owner, name, base, url, path)
     receipt.update(identity, branch=branch, branch_only=True)
     commit, committed = stage_and_commit(workspace, issue, allowed, receipt)
+    previous_head = receipt.get("head")
     receipt["head"] = commit
+    record_integration_base(workspace, receipt, previous_head)
     if committed:
         receipt["committed_at"] = support.timestamp()
     support.write_receipt(path, receipt)
@@ -1098,6 +1114,8 @@ def publish_only(workspace, issue, owner, name, base, branch, url, allowed, unch
         commit = head(workspace)
         receipt.update(head=commit, committed_at=support.timestamp())
         support.write_receipt(path, receipt)
+    record_integration_base(workspace, receipt, receipt["head"])
+    support.write_receipt(path, receipt)
     if expected and not is_ancestor(workspace, expected, commit):
         raise DeliveryError("The new commit does not continue the published branch; history was not rewritten")
     receipt["publishing_head"] = commit
@@ -1215,7 +1233,9 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
     if left:
         receipt["merge_left_to_person"] = True
     commit, committed = stage_and_commit(workspace, issue, allowed, receipt)
+    previous_head = receipt.get("head")
     receipt["head"] = commit
+    record_integration_base(workspace, receipt, previous_head)
     if committed:
         receipt["committed_at"] = support.timestamp()
     # The commit is on record before anything that can fail against the
@@ -1227,6 +1247,8 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
         receipt["head"] = commit
         receipt["committed_at"] = support.timestamp()
         support.write_receipt(path, dict(receipt, previous=previous))
+    record_integration_base(workspace, receipt, receipt["head"])
+    support.write_receipt(path, dict(receipt, previous=previous))
     if left and receipt.get("pull_request"):
         # A person who changed the pull request's branch meanwhile keeps it.
         tip = ticket_tip(workspace, url, branch)

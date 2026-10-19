@@ -277,7 +277,12 @@ def main():
     # The old empty-directory inode may have been replaced, including while a
     # concurrent launcher started there. Enter the newly published directory.
     with record_path(workspace).open() as saved:
-        os.environ["TASK_BASE_COMMIT"] = json.load(saved).get("head", "")
+        prepared = json.load(saved)
+    base = prepared.get("head", "")
+    if not base and not prepared.get("found_in_place"):
+        base = subprocess.run(["git", "-C", str(workspace), "hash-object", "-t", "tree", "--stdin"],
+                              input="", env=git_environment(), capture_output=True, text=True, check=True).stdout.strip()
+    os.environ["TASK_BASE_COMMIT"] = base
     os.chdir(workspace)
     os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
 

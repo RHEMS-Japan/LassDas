@@ -267,13 +267,36 @@
             "--network",
             "inherit",
             "--",
-            "/usr/bin/python3",
-            "-B",
-            "/opt/ticket-automation/bundle/harnesses/verify_added_tests.py",
-            "--",
             "/opt/ticket-automation/operator/test"
           ],
-          "instructions": "Run the operator's tests and report whether newly added tests were executed individually. The exit status and captured command output are observations, not approval.",
+          "instructions": "Run the operator's tests. The exit status and captured command output are observations, not approval.",
+          "env": {
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch"
+          }
+        },
+        {
+          "name": "added-tests",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/ticket-automation/operator",
+            "--network",
+            "inherit",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/added_tests.py"
+          ],
+          "instructions": "Run test files added by this request with the configured single-file command, or report that they were not run. Do not replace the operator's aggregate tests.",
           "env": {
             "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch"

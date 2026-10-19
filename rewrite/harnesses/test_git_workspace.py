@@ -145,6 +145,14 @@ os.execv(os.environ['TEST_REAL_GIT'], [os.environ['TEST_REAL_GIT'], *sys.argv[1:
         self.assertEqual(child.returncode, 0, err)
         self.assertEqual(out, "Create the initial project.\n")
         self.assertEqual((workspace / "entry.txt").read_text(), "first implementation")
+        self.git(workspace, "add", ".")
+        self.git(workspace, "commit", "-m", "Initial work")
+        child = self.start(workspace, {"TASK_REPOSITORY": str(source)},
+                           "import os; print(os.environ['TASK_BASE_COMMIT'])")
+        out, err = child.communicate("", timeout=15)
+        self.assertEqual(child.returncode, 0, err)
+        names = self.git(workspace, "diff", "--name-only", out.strip(), "HEAD").stdout.splitlines()
+        self.assertEqual(names, ["entry.txt"])
 
     def answered_history(self, workspace, worked=False):
         path = workspace.parent / "history.json"

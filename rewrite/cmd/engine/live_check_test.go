@@ -549,16 +549,11 @@ func TestTheDocumentedLiveCheckJoinsTheShippedVerifyStage(t *testing.T) {
 			for _, process := range cfg.Roles[verify].Processes {
 				shipped = append(shipped, process.Name)
 			}
-			if !slices.Equal(shipped, []string{"project-build", "project-tests"}) {
+			if !slices.Equal(shipped, []string{"project-build", "project-tests", "added-tests"}) {
 				t.Fatalf("the shipped verify stage runs %v", shipped)
 			}
 			tests := cfg.Roles[verify].Processes[1]
-			build := cfg.Roles[verify].Processes[0]
-			launcher := build.Command[:len(build.Command)-1]
-			testTail := []string{"/usr/bin/python3", "-B", "/opt/ticket-automation/bundle/harnesses/verify_added_tests.py", "--", "/opt/ticket-automation/operator/test"}
-			if !slices.Equal(tests.Command, append(slices.Clone(launcher), testTail...)) {
-				t.Fatalf("the tests must retain the launcher and run the individual-test wrapper: %q", tests.Command)
-			}
+			launcher := tests.Command[:len(tests.Command)-1]
 			if len(documented.Command) <= len(launcher) || !slices.Equal(documented.Command[:len(launcher)], launcher) {
 				t.Fatalf("the live check is not launched like the tests: %q", documented.Command)
 			}

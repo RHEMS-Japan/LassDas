@@ -1636,32 +1636,52 @@ must still describe what actually reached the requested destination.
 
 ### Running newly added tests explicitly
 
-The staged example wraps the operator's test command with
-`harnesses/verify_added_tests.py -- <command>`. That wrapper and
-`verify_merged.py` also look for test files added since the prepared checkout's
-original commit, including committed, staged and untracked additions. The
-workspace launcher supplies that commit as `TASK_BASE_COMMIT`; standalone
-launchers can set `ADDED_TEST_BASE` to an explicit Git revision. Post-delivery
-checks run the detected files in the fetched delivery, not the worker's tree.
+The staged examples leave `project-tests` unchanged and add a separate
+`added-tests` process. Its bundled `harnesses/added_tests.py` and the image's
+`verify_merged.py` share detection and execution. The aggregate commands keep
+their original launcher, output, environment and timeout; post-delivery checks
+run the aggregate commands before the additional tests.
 
-Set `ADDED_TEST_PATTERNS` to newline-separated path globs (default `*test*`,
-`*_test.go`, `tests/`; a trailing slash matches a directory path), and
-`ADDED_TEST_COMMAND` to a single-file command using `{file}` or `{package}`.
-Examples are `node --experimental-strip-types --test {file}` and
-`go test {package}`. Package means the file's relative parent directory.
-Arguments are split before replacing placeholders and run without a shell;
-filenames with spaces remain one argument. Set these on both verification
-processes. A nonzero exit fails the stage even when the operator's aggregate
-tests pass. `VERIFY_TIMEOUT_SECONDS` bounds each invocation (default 1200).
+Before delivery, additions are measured against the integration-side commit
+already contained in the checkout, including staged and untracked regular
+files. Delivery fetches retain that integration tip in a local Git ref because
+`FETCH_HEAD` can be replaced by an unrelated fetch. The launcher also supplies
+the original prepared commit as `TASK_BASE_COMMIT` (the empty tree for a new
+repository). A standalone `ADDED_TEST_BASE` is used only when that launcher
+value and an integration ref are unavailable. Neither overrides a newer
+integration-side basis.
 
-With no single-file command configured, the report explicitly lists added
-tests as **not executed individually**, without failing the stage. If their
-diff cannot be read, it says detection was unavailable rather than claiming
-there were no new tests; with a single-file command configured that is an
-error. Detection is based on the configured names, not a claim to recognize
-every language's tests. Configure an installation-specific wrapper if its
-languages need different commands. Existing tests remain the aggregate
-command's responsibility.
+The delivery receipt records `integration_base` for its current published
+head, not a previous round. After merge/squash, detection compares the merge
+commit with its first parent. For rebase, pending and branch-only deliveries,
+it compares that recorded base with the original request head, so concurrent
+integration changes and multiple rebased commits are not confused. Unchanged
+receipts have no added tests. Tests run in the fetched verification checkout;
+a delivered test subsequently removed by a person is reported as absent and
+**not run**, without sending the request back to repair. If the necessary
+commits cannot be read, the report says detection is unavailable, not that
+there were no additions. This does not prevent aggregate verification.
+
+Environment for both additional-test entry points (operator settings only):
+
+| Setting | Meaning |
+| --- | --- |
+| `ADDED_TEST_PATTERNS` | Newline-separated basename globs, default `*_test.*`, `test_*`, `*.test.*`, `*.spec.*`, `*Test.java`, and root-relative directory prefix `tests/`. Only a trailing slash selects a directory; `src/tests/` is explicit. |
+| `ADDED_TEST_COMMAND` | Optional single-file command with `{file}` or `{package}` (`{pkg}` also means package). Examples: `node --test {file}`, `go test {package}`. |
+| `ADDED_TEST_MAX_COMMANDS` | Positive limit on distinct invocations, default 100. Excess commands are reported as not run and fail this check rather than silently passing. |
+| `TASK_BASE_COMMIT` | Prepared-checkout basis supplied by `git_workspace.py`, including an empty tree for an initially empty repository. |
+| `ADDED_TEST_BASE` | Standalone basis when no launcher/integration basis is known. |
+| `VERIFY_TIMEOUT_SECONDS` | Per additional invocation limit, default 1200 seconds. |
+
+Arguments are split and validated before detection, then placeholders are
+replaced without a shell. A filename with spaces stays one argument; package
+means its relative parent directory. Identical commands run once. Symlinks
+and submodules are not tests. Invalid settings are reported even with no
+matching files. With no command, additions are explicitly **not executed
+individually** and do not fail the stage. Reports distinguish aggregate and
+additional failures and quote unusual paths. These filename rules do not
+recognize every language; use an installation-specific command for mixed
+languages. Existing tests remain the aggregate command's responsibility.
 
 ### A live check the installation supplies
 
