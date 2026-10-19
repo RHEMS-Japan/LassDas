@@ -1694,6 +1694,17 @@ local stand-ins. Neither shows that a real model follows the sentences.
 
 ### A read-only status page
 
+`--stalled-after` sets how long a running request may have no new run-history
+record before the overview shows `stalled` under **Needs attention** (default
+`30m`; positive Go duration syntax such as `45m` or `1h`). The clock uses the
+latest history row's finish time, or its start time if unfinished. A new row
+clears this indication; this measures recorded activity, not proof that a model
+is making useful progress. The card also shows the latest recorded error when
+one exists. A failure that could not be written into history still needs the
+runtime log; the page does not invent a cause. Queued, requester-waiting,
+explicitly paused, stopped and completed requests are not classified as stalled.
+This changes only the read-only display, never execution or retry decisions.
+
 `bin/ticket-status` serves what the queue directory holds, as it is, over
 HTTP: every accepted request with its state (done, waiting for the requester,
 running a named stage, recovering after a restart), its position in the

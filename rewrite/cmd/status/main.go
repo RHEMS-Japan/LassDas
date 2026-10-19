@@ -51,6 +51,7 @@ func run(ctx context.Context, args []string, log io.Writer) error {
 	runDir := flags.String("run-dir", "", "the runtime's queue directory, read only")
 	configPath := flags.String("config", "", "the runtime's configuration file, shown as it is read; optional")
 	listen := flags.String("listen", "127.0.0.1:9200", "address to serve on")
+	stalledAfter := flags.Duration("stalled-after", 30*time.Minute, "show an active request as stalled after this long without a new history record")
 	userEnv := flags.String("auth-user-env", "", "environment variable holding the user name for HTTP basic authentication; empty serves without one")
 	passwordEnv := flags.String("auth-password-env", "", "environment variable holding the password for HTTP basic authentication")
 	if err := flags.Parse(args); err != nil {
@@ -63,6 +64,10 @@ func run(ctx context.Context, args []string, log io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if *stalledAfter <= 0 {
+		return errors.New("--stalled-after must be positive")
+	}
+	s.stalledAfter = *stalledAfter
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return err
@@ -82,19 +87,21 @@ func run(ctx context.Context, args []string, log io.Writer) error {
 }
 
 type server struct {
-	diskPercent func(string) (float64, error)
-	runDir      string
-	configRaw   []byte
-	config      map[string]any
-	issueBase   string
-	user        string
-	password    string
-	location    *time.Location
-	templates   *template.Template
+	diskPercent  func(string) (float64, error)
+	stalledAfter time.Duration
+	runDir       string
+	configRaw    []byte
+	config       map[string]any
+	issueBase    string
+	user         string
+	password     string
+	location     *time.Location
+	templates    *template.Template
 }
 
 func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error) {
 	s := &server{runDir: runDir, location: time.Local, diskPercent: diskusage.Percent}
+	s.stalledAfter = 30 * time.Minute
 	if configPath != "" {
 		raw, err := os.ReadFile(configPath)
 		if err != nil {
@@ -789,6 +796,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 			}
 		}
 		j.derive(now)
+		s.markStalled(j, now)
 		return j
 	}
 	if names, _ := filepath.Glob(filepath.Join(dir, "answer-*.json")); len(names) > 0 {
@@ -917,6 +925,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 		}
 	}
 	j.derive(now)
+	s.markStalled(j, now)
 	j.Workspace = s.readWorkspace(id)
 	return j
 }
@@ -1982,6 +1991,8 @@ func localize(lang, status string) string {
 		prefix, status = "中断した工程の再開中。", rest
 	}
 	switch {
+	case status == "stalled":
+		return "停滞中 (stalled)"
 	case strings.HasPrefix(status, "running "):
 		return prefix + "実行中: " + stageName(lang, strings.TrimPrefix(status, "running "))
 	case strings.HasPrefix(status, "assigned to ") && strings.HasSuffix(status, ", no process output yet"):

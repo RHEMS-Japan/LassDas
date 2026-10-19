@@ -84,6 +84,9 @@ func serve(t *testing.T, root, config, userEnv, passwordEnv string) *httptest.Se
 	if err != nil {
 		t.Fatal(err)
 	}
+	// These fixtures deliberately use fixed historical dates to check other
+	// display states. Stalled-display tests use newServer's normal threshold.
+	s.stalledAfter = 100 * 365 * 24 * time.Hour
 	ts := httptest.NewServer(s.handler())
 	t.Cleanup(ts.Close)
 	return ts
