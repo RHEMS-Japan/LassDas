@@ -1556,8 +1556,9 @@ both the model's input and the delivery result state what could not be read.
 The pull request body states that omission too; the remaining diff and test
 output are still reviewed. An unset `TASK_HISTORY` or `TASK_ISSUE`, an invalid size setting,
 or no recorded report from the selected role asks the operator to fix the
-configuration and restart, even with `REVIEW_UNAVAILABLE=pass`. Delivery validates
-these settings before staging or committing, and holds instead of sending the
+configuration and restart, even with `REVIEW_UNAVAILABLE=pass`. When a PR body
+will be prepared, delivery validates these settings before staging or committing,
+and holds instead of immediately sending the
 work back to a model that cannot correct operator settings. So does a limit
 too small for the required introduction or the reason an explanation was omitted:
 the worker cannot shorten that fixed text. A recorded but
@@ -1580,8 +1581,14 @@ in the latest contiguous attempt of that role is selected on its own, never join
 an older report or replaced by an older section when it omits one. ATX and
 Setext headings are understood outside fenced code; a Setext heading includes its
 whole paragraph, not a preceding list, quote, table or HTML line. Subheadings
-inside the section are included. An unclosed code fence makes the section
-absent rather than publishing an uncertain boundary. Title matching ignores
+inside the section are included. Start code fences on their own lines, not on
+list-item lines. List-item fences are recognized conservatively: a column-zero
+heading while a list/indented fence is open ends the selection rather than
+publishing a possibly private section. An unclosed code fence makes the section
+absent, with `description_section_absence_reason=unclosed_fence` in the receipt
+and a dedicated sentence on stdout. A missing or blank section instead records
+`absent_or_empty`. Paragraph boundaries distinguish continuations from blocks
+that can interrupt a paragraph; only CRLF, CR and LF split lines. Title matching ignores
 case, outer spaces, closing hashes and a final colon. Setting a section without
 a role, or setting it to a blank value, is a configuration error. Do not set a
 section on review: section selection is delivery-only, and review holds until
@@ -1595,8 +1602,12 @@ follows delivery's configured `on_failure` (the example returns to elicitation
 and repeats work and verification); it does not route directly to confirmation.
 The refusal identifies whether the offending text came from the introduction,
 the selected report or section, or the omission notice, without printing it.
-Delivery-setting errors instead hold before staging; fix the setting and restart
-the engine. On restart the runtime resumes using the configured failure route.
+Refused fixed introduction or omission text is an operator-setting error, not
+something the model can rewrite. Delivery-setting errors hold when a PR body is
+needed; unchanged endings and already completed/closed deliveries do not read
+description settings or require `TASK_HISTORY`. Fix the setting and restart the
+engine. The interrupted delivery then follows the configured `on_failure` route;
+the example returns to elicitation before delivery is tried again.
 
 The generated body is retained in the delivery process's
 `TASK_HOME/pull-request-description.md`, outside the checkout. The delivery

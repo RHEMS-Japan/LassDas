@@ -17,8 +17,14 @@ compatibility path.
 
 Section selection is delivery-only. It does not reach back across other roles
 to a previous attempt, and an unclosed code fence is treated as an absent
-section. Delivery checks description settings before staging; a setting only
-the operator can correct holds the process instead of requesting model rework.
+section, with a distinct receipt reason. When a PR body is needed, delivery
+checks description settings before staging; a setting or fixed-text refusal only
+the operator can correct holds the process instead of immediately requesting
+model rework. Endings that create no PR body do not require those settings.
+The operator corrects the setting and restarts; the interrupted delivery then
+follows its configured `on_failure` route, which may include model work before
+delivery is tried again. Section selection treats list-item fences
+conservatively, follows paragraph interruption rules, and splits CRLF/CR/LF only.
 
 ## Alternatives compared
 

@@ -481,7 +481,8 @@ def pull_request_body(issue, method):
             except DeliveryError:
                 label = origin
                 break
-        raise DeliveryError(str(error).replace("the staged change", "the pull request description (" + label + ")")) from error
+        error_type = support.DescriptionSettingError if label in {"introduction", "omission notice"} else DeliveryError
+        raise error_type(str(error).replace("the staged change", "the pull request description (" + label + ")")) from error
     return body, note, absent
 
 
@@ -494,8 +495,10 @@ def delivery_description(workspace, commit, issue, method, receipt):
         body, note, absent = pull_request_body(issue, method)
         if absent:
             receipt["description_section_absent"] = True
+            receipt["description_section_absence_reason"] = absent
         else:
             receipt.pop("description_section_absent", None)
+            receipt.pop("description_section_absence_reason", None)
         if note:
             receipt["description_omitted"] = note
         else:
@@ -515,6 +518,8 @@ def delivery_description(workspace, commit, issue, method, receipt):
         return body
     except OSError as error:
         raise DescriptionNotSettled("The generated pull request description could not be retained: " + str(error)) from error
+    except support.DescriptionSettingError:
+        raise
     except DeliveryError as error:
         if receipt.get("pull_request"):
             raise DescriptionNotSettled(str(error)) from error
@@ -728,7 +733,10 @@ def open_summary(receipt, pushed, committed):
 def description_summary(receipt):
     lines = [receipt["description_omitted"]] if receipt.get("description_omitted") else []
     if receipt.get("description_section_absent"):
-        lines.append("The selected description section was absent or empty; only the introduction was used.")
+        if receipt.get("description_section_absence_reason") == "unclosed_fence":
+            lines.append("The selected description section had an unclosed code fence; only the introduction was used.")
+        else:
+            lines.append("The selected description section was absent or empty; only the introduction was used.")
     if not receipt.get("description_path"):
         return lines
     return lines + [("The service's different pull request description was retained without another replacement. "
@@ -882,6 +890,27 @@ def refusal(issue, owner, name, base, branch, error):
         "about the work. Nothing was merged, so nothing needs undoing."])
 
 
+def hold_description(error, *, before_staging=False):
+    phase = " before staging" if before_staging else ""
+    print("Delivery held%s: %s; fix the setting and restart the engine. "
+          "The restarted runtime records the interrupted delivery and follows the configured on_failure stage; "
+          "it does not resume at this line." % (phase, support.scrub(str(error))), flush=True)
+    while True:
+        time.sleep(900)
+        print("Delivery still held at %s; the setting error is above." % support.timestamp(), flush=True)
+
+
+def validate_description_before_staging(issue, method):
+    try:
+        pull_request_body(issue, method)
+    except support.DescriptionSettingError as error:
+        print("Nothing was committed or published by this attempt; description settings require attention.", flush=True)
+        hold_description(error, before_staging=True)
+    except DeliveryError:
+        # Model-written content follows the ordinary failure route below.
+        pass
+
+
 def deliver(arguments):
     if len(arguments) != len(set(arguments)) or any(arg not in ("--dry-run", "--branch-only") for arg in arguments):
         raise DeliveryError("This delivery process accepts only --dry-run and --branch-only")
@@ -904,22 +933,12 @@ def deliver(arguments):
     url = support.remote_url(owner, name)
     if dry:
         return check_only(workspace, owner, name, base, branch, method, url, allowed, unchanged, branch_only)
-    if not branch_only:
-        try:
-            support.description_report()
-        except support.DescriptionSettingError as error:
-            print("Delivery held before staging: %s. Nothing was committed or published by this attempt; "
-                  "fix the setting and restart the engine." % support.scrub(str(error)), flush=True)
-            while True:
-                time.sleep(900)
-                print("Delivery still held at %s; the setting error is above." % support.timestamp(), flush=True)
-        except DeliveryError:
-            # Content problems follow the normal delivery failure route below.
-            pass
     try:
         if branch_only:
             return publish_only(workspace, issue, owner, name, base, branch, url, allowed, unchanged)
         return carry_out(workspace, issue, owner, name, base, branch, method, url, allowed, unchanged)
+    except support.DescriptionSettingError as error:
+        hold_description(error)
     except DeliveryError as error:
         if branch_only:
             print("Branch-only delivery for %s did not complete: %s\n"
@@ -1165,6 +1184,7 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
             if (method == "none" and tip == receipt.get("head") == head(workspace)
                     and not changed_paths(workspace)):
                 # Open, nothing new, and the branch holds the commit on record.
+                validate_description_before_staging(issue, method)
                 body = delivery_description(workspace, receipt["head"], issue, method, receipt)
                 sync_pull_request_body(workspace, path, receipt, previous, pull, body, owner, name)
                 receipt["previous"] = previous
@@ -1180,6 +1200,7 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
         # branch, recorded separately so the earlier merge stays visible.
         previous = previous + [receipt]
         receipt = {}
+    validate_description_before_staging(issue, method)
     # Who merges is the current setting's: a round begun under another method
     # is left, or merged, as the operator now says. A round left to a person
     # stays theirs until this process's own merge request succeeds, so it is

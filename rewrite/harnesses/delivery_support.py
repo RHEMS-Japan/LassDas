@@ -75,23 +75,41 @@ def description_size(text, source="The pull request description"):
                             % (source, size, limit))
 
 
-def markdown_section(text, title):
-    """Select one ATX/Setext section; fenced examples are never headings."""
+def markdown_section(text, title, *, absence=None):
+    """Select one ATX/Setext section; record uncertain fences if requested."""
     normalize = lambda value: value.strip().rstrip(":：").strip().casefold()
-    lines = text.splitlines(keepends=True)
+    lines = [line for line in re.findall(r"[^\r\n]*(?:\r\n|[\r\n]|$)", text) if line]
     start, level, fence, paragraph = None, None, None, None
+    list_continuation = False
+    html_block = (r"^ {0,3}(?:<!--|<\?|<![A-Z]|<!\[CDATA\[|"
+                  r"<(?:script|pre|style|textarea)(?=[ \t>]|$)|"
+                  r"</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|"
+                  r"dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|"
+                  r"h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|"
+                  r"optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|"
+                  r"track|ul)(?=[ \t/>]|$))")
+    def uncertain_fence():
+        if absence is not None:
+            absence.append("unclosed_fence")
+        return None
     i = 0
     while i < len(lines):
         line = lines[i].rstrip("\r\n")
         if fence:
-            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*", line):
+            marker, indent = fence
+            # A list/indented fence cannot hide a following top-level section.
+            if indent and re.match(r"^#{1,6}(?:[ \t]+|$)", line):
+                return uncertain_fence()
+            if re.fullmatch(r" {0," + str(max(3, indent)) + "}" + re.escape(marker[0])
+                            + "{" + str(len(marker)) + r",}[ \t]*", line):
                 fence = None
             i += 1
             continue
-        opening = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-        if opening and not (opening[1][0] == "`" and "`" in line[opening.end():]):
-            fence = opening[1]
+        opening = re.match(r"^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?)(`{3,}|~{3,})", line)
+        if opening and not (opening[2][0] == "`" and "`" in line[opening.end():]):
+            fence = opening[2], len(opening[1].expandtabs(4))
             paragraph = None
+            list_continuation = False
             i += 1
             continue
         heading = re.match(r"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$", line)
@@ -110,17 +128,30 @@ def markdown_section(text, title):
             if start is None and normalize(label) == normalize(title):
                 start, level = i + 1, size
             paragraph = None
-        elif (not line.strip() or underline or line.startswith(("    ", "\t"))
-              or re.match(r"^ {0,3}(?:[-*+]\s|\d+[.)]\s|[>|<])", line)):
+            list_continuation = False
+        elif not line.strip(" \t") or underline or re.fullmatch(r" {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})", line):
             paragraph = None
+            list_continuation = False
+        elif re.match(r"^ {0,3}(?:[-*+][ \t]+\S|1[.)][ \t]+\S|>)", line):
+            paragraph = None
+            list_continuation = True
+        elif re.match(html_block, line, re.IGNORECASE):
+            paragraph = None
+            list_continuation = False
         elif paragraph is None:
-            paragraph = i
+            if re.match(r"^ {0,3}\d{1,9}[.)][ \t]+", line):
+                list_continuation = True
+            elif not (list_continuation or line.startswith(("    ", "\t"))
+                      or re.match(r"^ {0,3}[|<]", line)):
+                paragraph = i
         i += 1
-    return "".join(lines[start:]).strip("\r\n") if start is not None and fence is None else None
+    if start is not None and fence is not None:
+        return uncertain_fence()
+    return "".join(lines[start:]).strip("\r\n") if start is not None else None
 
 
 def description_report():
-    """The chosen role's latest reports, from this run's existing checkpoint."""
+    """Return the selected text, omission notice, and section absence reason."""
     role = os.environ.get("PR_DESCRIPTION_ROLE", "")
     section = os.environ.get("PR_DESCRIPTION_SECTION", "").strip()
     if "PR_DESCRIPTION_SECTION" in os.environ and not section:
@@ -128,7 +159,7 @@ def description_report():
     if section and not role:
         raise DescriptionSettingError("PR_DESCRIPTION_SECTION requires PR_DESCRIPTION_ROLE")
     if not role:
-        return "", "", False
+        return "", "", ""
     path = os.environ.get("TASK_HISTORY")
     if not path:
         raise DescriptionSettingError("TASK_HISTORY is unset; use a runtime that supplies it to this command")
@@ -178,22 +209,23 @@ def description_report():
             description_size(prefix + note)
         except DeliveryError as error:
             raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES cannot fit the explanation omission notice: " + str(error)) from error
-        return "", note, False
+        return "", note, ""
     if not selected:
         if section and seen_role:
-            return "", "", True
+            return "", "", "absent_or_empty"
         raise DescriptionSettingError("PR_DESCRIPTION_ROLE=%r has no usable recorded report; choose a role that has "
                                       "already reported before this command, not a process name" % role)
     if not section and not text.strip():
         raise DeliveryError("The latest report of role %s is empty; return to the worker for an explanation" % role)
     if section:
-        text = markdown_section(text, section)
+        absence = []
+        text = markdown_section(text, section, absence=absence)
         if text is None or not text.strip():
-            return "", "", True
+            return "", "", absence[0] if absence else "absent_or_empty"
         text = "## " + section + "\n\n" + text
     label = "section %r of role %s" % (section, role) if section else "latest report of role %s" % role
     description_size(prefix + text, "The complete description (%s: %d bytes)" % (label, len(text.encode("utf-8"))))
-    return text, "", False
+    return text, "", ""
 
 
 class TransientError(DeliveryError):

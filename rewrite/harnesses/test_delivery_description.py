@@ -93,7 +93,8 @@ class DescriptionTests(unittest.TestCase):
         result = self.deliver(PR_DESCRIPTION_SECTION="Summary")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.fixture.receipt()["description_section_absent"])
-        self.assertIn("section was absent or empty", result.stdout)
+        self.assertEqual(self.fixture.receipt().get("description_section_absence_reason"), "unclosed_fence")
+        self.assertIn("unclosed code fence", result.stdout)
         body = self.fixture.state["pulls"][0]["body"]
         self.assertNotIn("private notes", body)
         self.assertNotIn("Verified", body)
@@ -275,9 +276,14 @@ class DescriptionTests(unittest.TestCase):
         before = self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout
         for settings in ({"PR_DESCRIPTION_SECTION": "Summary"},
                          {"PR_DESCRIPTION_ROLE": "misspelled-role"},
-                         {"PR_DESCRIPTION_ROLE": "work", "PR_DESCRIPTION_SECTION": " "}):
+                         {"PR_DESCRIPTION_ROLE": "work", "PR_DESCRIPTION_SECTION": " "},
+                         {"PR_DESCRIPTION_ROLE": "work", "DELIVERY_FORBIDDEN_TEXT": "Prepared by"},
+                         {"PR_DESCRIPTION_ROLE": "work", "DELIVERY_FORBIDDEN_TEXT": "explanation omitted",
+                          "TASK_HISTORY": str(self.fixture.home / "missing-history.json")}):
             with self.subTest(settings=settings):
-                env = self.fixture.environment(TASK_HISTORY=str(self.history), DELIVERY_MERGE_METHOD="none", **settings)
+                supplied = dict(TASK_HISTORY=str(self.history), DELIVERY_MERGE_METHOD="none")
+                supplied.update(settings)
+                env = self.fixture.environment(**supplied)
                 with subprocess.Popen([sys.executable, "-B", str(delivery_fixture.SCRIPT)], stdin=subprocess.DEVNULL,
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                       cwd=self.fixture.workspace, env=env) as process:
@@ -289,10 +295,57 @@ class DescriptionTests(unittest.TestCase):
                         output, errors = process.communicate(timeout=5)
                 self.assertIn("held before staging", output + errors)
                 self.assertIn("fix the setting and restart", output + errors)
+                self.assertIn("on_failure", output + errors)
                 self.assertEqual(self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout, before)
                 self.assertEqual(self.fixture.git(self.fixture.workspace, "diff", "--cached", "--name-only").stdout, "")
                 self.assertEqual(self.fixture.state["requests"], [])
                 self.assertEqual(self.fixture.receipt(), {})
+
+    def test_no_change_does_not_require_description_settings(self):
+        self.explain("Explanation")
+        original = self.fixture.git(self.fixture.workspace, "show", "HEAD:main.go").stdout
+        self.fixture.change("main.go", original)
+        before = self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout
+        for settings in ({"PR_DESCRIPTION_ROLE": "misspelled-role", "TASK_HISTORY": str(self.history)},
+                         {"PR_DESCRIPTION_ROLE": "work"},
+                         {"PR_DESCRIPTION_SECTION": "Summary"}):
+            with self.subTest(settings=settings):
+                env = self.fixture.environment(DELIVERY_ALLOW_UNCHANGED="1", DELIVERY_MERGE_METHOD="none", **settings)
+                with subprocess.Popen([sys.executable, "-B", str(delivery_fixture.SCRIPT)], stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                      cwd=self.fixture.workspace, env=env) as process:
+                    try:
+                        output, errors = process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.terminate()
+                        output, errors = process.communicate(timeout=5)
+                        self.fail("No-body ending held for description settings: " + output + errors)
+                self.assertEqual(process.returncode, 0, output + errors)
+                self.assertIn("Nothing was delivered", output)
+                self.assertTrue(self.fixture.receipt()["unchanged"])
+                self.assertEqual(self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout, before)
+                self.assertEqual(self.fixture.state["requests"], [])
+
+    def test_closed_delivery_does_not_require_description_settings(self):
+        self.explain("Explanation")
+        self.assertEqual(self.deliver().returncode, 0)
+        self.fixture.state["pulls"][0]["state"] = "closed"
+        for unused in ({"PR_DESCRIPTION_ROLE": "misspelled-role"},
+                       {"TASK_HISTORY": "", "PR_DESCRIPTION_SECTION": " "}):
+            with self.subTest(unused=unused):
+                result = self.deliver(**unused)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(self.fixture.receipt()["closed_unmerged"])
+
+    def test_completed_delivery_does_not_require_description_settings(self):
+        self.explain("Explanation")
+        initial = self.deliver(DELIVERY_MERGE_METHOD="merge")
+        self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+        self.assertTrue(self.fixture.receipt()["merge_sha"])
+        requests = list(self.fixture.state["requests"])
+        result = self.deliver(PR_DESCRIPTION_ROLE="misspelled-role", TASK_HISTORY="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.state["requests"], requests)
 
     def test_review_uses_the_delivered_bodys_byte_limit(self):
         self.explain("変更と検証の説明。")

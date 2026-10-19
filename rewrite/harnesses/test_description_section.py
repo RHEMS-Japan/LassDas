@@ -12,6 +12,49 @@ import adversarial_review
 
 
 class SectionTests(unittest.TestCase):
+    def test_list_fences_never_hide_private_sections(self):
+        for item in ("- ", "* ", "+ ", "1. ", "2) ", "123456789. "):
+            for fence in ("```", "~~~~"):
+                with self.subTest(item=item, fence=fence):
+                    text = ("## Summary\nVisible\n" + item + fence + "sh\n"
+                            + " " * len(item) + "echo example\n" + " " * len(item) + fence
+                            + "\n## Private observations\nPRIVATE\n" + fence + "\n")
+                    self.assertNotIn("PRIVATE", support.markdown_section(text, "Summary") or "")
+        self.assertEqual(support.markdown_section(
+            "## Summary\nVisible\n- ```sh\n  echo example\n  ```\n## Private\nPRIVATE", "Summary"),
+            "Visible\n- ```sh\n  echo example\n  ```")
+
+    def test_paragraph_continuations_and_interruptions(self):
+        for continuation in ("    continuation", "\tcontinuation", "2) continuation", "2. continuation",
+                             "<span>inline</span>", "<https://example.invalid>", "| inline text"):
+            with self.subTest(continuation=continuation):
+                text = "## Summary\nVisible\n\nPrivate heading\n" + continuation + "\n---\nPRIVATE"
+                self.assertEqual(support.markdown_section(text, "Summary"), "Visible")
+        for rule in ("***", "___", "* * *", "- - -"):
+            with self.subTest(rule=rule):
+                self.assertEqual(support.markdown_section("Preamble\n" + rule + "\nSummary\n---\nVisible", "Summary"), "Visible")
+        for block in ("<!-- closed -->", "<?closed?>", "<!DOCTYPE html>", "<![CDATA[closed]]>",
+                      "<script>closed</script>", "<div>block</div>"):
+            with self.subTest(block=block):
+                self.assertEqual(support.markdown_section("Preamble\n" + block + "\n\nSummary\n---\nVisible", "Summary"), "Visible")
+        self.assertEqual(support.markdown_section(
+            "## Summary\nVisible\n<!-- closed -->\nPrivate heading\n---\nPRIVATE", "Summary"),
+            "Visible\n<!-- closed -->")
+        for marker in ("- ", "1. ", "2) "):
+            text = "## Summary\n" + marker + "Unverified\n  still pending\n---\n## Private\nPRIVATE"
+            self.assertEqual(support.markdown_section(text, "Summary"), marker + "Unverified\n  still pending\n---")
+        self.assertEqual(support.markdown_section("## Summary\n    code\nPrivate heading\n---\nPRIVATE", "Summary"), "    code")
+        self.assertEqual(support.markdown_section("Before\n```\ncode\n```\nSummary\n---\nVisible", "Summary"), "Visible")
+        self.assertEqual(support.markdown_section("## Summary\nVisible\n### Summary\nMore\n## Private\nPRIVATE", "Summary"), "Visible\n### Summary\nMore")
+
+    def test_only_markdown_line_endings_split_lines(self):
+        for separator in ("\x85", "\u2028", "\x0b", "\x0c"):
+            with self.subTest(separator=repr(separator)):
+                text = "## Summary\nok" + separator + "```\n## Private\nPRIVATE\n```\n"
+                self.assertEqual(support.markdown_section(text, "Summary"), "ok" + separator + "```")
+        for ending in ("\r\n", "\r", "\n"):
+            self.assertEqual(support.markdown_section(ending.join(("## Summary", "Visible", "## Private", "PRIVATE")), "Summary"), "Visible")
+
     def test_heading_variants_fences_and_setext_boundaries(self):
         for heading in ("## Pull request summary", "   ## pull REQUEST summary: ##", "Pull request summary\n---"):
             for fence in ("```", "~~~~"):
@@ -65,7 +108,7 @@ class SectionTests(unittest.TestCase):
                     self.assertNotIn("Old instructions", body)
                     self.assertNotIn("private preamble", body)
                     self.assertNotIn("Failed attempt", body)
-                    self.assertEqual(absent, "New instructions" not in latest)
+                    self.assertEqual(bool(absent), "New instructions" not in latest)
                     self.assertEqual(note, "")
                     if not absent:
                         self.assertTrue(body.endswith("## Pull request summary\n\nNew instructions"))
@@ -82,7 +125,7 @@ class SectionTests(unittest.TestCase):
                        {"role": "confirm", "speaker": "runtime", "output": "attempt ended"},
                        {"role": "request", "speaker": "requester", "output": "Continue"}]
             Path(os.environ["TASK_HISTORY"]).write_text(json.dumps({"history": history}))
-            self.assertEqual(support.description_report(), ("", "", True))
+            self.assertEqual(support.description_report(), ("", "", "absent_or_empty"))
 
     def test_forbidden_text_names_its_actual_source(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
@@ -99,7 +142,14 @@ class SectionTests(unittest.TestCase):
                     with self.assertRaisesRegex(support.DeliveryError, label) as failure:
                         deliver_git.pull_request_body("TICKET-7", "none")
                     if label == "introduction":
+                        self.assertIsInstance(failure.exception, support.DescriptionSettingError)
                         self.assertNotIn("section", str(failure.exception))
+            Path(os.environ["TASK_HISTORY"]).write_text("not JSON")
+            os.environ["DELIVERY_FORBIDDEN_TEXT"] = "explanation omitted"
+            with self.assertRaisesRegex(support.DescriptionSettingError, "omission notice"):
+                deliver_git.pull_request_body("TICKET-7", "none")
+            Path(os.environ["TASK_HISTORY"]).write_text(json.dumps({"history": [
+                {"role": "confirm", "speaker": "reader", "output": "## Summary\nSafe text"}]}))
             os.environ.pop("DELIVERY_FORBIDDEN_TEXT")
             os.environ["GITHUB_TOKEN"] = "not a result.\n\n## Summary"
             with self.assertRaisesRegex(support.DeliveryError, "delivery credential"):
@@ -126,6 +176,18 @@ class SectionTests(unittest.TestCase):
     def test_section_without_role_is_an_operator_error(self):
         for settings in ({"PR_DESCRIPTION_SECTION": "Pull request summary"},
                          {"PR_DESCRIPTION_ROLE": "work", "PR_DESCRIPTION_SECTION": "  "}):
+            settings.update(TASK_HISTORY="unused-fixture-history", TASK_ISSUE="TICKET-7")
             with self.subTest(settings=settings), patch.dict(os.environ, settings, clear=True):
-                with self.assertRaises(support.DescriptionSettingError):
+                with self.assertRaisesRegex(support.DescriptionSettingError, "PR_DESCRIPTION_SECTION"):
                     deliver_git.pull_request_body("TICKET-7", "none")
+
+    def test_blank_body_is_absent_not_a_heading_only_description(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                "TASK_HISTORY": str(Path(directory) / "history.json"), "TASK_ISSUE": "TICKET-7",
+                "PR_DESCRIPTION_ROLE": "work", "PR_DESCRIPTION_SECTION": "Summary",
+                "GITHUB_TOKEN": "fixture-only-credential"}, clear=True):
+            Path(os.environ["TASK_HISTORY"]).write_text(json.dumps({"history": [
+                {"role": "work", "speaker": "writer", "output": "## Summary\n \t\n## Private\nPRIVATE"}]}))
+            body, _, absent = deliver_git.pull_request_body("TICKET-7", "none")
+            self.assertTrue(absent)
+            self.assertNotIn("## Summary", body)
