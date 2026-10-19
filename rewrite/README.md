@@ -1709,6 +1709,9 @@ launch clears that hold. Requester waits, explicit pauses, stops and completion
 are also excluded. A new row or launch resets the clock; this measures recorded
 activity, not proof that a model is making useful progress.
 
+Restart notices are limited to one per 30 minutes: if a second restart within that window interrupts the relaunched request, its subsequent slot wait can appear stalled after the configured display threshold.
+A relaunched request whose run acquisition keeps failing (for example on tracker reads or opening saved state) remains excluded until the next stage records a new `pending_since`; check its attributed `engine.log` line instead.
+
 The page shows the latest line explicitly attributed to that request in the
 last 20,000 bytes of `engine.log`, separately from failures in the run history,
 clipped to 300 characters. When that tail includes the request's latest
