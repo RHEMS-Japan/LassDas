@@ -574,6 +574,277 @@ class PreviewExampleTests(unittest.TestCase):
                 found.append(path)
         return found
 
+    def test_optional_containers_resources_env_and_mounts(self):
+        options = {
+            "env": [{"name": "MODE", "value": "preview"}, {"name": "PORT", "value": "8888"}],
+            "resources": {"requests": {"memory": "256Mi", "cpu": "250m"}, "limits": {"memory": "1Gi", "cpu": "750m"}},
+            "volumes": [{"name": "database", "emptyDir": {"sizeLimit": "512Mi", "medium": "Memory"}}],
+            "containers": [
+                {"name": "page", "image": "example/page:1", "command": ["serve"],
+                 "ports": [{"containerPort": 8081, "name": "metrics", "protocol": "TCP"}],
+                 "readinessProbe": {"httpGet": {"path": "/healthz", "port": 8080}, "periodSeconds": 7},
+                 "volumeMounts": [{"name": "src", "mountPath": "/page", "subPath": "site", "readOnly": True}]},
+                {"name": "database", "image": "example/database:1", "args": ["--local"],
+                 "env": [{"name": "DATABASE", "value": "preview"}],
+                 "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"cpu": "500m", "memory": "512Mi"}},
+                 "volumeMounts": [{"name": "database", "mountPath": "/data"}]}]}
+        status, output = self.up(PREVIEW_POD_OPTIONS=json.dumps(options))
+        self.assertEqual(status, 0, output)
+        pod = self.applied_deployments()[-1]["spec"]["template"]["spec"]
+        app, page, database = pod["containers"]
+        self.assertEqual(app["resources"]["requests"]["memory"], "256Mi")
+        self.assertEqual(app["resources"]["limits"]["memory"], "1Gi")
+        self.assertEqual(app["resources"]["requests"]["cpu"], "250m")
+        self.assertEqual(app["resources"]["limits"]["cpu"], "750m")
+        self.assertIn({"name": "MODE", "value": "preview"}, app["env"])
+        self.assertIn({"name": "PORT", "value": "8888"}, app["env"])
+        self.assertEqual(app["readinessProbe"]["httpGet"]["port"], 8080)
+        self.assertEqual(page["volumeMounts"][0]["subPath"], "site")
+        self.assertTrue(page["volumeMounts"][0]["readOnly"])
+        self.assertNotIn("command", database)
+        self.assertNotIn("readinessProbe", database)
+        self.assertIn(options["volumes"][0], pod["volumes"])
+        for container in (page, database):
+            self.assertEqual(container["securityContext"], app["securityContext"])
+        for actual, configured in zip((page, database), options["containers"]):
+            self.assertEqual({k: v for k, v in actual.items() if k != "securityContext"}, configured)
+        first = self.applied_deployments()[-1]["spec"]["template"]["metadata"]["annotations"]["preview-change"]
+        status, output = self.up(PREVIEW_POD_OPTIONS=json.dumps(options))
+        self.assertEqual(status, 0, output)
+        self.assertEqual(len(self.applied_deployments()), 1)
+        options["containers"][1]["args"].append("--changed")
+        self.assertEqual(self.up(PREVIEW_POD_OPTIONS=json.dumps(options))[0], 0)
+        self.assertNotEqual(first, self.applied_deployments()[-1]["spec"]["template"]["metadata"]["annotations"]["preview-change"])
+
+    def test_no_options_preserves_the_existing_template_and_change_identifier(self):
+        settings = self.tool.Settings('/unused', '/unused', '12', 'sample', 'serve', 8080, '/', 72,
+                                      'example/app:1', '512Mi', None, 240, None, 'preview.example.invalid',
+                                      'preview-apps', 'https://unused', '/unused',
+                                      'example/net@sha256:' + 'a' * 64, 420)
+        deployment, _ = self.tool.manifests(settings, self.tool.preview_names('sample', '12', 'preview.example.invalid'),
+                                           [], datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc))
+        template = deployment['spec']['template']
+        # Captured from the unchanged template before optional fields were added.
+        self.assertEqual(hashlib.sha256(json.dumps(template, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                         '5eb8dabd94d2399f8c2b955f9f1f4893d6e043be72d9660173b9124f0d19a6a4')
+        self.assertEqual(self.tool.change_identifier('a' * 64, template), '6f4d14228084')
+
+    def test_startup_diagnostics_use_only_packed_migration_and_fixed_fields(self):
+        from unittest.mock import patch
+        (self.checkout / 'migrations').mkdir()
+        (self.checkout / 'migrations' / '001_example.up.sql').write_text('synthetic migration')
+        self.scenario({'pod': 'crash'})
+        original = self.tool.Cluster.run
+        supplied = {'stage': 'migration', 'container': 'app', 'file': '001_example.up.sql', 'code': '1050'}
+        def run(cluster, arguments, **kwargs):
+            if arguments[:1] == ['exec'] and 'head' in arguments:
+                return subprocess.CompletedProcess(arguments, 0, json.dumps(supplied).encode(), b'private-error-value')
+            return original(cluster, arguments, **kwargs)
+        with patch.object(self.tool.Cluster, 'run', run):
+            status, output = self.up(PREVIEW_FAILURE_FILE='preview-state/failed', PREVIEW_WAIT_SECONDS='1')
+        self.assertEqual(status, 1, output)
+        self.assertEqual(output.strip().splitlines()[-1], 'app: migration failed (001_example.up.sql, error 1050)')
+        for changed in ({'file': 'unpacked.up.sql'}, {'code': '1050: private-error-value'},
+                        {'stage': 'private-error-value'}, {'message': 'private-error-value'}):
+            supplied.update(changed)
+            self.reset_cluster()
+            with patch.object(self.tool.Cluster, 'run', run):
+                status, output = self.up(PREVIEW_FAILURE_FILE='preview-state/failed', PREVIEW_WAIT_SECONDS='1')
+            self.assertEqual(status, 1, output)
+            self.assertEqual(output.strip().splitlines()[-1], 'application did not start (app: CrashLoopBackOff)')
+            self.assertNotIn('private-error-value', output)
+            supplied = {'stage': 'migration', 'container': 'app', 'file': '001_example.up.sql', 'code': '1050'}
+
+    def test_optional_settings_refuse_secret_refs_and_privilege_before_cluster(self):
+        bad = [
+            {"env": [{"name": "MODE", "valueFrom": {"secretKeyRef": {"name": "unread", "key": "key"}}}]},
+            {"containers": [{"name": "page", "image": "example/page:1", "securityContext": {"privileged": True}}]},
+            {"containers": [{"name": "app", "image": "example/page:1"}]},
+            {"volumes": [{"name": "database", "hostPath": {"path": "/"}}]},
+            {"containers": [{"name": "page", "image": "example/page:1", "volumeMounts": [{"name": "policy", "mountPath": "/rules"}]}]}]
+        for options in bad:
+            with self.subTest(options=options):
+                status, output = self.up(PREVIEW_POD_OPTIONS=json.dumps(options))
+                self.assertEqual(status, 1, output)
+                self.assertEqual(self.calls(), [])
+
+    def test_diagnostic_stage_container_and_size_boundaries(self):
+        from unittest.mock import Mock
+        long_container = "d" * 63
+        settings = self.tool.read_settings(self.environment(PREVIEW_FAILURE_FILE="failed", PREVIEW_POD_OPTIONS=json.dumps(
+            {"containers": [{"name": name, "image": "example/database:1"}
+                            for name in ("database", long_container)]})), "up")
+        pod = {"metadata": {"name": "preview"}, "status": {"initContainerStatuses": [
+            {"name": "net", "state": {"terminated": {"exitCode": 0}}}]}}
+        archive = self.base / "diagnostic.tar"
+        (self.checkout / "migrations").mkdir()
+        (self.checkout / "migrations" / "001_example.up.sql").write_text("synthetic")
+        paths = ["migrations/001_example.up.sql"]
+        long_cases = []
+        for length in (300, 301):
+            fixed = long_container + ": migration failed (.up.sql, error 1050)"
+            filename = "x" * (length - len(fixed)) + ".up.sql"
+            paths.append("migrations/" + filename)
+            (self.checkout / paths[-1]).write_text("synthetic")
+            message = long_container + ": migration failed (" + filename + ", error 1050)"
+            long_cases.append((json.dumps({"stage": "migration", "container": long_container,
+                                          "file": filename, "code": "1050"}).encode(),
+                               message if length == 300 else "application did not start"))
+        self.tool.write_tar(str(self.checkout), paths, str(archive))
+        valid = {"stage": "start", "container": "database"}
+        cases = [(json.dumps({"stage": stage, "container": "database"}).encode(), "database: " + stage + " failed")
+                 for stage in ("snapshot", "seed", "start")]
+        migration = {"stage": "migration", "container": "app", "file": "001_example.up.sql", "code": "1050"}
+        cases.append((json.dumps(migration).encode(), "app: migration failed (001_example.up.sql, error 1050)"))
+        cases += long_cases
+        cases += [(json.dumps(dict(valid, **changed)).encode(), "application did not start")
+                  for changed in ({"stage": "unknown"}, {"stage": 1}, {"container": "not-configured"},
+                                  {"container": "net"}, {"container": []}, {"code": "1050"})]
+        small = json.dumps(valid).encode()
+        cases += [(small + b" " * (1024 - len(small)), "database: start failed"),
+                  (small + b" " * (1025 - len(small)), "application did not start"),
+                  (b"[" * 1000, "application did not start"),
+                  (b"not-json", "application did not start")]
+        for data, expected in cases:
+            with self.subTest(data=data[:90], size=len(data)):
+                cluster = Mock()
+                cluster.run.return_value = subprocess.CompletedProcess([], 0, data, b"private error")
+                try:
+                    observed = self.tool.startup_diagnostic(cluster, settings, pod, archive)
+                except RecursionError:
+                    self.fail("deeply nested diagnostic must return the safe reason, not a traceback")
+                self.assertEqual(observed, expected)
+                self.assertEqual(cluster.run.call_args.kwargs.get("output_limit"), 1025)
+        cluster.run.return_value = subprocess.CompletedProcess([], 1, small, b"private error")
+        self.assertEqual(self.tool.startup_diagnostic(cluster, settings, pod, archive), "application did not start")
+
+    def test_diagnostic_subprocess_output_is_bounded_even_if_head_is_replaced(self):
+        from unittest.mock import patch
+        settings = self.tool.read_settings(self.environment(), "up")
+        cluster = self.tool.Cluster(settings, self.environment(), str(self.tmp), "unused")
+        for size in (1024, 1025, 1000000):
+            with self.subTest(size=size):
+                cluster.base = [sys.executable, "-c", "import os; os.write(2, b'e' * 100000); os.write(1, b'x' * " + str(size) + ")"]
+                with patch.object(self.tool.subprocess, "Popen", wraps=subprocess.Popen) as started:
+                    try:
+                        done = cluster.run(["exec"], limited=False, timeout=2, output_limit=1025)
+                    except self.tool.Failure as failure:
+                        self.fail("bounded diagnostic reader did not finish: " + str(failure))
+                self.assertEqual(started.call_args.kwargs.get("stderr"), subprocess.DEVNULL)
+                self.assertEqual(len(done.stdout), min(size, 1025))
+                self.assertEqual(done.stderr, b"")
+                if size == 1024:
+                    self.assertEqual(done.returncode, 0)
+        cluster.base = [sys.executable, "-c", "import time; time.sleep(30)"]
+        with self.assertRaisesRegex(self.tool.Failure, "did not finish"):
+            cluster.run(["diagnostic"], limited=False, timeout=0.1, output_limit=1025)
+
+    def test_optional_settings_reject_unsafe_volumes_mounts_and_reserved_names(self):
+        bad = [{"volumes": [{"name": "data", "emptyDir": {}}]},
+               {"containers": [{"name": "page", "image": "example/page:1", "volumeMounts": [
+                   {"name": "src", "mountPath": "/page", "subPath": "site/../private"}]}]}]
+        bad += [{"containers": [{"name": name, "image": "example/page:1"}]}
+                for name in ("receive", "install", "net-hold", "net-install", "net")]
+        bad += [{"volumes": [{"name": name, "emptyDir": {"sizeLimit": "1Mi"}}]}
+                for name in ("src", "policy", "signal", "xtables")]
+        for options in bad:
+            with self.subTest(options=options):
+                status, output = self.up(PREVIEW_POD_OPTIONS=json.dumps(options))
+                self.assertEqual(status, 1, output)
+                self.assertEqual(self.calls(), [])
+
+    def test_result_line_and_failure_path_limits_before_cluster(self):
+        for lines in (["x" * 8193], ["字" * 2731], [1], ["line\nsecond"], ["line\r"],
+                      ["tab\t"], ["delete\x7f"], ["control\x85"], ["direction\u202e"], ["isolate\u2066"]):
+            with self.subTest(lines=repr(lines)[:60]):
+                status, output = self.up(PREVIEW_RESULT_LINES=json.dumps(lines))
+                self.assertEqual(status, 1, output)
+                self.assertIn("PREVIEW_RESULT_LINES", output)
+                self.assertEqual(self.calls(), [])
+        for name in ("/absolute", "../outside", "a/../file", "a//file", "./file", "a\0b"):
+            with self.subTest(path=name):
+                status, output = self.up(PREVIEW_FAILURE_FILE=name)
+                self.assertEqual(status, 1, output)
+                self.assertIn("PREVIEW_FAILURE_FILE", output)
+                self.assertEqual(self.calls(), [])
+        settings = self.tool.read_settings(self.environment(PREVIEW_RESULT_LINES=json.dumps(["x" * 8192])), "up")
+        self.assertEqual(settings.result_lines, ["x" * 8192])
+
+    def test_private_inputs_cannot_reach_install_with_public_egress(self):
+        snapshot = self.outside / "snapshot.sql"
+        snapshot.write_text("synthetic data")
+        status, output = self.up(PREVIEW_EXTRA_FILES=json.dumps({"snapshot.sql": str(snapshot)}),
+                                 PREVIEW_INSTALL="npm ci")
+        self.assertEqual(status, 1, output)
+        self.assertIn("PREVIEW_EXTRA_FILES", output)
+        self.assertIn("PREVIEW_INSTALL", output)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.streams(), [])
+
+    def test_operator_app_env_does_not_reach_install(self):
+        status, output = self.up(PREVIEW_INSTALL="npm ci", PREVIEW_ENV_FILE=".env.preview",
+                                 PREVIEW_POD_OPTIONS=json.dumps({"env": [{"name": "APP_ONLY", "value": "disposable"}]}))
+        self.assertEqual(status, 0, output)
+        pod = self.applied_deployments()[-1]["spec"]["template"]["spec"]
+        install = next(c for c in pod["initContainers"] if c["name"] == "install")
+        self.assertIn({"name": "APP_ONLY", "value": "disposable"}, pod["containers"][0]["env"])
+        self.assertIn({"name": "GREETING", "value": "hello"}, install["env"])
+        self.assertNotIn("APP_ONLY", str(install))
+
+    def test_failure_file_keeps_pre_application_failures(self):
+        from unittest.mock import patch
+        cases = [({"pod": "failed_create"}, {}, "ValidatingAdmissionPolicy"),
+                 ({"apply_error": "exceeded quota"}, {}, "exceeded quota"),
+                 ({"pod": "net_fails"}, {}, "setup container net failed"),
+                 ({"pod": "install_fails"}, {"PREVIEW_INSTALL": "npm ci"}, "PREVIEW_INSTALL"),
+                 ({"start": "starting"}, {"PREVIEW_WAIT_SECONDS": "1"}, "PREVIEW_WAIT_SECONDS")]
+        for scenario, changes, reason in cases:
+            with self.subTest(scenario=scenario):
+                self.reset_cluster()
+                self.scenario(scenario)
+                with patch.object(self.tool, "startup_diagnostic") as diagnostic:
+                    status, output = self.up(PREVIEW_FAILURE_FILE="state/failed", **changes)
+                self.assertEqual(status, 1, output)
+                self.assertIn(reason, output.strip().splitlines()[-1])
+                diagnostic.assert_not_called()
+
+    def test_private_files_are_only_in_archive_and_change_its_identifier(self):
+        snapshot = self.outside / "snapshot.sql"
+        snapshot.write_text("synthetic snapshot one")
+        options = {"snapshot.sql": str(snapshot)}
+        status, output = self.up(PREVIEW_EXTRA_FILES=json.dumps(options),
+                                 PREVIEW_RESULT_LINES=json.dumps(["専用データでの確認です"]))
+        self.assertEqual(status, 0, output)
+        with tarfile.open(self.streams()[-1]) as archive:
+            self.assertEqual(archive.extractfile("snapshot.sql").read(), b"synthetic snapshot one")
+        self.assertFalse((self.checkout / "snapshot.sql").exists())
+        self.assertTrue(snapshot.exists(), "the wrapper, not this command, owns the original")
+        lines = (self.home / "task-preview.txt").read_text().splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[-1], "専用データでの確認です")
+        self.assertTrue(lines[1].startswith("この画面は "), lines)
+        self.assertTrue(lines[2].startswith("動いている変更の識別子: "), lines)
+        old_time = snapshot.stat().st_mtime
+        os.utime(snapshot, (old_time + 100, old_time + 100))
+        self.assertEqual(self.up(PREVIEW_EXTRA_FILES=json.dumps(options))[0], 0)
+        self.assertEqual(len(self.streams()), 1)
+        snapshot.write_text("synthetic snapshot two")
+        self.assertEqual(self.up(PREVIEW_EXTRA_FILES=json.dumps(options))[0], 0)
+        self.assertEqual(len(self.streams()), 2)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_private_files_refuse_collisions_links_and_paths_in_checkout(self):
+        source = self.outside / "snapshot.sql"
+        source.write_text("synthetic snapshot")
+        link = self.outside / "link.sql"
+        link.symlink_to(source)
+        for files in ({"site": str(source)}, {"../snapshot.sql": str(source)},
+                      {"snapshot.sql": str(link)}, {"snapshot.sql": str(self.checkout / ".env.preview")}):
+            with self.subTest(files=files):
+                status, output = self.up(PREVIEW_EXTRA_FILES=json.dumps(files))
+                self.assertEqual(status, 1, output)
+                self.assertEqual(self.calls(), [])
+
     # -- names -----------------------------------------------------------
 
     def test_names_come_from_the_site_and_the_request_number(self):

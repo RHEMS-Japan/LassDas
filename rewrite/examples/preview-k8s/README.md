@@ -65,6 +65,9 @@ destination. The browser stays on the same public HTTPS origin.
    reason (the dependency step, a rules container, the hand-over, a failed
    read, the time) before the Pod's last rules container (`net`) has ended
    with status 0, `up` removes the Deployment first and says so.
+   After that container succeeds, `PREVIEW_FAILURE_FILE`, if configured,
+   replaces startup-failure details with the constrained application report
+   described below; earlier refusal and timeout reasons remain unchanged.
 6. Makes the signed URL for the preview's end, and opens the public address
    as the requester would: (a) `PREVIEW_READY_PATH` without the password,
    which the router must answer with 401; (b) the same with the check user's
@@ -333,14 +336,14 @@ Set in the role's `env`. The engine reads none of them.
 | --- | --- | --- | --- |
 | `PREVIEW_NAME` | `sample` | yes | This installation's short name, the first part of every preview's name and host. 1 to 20 lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen. Two installations sharing a namespace need different names: GitHub request numbers are digits only. |
 | `PREVIEW_START` | `python3 -m http.server "$PORT" --bind 0.0.0.0 --directory site` | yes (up) | The command that starts the application, run with `sh -c` in the checkout (`/src`). `PORT` is set. |
-| `PREVIEW_PORT` | `8080` | yes (up) | The port the application listens on. |
+| `PREVIEW_PORT` | `8080` | yes (up) | The Service's target and the readiness port. By default the app listens here; with an extra page container, that page can listen here instead. |
 | `PREVIEW_READY_PATH` | `/` | yes (up) | The path that answers once the application is up. It is the readiness probe and the path of the public check. |
 | `PREVIEW_LIFETIME_HOURS` | `72` | yes (up) | How long a preview stays after it was last brought up, 1 to 720. |
 | `PREVIEW_IMAGE` | `python:3.12-slim` | yes (up) | The image the application runs in. It needs `sh`, `tar` and `sleep`, and `timeout` (coreutils, or BusyBox 1.30 or later) when `PREVIEW_INSTALL` is set. Name it by digest to keep it fixed. |
 | `PREVIEW_MEMORY` | `512Mi` | no (`512Mi`) | The memory limit of the application and of the dependency step. At most the preview namespace's per-container maximum (2Gi in the example cluster setup), or the Pod is refused when it is created. |
 | `PREVIEW_INSTALL` | `npm ci` | no | A dependency step, run with `sh -c` in the checkout before the application. Only during this step can the Pod reach public addresses. |
 | `PREVIEW_INSTALL_SECONDS` | `240` | no (`240`) | The step's time limit: digits only, 1 to 480, and, when `PREVIEW_INSTALL` is set, at most `PREVIEW_WAIT_SECONDS` − 180 (see Time above). Anything else ends `up` before the cluster is called. |
-| `PREVIEW_ENV_FILE` | `.env.preview` | no | A file in the checkout, relative to it, of `KEY=VALUE` lines for the application's environment. No secrets: the file is in the branch. At most 64 KiB; a line that is not `KEY=VALUE` (blank lines and `#` lines aside) ends `up`. `PORT` is always the script's. |
+| `PREVIEW_ENV_FILE` | `.env.preview` | no | A file in the checkout, relative to it, of `KEY=VALUE` lines for the application's environment. No secrets: the file is in the branch. At most 64 KiB; a line that is not `KEY=VALUE` (blank lines and `#` lines aside) ends `up`. `PORT` from this file is ignored; the default is `PREVIEW_PORT`, unless the operator's explicit app env overrides it. |
 | `PREVIEW_PACK_DIR` | `web/dist` | no | A directory of the checkout, relative to it, that git ignores, such as the output a build of the verification stage left there. With it, `up` carries only what is inside it, with the directory as the root (`web/dist/index.html` is `/src/index.html` in the Pod), instead of the checkout's tracked and untracked files. The directory itself has to be ignored, as `dist` or `dist/` in a `.gitignore` ignores it: `dist/*` ignores only what is inside, and git does not count a directory with a tracked file in it as ignored either. One trailing `/` is allowed. `up` ends 1 before the cluster is called when the value starts with `/` or has a doubled `/` or a `.` or `..` part; when the directory, or a directory on its way, is a symbolic link or missing; when git does not ignore the directory itself; when it holds no file or link; and when it holds more than 1 GiB. A link inside is carried as a link. The same contents give the same change identifier, so the same build again only extends the lifetime. |
 | `PREVIEW_POD_ANNOTATIONS` | `{"example.invalid/keep": "true"}` | no | Annotations added to the preview's Pod, as a JSON object of annotation names to string values: what the cluster reads from a Pod, such as the annotation its node autoscaler reads to leave the Pod's node in place (see Limits). Not JSON, not an object, an empty or malformed name, a name given twice, a value that is not a string, one of `preview.py`'s own names (`preview-change`, `preview-expires-at`, `preview-issue`) or names and values together over the API's 262144 bytes (with `preview-change`'s 26) ends `up` before the cluster is called. They are part of the Pod template, so changing them gives a new change identifier. The policy does not restrict a Pod's annotations. |
 | `PREVIEW_WAIT_SECONDS` | `420` | no (420 for up, 60 for down) | How long to wait for the Pod to be ready (up) or for the objects to be gone (down): 1 to 3600. With `PREVIEW_INSTALL`, at least `PREVIEW_INSTALL_SECONDS` + 180. Above 1800 the cleanup, which removes a Deployment that has had no ready Pod for 30 minutes, may remove the preview while `up` still waits. |
@@ -359,6 +362,78 @@ Names: `pv-<PREVIEW_NAME>-<request number>`, the number lowercased and every
 run of other characters made one hyphen (`PROJ-81` becomes `proj-81`). A
 name longer than 63 characters is cut and ends in eight characters of its
 hash, so two long request numbers never share a preview.
+
+## Optional containers and private input files
+
+These settings belong to the operator, not to the request's checkout. With
+none set, the Pod template, archive and change identifier are unchanged.
+
+- `PREVIEW_POD_OPTIONS`: a JSON object with optional `containers`, `volumes`,
+  `resources` and `env`. `resources` overrides the app's requests and limits
+  separately (CPU, memory and ephemeral-storage); `env` is a list of
+  `{ "name": "MODE", "value": "preview" }` entries for app only, overriding
+  the settings file. An explicit `PORT` here can select the API's internal
+  port; it does not change `PREVIEW_PORT`, the Service or the readiness probe.
+  These values are visible in the Pod:
+  use disposable values only, never development or production credentials.
+- `containers` adds ordinary containers: `name`, `image`, optional `command`
+  and `args` (string arrays), `ports`, plaintext `env`, `resources`,
+  `volumeMounts` and `readinessProbe`. Omit command to keep the image's
+  entrypoint; omit readiness for a loopback-only service. All run non-root,
+  without added capabilities or privilege escalation. Root filesystems are
+  writable, as app's is. Mounts can name `src` or an extra volume, use
+  `subPath` and `readOnly`, but not the rules or signal volumes.
+- `volumes` adds named `emptyDir` volumes with required `sizeLimit` and
+  optional `medium: "Memory"`. They do not enlarge the source volume or the
+  archive's shared 1 GiB limit. Extra containers need resources within the
+  namespace's existing LimitRange and quota, not `PREVIEW_MEMORY`.
+  `sizeLimit` requires a positive integer followed by `Mi` or `Gi`.
+  CPU quantities below one core must use millicores (`500m`, not `0.5`).
+  Container port names are passed to Kubernetes without local validation.
+  No admission policy is loosened.
+- `PREVIEW_EXTRA_FILES`: a JSON object mapping archive-root file names to
+  absolute, regular-file paths outside the checkout. No symlink is followed
+  along those paths. A name already present in the source, including a
+  directory or link, is refused. Bytes count toward the same archive limit
+  and change identifier. The command does not copy them into the checkout
+  or delete their originals: the operator's wrapper must use a temporary
+  directory and remove it in a finally block. The command's tar copy is
+  removed with its own temporary directory. Changing a daily snapshot means
+  a new identifier and a new Pod, even if source code did not change.
+  Nonempty `PREVIEW_EXTRA_FILES` cannot be combined with `PREVIEW_INSTALL`:
+  that step can reach public addresses and must never receive private inputs.
+- `PREVIEW_RESULT_LINES`: a JSON array of explanatory lines appended after
+  the ordinary three lines. Use it to say which API/data this page uses and
+  which operations cannot be tested. No environment values are interpolated.
+  The joined UTF-8 lines must be at most 8 KiB and contain no control or
+  bidirectional formatting characters.
+- `PREVIEW_FAILURE_FILE`: an optional path relative to `/src`, read from
+  app when startup fails after the last rules container completed successfully.
+  Before then, quota/policy refusals, install exit codes, setup failures and
+  timeouts keep their original reason. The image needs `head`; the reader
+  caps its output at 1025 bytes and ignores stderr, even if request code
+  replaces `head`. The file must contain at most 1024 bytes of JSON: `stage`
+  (`snapshot`, `migration`, `seed` or `start`), `container` (a configured
+  ordinary container), and, for migration only, `file` (a name actually
+  packed under `migrations/`) and `code` (four or five decimal digits).
+  Only these fields are printed, up to 300 characters. Missing, unreadable
+  or malformed output, including JSON nested too deeply to read, becomes
+  `application did not start`, with a known
+  waiting reason such as `CrashLoopBackOff` and its container when available; neither raw
+  output, container error messages nor file contents are printed. A request
+  can write this file: this is a constrained diagnostic, not trusted proof
+  of its cause. The engine still gives the requester its fixed failure
+  sentence; the diagnostic is for its history and status view.
+
+The existing `app` container can run an API while an additional page
+container serves `PREVIEW_PORT`. Point `PREVIEW_READY_PATH` at the page's
+API health proxy: the kubelet cannot probe a loopback-only API directly.
+The app already declares port `http` on `PREVIEW_PORT`: do not declare that
+port a second time on the page container. Its process may still listen there.
+Mount only built static files into the page container, not snapshots or
+logs. Extra containers and input files can hold sensitive data; network
+isolation, data minimization and deletion remain the operator's duties.
+Local tests are not evidence of Linux mounts or cluster readiness.
 
 ## Credentials
 
@@ -457,7 +532,7 @@ standard error and nothing on standard output.
 | Status | When |
 | --- | --- |
 | 0 | `up`: the preview answers on its public address and `TASK_PREVIEW` is written. `down`: neither the Deployment nor the Service of the request is left, also when there was none. `origin`: the origin is printed. |
-| 1 | Anything else. The last line of the output is the reason, with the cluster's own message where it gave one (a policy refusal names the policy). `TASK_PREVIEW` is not written. |
+| 1 | Anything else. The last line is the reason (a policy refusal names the policy). With `PREVIEW_FAILURE_FILE`, failures after the last rules container use the constrained application diagnostic instead; earlier failures keep the original reason. `TASK_PREVIEW` is not written. |
 | 2 | A wrong command line. The engine never starts it so with this configuration. Also `origin` without one of its settings, or with a wrong one. |
 
 After a failure nothing is removed, except a Deployment whose Pod's last
@@ -482,7 +557,8 @@ one. Nothing of the checkout is read through one:
   on its way, ends `up`; a link inside is packed as a link.
 - In the Pod, a link is unpacked as a link. Following it there finds only
   the preview Pod's own files. These can hold private inputs and disposable
-  credentials when optional settings supply them; never real credentials.
+  credentials when optional settings supply them. The operator must keep real
+  credentials out; this program cannot prove that those files contain none.
 
 ## The shape the cluster accepts
 
