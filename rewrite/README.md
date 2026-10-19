@@ -1716,6 +1716,52 @@ action. It can require HTTP basic authentication (`--auth-user-env` and
 without it. `deploy/ticket-engine/statefulset.yaml.example` runs it as a
 second container of the same Pod with the state volume mounted read-only.
 
+The overview reads and displays usage of the filesystem containing the queue,
+including space unavailable to ordinary processes. This is not the size of the
+queue directory or a claim about a storage provider's separate quota. An
+unavailable reading is shown as unknown, never as zero usage.
+`intake.disk_notice_percent` sets the warning threshold (absent means 85; an
+integer from 1 to 100; zero disables new capacity notices). Give status the engine's
+configuration with `--config` to show the same threshold. At or above it, the
+watch measures once per queue tick and posts one capacity warning per unfinished
+request (including active work, answer waits, model-credit holds and operator
+pauses, but not stopped or finished requests) through the existing notice
+path. Its saved notice prevents resending after a restart or another crossing.
+The warning does not stop work, delete files or change routing. A full disk can
+also prevent saving a notice: that failure is logged and retried, not reported
+as a sent warning. The comment describes the condition when first recorded,
+not a live reading; an unconfirmed submission is retried without rewriting it.
+Measurement errors are logged once per reason until recovery. Status reads
+usage independently and never posts anything. These are block-usage readings,
+not inode usage. Linux and macOS support them; other operating systems show
+usage as unavailable. Disabling warnings skips the watch's measurements and
+does not register the capacity notice; the status reading remains available.
+Previously recorded, unconfirmed notices still follow the existing retry path
+even if the threshold is later set to zero; this setting does not cancel them.
+The collector skips confirmed capacity notices before reading request history.
+For active requests it only records the new notice, without waiting for a busy
+notice lock or calling the tracker; the request's watcher submits it. Inactive
+requests retry an unconfirmed submission, logging each failure reason once.
+If a request ends between recording and submission, its pending capacity
+notice is marked obsolete without posting; other pending notices are unchanged.
+This also applies if usage has fallen or new capacity warnings are disabled.
+Successfully read done/stopped requests are excluded from further capacity
+checks for that collector's lifetime. A busy notice lock or failed save is
+retried, never treated as a settled warning. Errors while settling another
+notice use a neutral notice label, and a prior send error is cleared only after
+the capacity record is confirmed or becomes obsolete.
+Capacity can be recorded before the acceptance receipt when a request first
+arrives with storage already high. A stop not yet observed by the controller
+can still be followed by this notice; it does not cancel the stop request.
+The displayed percentage is rounded down to one decimal so a value below the
+threshold is not displayed as equal to it. Invalid threshold settings are shown
+as configuration errors, distinct from an unavailable filesystem reading.
+
+Homes are currently reused per role and process, not created per attempt.
+Their latest contents and the shared checkout remain available for retries;
+this monitoring change does not remove either. Finished-request retention is
+unchanged.
+
 Nothing the runtime wrote is out of the page's reach: every directory under
 the queue is listed and every file served whole under `/files/`, with a path
 that leaves the queue refused, symbolic links included. For a review after the

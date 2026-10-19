@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/diskusage"
 	"ticket-runner/internal/stagename"
 	"ticket-runner/internal/textclip"
 	"ticket-runner/internal/tracker"
@@ -159,7 +160,9 @@ type noticeRecord struct {
 	WrittenAt time.Time  `json:"written_at"`
 	PostedAt  *time.Time `json:"posted_at,omitempty"`
 	Predates  bool       `json:"predates,omitempty"`
-	Models    string     `json:"models,omitempty"`
+	// Obsolete keeps a capacity warning that was pending when its request ended.
+	Obsolete bool   `json:"obsolete,omitempty"`
+	Models   string `json:"models,omitempty"`
 	// Event is an optional controller occurrence, separate from a notice's
 	// kind. Notices without one keep their existing interval and once rules.
 	Event string `json:"event,omitempty"`
@@ -194,6 +197,9 @@ type notices struct {
 	// queue keeps when each kind of notice began; a request's directory is
 	// the queue's jobs/<id>.
 	queue string
+	// recordOnly lets the queue compose a notice without joining a watcher's
+	// tracker traffic. A busy lock is retried on a later queue tick.
+	recordOnly bool
 }
 
 func requestNotices(cfg config, issue sourceIssue, directory string) notices {
@@ -208,9 +214,13 @@ func (n notices) path() string { return filepath.Join(n.directory, "notices.json
 // posts whole, so neither submits a notice the other is submitting.
 var noticeLocks sync.Map
 
-func (n notices) hold() func() {
+func (n notices) mutex() *sync.Mutex {
 	lock, _ := noticeLocks.LoadOrStore(filepath.Clean(n.directory), &sync.Mutex{})
-	mutex := lock.(*sync.Mutex)
+	return lock.(*sync.Mutex)
+}
+
+func (n notices) hold() func() {
+	mutex := n.mutex()
 	mutex.Lock()
 	return mutex.Unlock
 }
@@ -240,7 +250,7 @@ func (n notices) save(log noticeLog) error {
 
 func pendingNotice(log noticeLog) int {
 	for i := range log.Notices {
-		if log.Notices[i].PostedAt == nil && !log.Notices[i].Predates {
+		if log.Notices[i].PostedAt == nil && !log.Notices[i].Predates && !log.Notices[i].Obsolete {
 			return i
 		}
 	}
@@ -250,7 +260,7 @@ func pendingNotice(log noticeLog) int {
 // onceNotice reports a kind said at most once per request, so any record of
 // it, posted or predating, settles it.
 func onceNotice(kind string) bool {
-	return kind == acceptedNotice || kind == startedNotice || kind == modelsNotice || strings.HasPrefix(kind, stagePrefix)
+	return kind == diskNotice || kind == acceptedNotice || kind == startedNotice || kind == modelsNotice || strings.HasPrefix(kind, stagePrefix)
 }
 
 // noticeDue decides whether a condition may speak again. The budget pause and
@@ -350,6 +360,9 @@ func kindStart(now time.Time) time.Time {
 // posts.
 func postableKinds(cfg config) []string {
 	kinds := []string{resumeNotice}
+	if diskThreshold(cfg) > 0 {
+		kinds = append(kinds, diskNotice)
+	}
 	if cfg.Intake == nil {
 		return kinds
 	}
@@ -480,12 +493,20 @@ func (n notices) say(ctx context.Context, kind, text, models string, at time.Tim
 // earlier unconfirmed notice is settled, and gives the notice to record, and
 // whether it speaks at all.
 func (n notices) sayAs(ctx context.Context, kind, event string, at time.Time, compose func(noticeLog, time.Time) (noticeRecord, bool)) error {
-	defer n.hold()()
+	if n.recordOnly {
+		mutex := n.mutex()
+		if !mutex.TryLock() {
+			return nil
+		}
+		defer mutex.Unlock()
+	} else {
+		defer n.hold()()
+	}
 	log, err := n.load()
 	if err != nil {
 		return err
 	}
-	if i := pendingNotice(log); i >= 0 {
+	if i := pendingNotice(log); i >= 0 && !n.recordOnly {
 		if err := n.settle(ctx, &log, i, false); err != nil {
 			return err
 		}
@@ -501,6 +522,10 @@ func (n notices) sayAs(ctx context.Context, kind, event string, at time.Time, co
 	since, err := kindSince(n.queue, kind, now)
 	if err != nil {
 		return err
+	}
+	// Only capacity is a current condition; other undated events stay old.
+	if kind == diskNotice && at.IsZero() {
+		at = now
 	}
 	if at.Before(since) {
 		// A kind said once is settled by a record that it predates, so no
@@ -520,6 +545,9 @@ func (n notices) sayAs(ctx context.Context, kind, event string, at time.Time, co
 	log.Notices = append(log.Notices, record)
 	if err := n.save(log); err != nil {
 		return err
+	}
+	if n.recordOnly {
+		return nil
 	}
 	return n.settle(ctx, &log, len(log.Notices)-1, true)
 }
@@ -1063,6 +1091,9 @@ func validateEndpoint(address string) error {
 func validateNotices(cfg config) error {
 	if cfg.Intake == nil {
 		return nil
+	}
+	if err := diskusage.Validate(cfg.Intake.DiskNoticePercent); err != nil {
+		return err
 	}
 	if cfg.Intake.MinModelCredit < 0 {
 		return errors.New("intake.min_model_credit must not be negative")

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/diskusage"
 	"ticket-runner/internal/tracker"
 )
 
@@ -61,6 +62,8 @@ type intakeConfig struct {
 	// StallNoticeMinutes is how long a request may go without completing a step
 	// before the requester is told. Absent means 90 minutes; zero says nothing.
 	StallNoticeMinutes *int `json:"stall_notice_minutes,omitempty"`
+	// DiskNoticePercent defaults to 85; zero disables capacity notices.
+	DiskNoticePercent *int `json:"disk_notice_percent,omitempty"`
 	// Statuses names, by id, where the issue moves at each turn of the work.
 	Statuses *statusConfig `json:"statuses,omitempty"`
 	// CategoryOnAccept is added to an accepted issue, so the tracker's own
@@ -327,6 +330,24 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	// tick and said once per reason, not once per tick.
 	trimTrouble := map[string]string{}
 	removalTrouble := map[string]string{}
+	diskTrouble := ""
+	diskSaid := map[string]bool{}
+	diskSendTrouble := map[string]string{}
+	retireCapacity := func(name, directory string) {
+		if diskSaid[name] {
+			return
+		}
+		settled, err := obsoleteCapacity(notices{directory: directory})
+		if err != nil {
+			if diskSendTrouble[name] != err.Error() {
+				observe("request " + name + ": capacity notice state not saved: " + err.Error())
+				diskSendTrouble[name] = err.Error()
+			}
+		} else if settled {
+			diskSaid[name] = true
+			delete(diskSendTrouble, name)
+		}
+	}
 	trim := func(name, directory string, say func(string)) {
 		if err := trimFinished(directory); err != nil {
 			reason := err.Error()
@@ -390,16 +411,48 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 		// One shared model key serves the whole queue, so ask once per tick
 		// rather than once per waiting request.
 		creditLow, creditKnown := modelCreditHold(ctx, cfg, observe)
+		percent := float64(0)
+		if diskThreshold(cfg) > 0 {
+			reading, err := queueDiskPercent(filepath.Dir(jobs))
+			if err != nil {
+				if diskTrouble != err.Error() {
+					observe("queue filesystem measurement failed: " + err.Error())
+				}
+				diskTrouble = err.Error()
+			} else {
+				percent = reading
+				if diskTrouble != "" {
+					observe("queue filesystem measurement recovered")
+				}
+				diskTrouble = ""
+			}
+		}
 		for _, entry := range entries {
 			if ctx.Err() != nil {
 				break
 			}
 			id, err := strconv.ParseInt(entry.Name(), 10, 64)
-			if err != nil || id <= 0 || !entry.IsDir() || active[entry.Name()] {
+			if err != nil || id <= 0 || !entry.IsDir() {
 				continue
 			}
 			directory := filepath.Join(jobs, entry.Name())
 			say := func(message string) { observe("request " + entry.Name() + ": " + message) }
+			diskNeeded := diskusage.Over(percent, diskThreshold(cfg)) && !diskSaid[entry.Name()]
+			if diskNeeded {
+				needed, confirmed, err := capacityNoticeNeeded(notices{directory: directory}, active[entry.Name()])
+				diskSaid[entry.Name()] = confirmed
+				if confirmed {
+					delete(diskSendTrouble, entry.Name())
+				}
+				diskNeeded = needed && err == nil
+				if err != nil && diskSendTrouble[entry.Name()] != err.Error() {
+					say("capacity notice record unavailable: " + err.Error())
+					diskSendTrouble[entry.Name()] = err.Error()
+				}
+			}
+			if active[entry.Name()] && !diskNeeded {
+				continue
+			}
 			raw, err := os.ReadFile(filepath.Join(directory, "issue.json"))
 			if err != nil {
 				observe("reading accepted issue: " + err.Error())
@@ -410,10 +463,28 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				observe("accepted issue record could not be read for its source; no replacement used")
 				continue
 			}
+			if diskNeeded {
+				notice := requestNotices(cfg, issue, directory)
+				notice.recordOnly = active[entry.Name()]
+				settled, err := noteQueueDisk(ctx, cfg, notice, percent, diskNeeded)
+				if err != nil {
+					if diskSendTrouble[entry.Name()] != err.Error() {
+						say("notice not confirmed while checking capacity: " + err.Error())
+						diskSendTrouble[entry.Name()] = err.Error()
+					}
+				} else if settled {
+					diskSaid[entry.Name()] = true
+					delete(diskSendTrouble, entry.Name())
+				}
+			}
+			if active[entry.Name()] {
+				continue
+			}
 			if stopped, err := savedStop(source, directory, issue, cfg.Intake.StopUserIDs); err != nil {
 				observe("request " + entry.Name() + " held: " + err.Error())
 				continue
 			} else if stopped {
+				retireCapacity(entry.Name(), directory)
 				applyStatus(ctx, cfg, issue, directory, stoppedStatus, say)
 				assignTurn(ctx, cfg, issue, directory, "requester", say)
 				// A page put up for the requester goes down in a launch of
@@ -467,6 +538,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				continue
 			}
 			if state.Done {
+				retireCapacity(entry.Name(), directory)
 				applyStatus(ctx, cfg, issue, directory, deliveredStatus, say)
 				assignTurn(ctx, cfg, issue, directory, "requester", say)
 				pageSettled := downs.settle(issue, directory, entry.Name(), say)
