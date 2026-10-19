@@ -145,7 +145,7 @@ def verify_commands():
 def run_verification(source, commands, report):
     """Run every configured command; a failure does not stop the report."""
     environment = support.git_environment(with_credential=False)
-    temporary = Path(source).parent / "tmp"
+    temporary = Path(os.environ.get("TASK_HOME") or Path(source).parent) / "tmp"
     temporary.mkdir(exist_ok=True)
     environment["TMPDIR"] = str(temporary)
     failures = 0
@@ -291,8 +291,14 @@ def verify(arguments):
             report.append("The configured commands ran with commit %s checked out%s."
                           % (merge, "" if merge == tip.strip() else
                              "; %s has moved on to %s since" % (fetched, tip.strip())))
+        try:
+            added = support.added_test_commands(source, report, commit=merge or None)
+        except DeliveryError:
+            print("\n\n".join(report))
+            raise
         failures = run_verification(source, commands, report)
         report.append("%d of %d configured verification commands failed." % (failures, len(commands)))
+        failures += run_verification(source, added, report)
     else:
         report.append("The configured verification commands were not run: %s, so there is nothing verified "
                       "to check." % absent)

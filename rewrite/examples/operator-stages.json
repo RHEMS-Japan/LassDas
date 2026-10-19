@@ -267,9 +267,13 @@
             "--network",
             "inherit",
             "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/verify_added_tests.py",
+            "--",
             "/opt/ticket-automation/operator/test"
           ],
-          "instructions": "Run the operator's tests. Its exit status is the observation; it returns no report and no approval.",
+          "instructions": "Run the operator's tests and report whether newly added tests were executed individually. The exit status and captured command output are observations, not approval.",
           "env": {
             "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch"

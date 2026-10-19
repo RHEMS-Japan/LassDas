@@ -7,6 +7,7 @@ through the credential helper below, which answers one configured host.
 """
 import codecs
 import datetime
+import fnmatch
 import http.client
 import json
 import os
@@ -259,6 +260,46 @@ def description_report():
     label = "section %r of role %s" % (section, role) if section else "latest report of role %s" % role
     description_size(prefix + text, "The complete description (%s: %d bytes)" % (label, len(text.encode("utf-8"))))
     return text, "", ""
+
+
+def added_test_commands(source, report, commit=None):
+    """Name additions explicitly; aggregate test success says nothing about them."""
+    command = setting("ADDED_TEST_COMMAND", "")
+    base = setting("ADDED_TEST_BASE", setting("TASK_BASE_COMMIT", ""))
+    try:
+        if not base:
+            raise DeliveryError("no original checkout commit was supplied")
+        _, revision, _ = run(git("-C", str(source), "rev-parse", "--verify", "--end-of-options", base + "^{commit}"))
+        end = [commit] if commit else []
+        _, added, _ = run(git("-C", str(source), "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                             "--diff-filter=A", "--name-only", "-z", revision.strip(), *end, "--"))
+        untracked = ""
+        if not commit:
+            _, untracked, _ = run(git("-C", str(source), "ls-files", "--others", "--exclude-standard", "-z"))
+    except DeliveryError as error:
+        report.append("Added tests not executed individually: detection unavailable (%s)." % error)
+        if command:
+            raise
+        return []
+    patterns = setting("ADDED_TEST_PATTERNS", "*test*\n*_test.go\ntests/").splitlines()
+    paths = sorted(path for path in set((added + untracked).split("\0")) if path and any(
+        (("/" + pattern) in ("/" + path) if pattern.endswith("/") else fnmatch.fnmatchcase(path, pattern))
+        for pattern in patterns if pattern))
+    if not paths:
+        report.append("No added test files matched the configured path rules.")
+        return []
+    report.append("Added tests: " + ", ".join(paths))
+    if not command:
+        report.append("Added tests not executed individually: ADDED_TEST_COMMAND is not configured.")
+        return []
+    parts = shlex.split(command)
+    if not any("{file}" in part or "{package}" in part for part in parts):
+        raise DeliveryError("ADDED_TEST_COMMAND must include {file} or {package}")
+    commands = []
+    for path in paths:
+        values = {"file": "./" + path, "package": "./" + str(Path(path).parent)}
+        commands.append([re.sub(r"\{(file|package)\}", lambda match: values[match[1]], part) for part in parts])
+    return commands
 
 
 class TransientError(DeliveryError):

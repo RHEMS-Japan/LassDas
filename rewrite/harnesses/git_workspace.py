@@ -276,6 +276,8 @@ def main():
         sys.exit(1)
     # The old empty-directory inode may have been replaced, including while a
     # concurrent launcher started there. Enter the newly published directory.
+    with record_path(workspace).open() as saved:
+        os.environ["TASK_BASE_COMMIT"] = json.load(saved).get("head", "")
     os.chdir(workspace)
     os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
 

@@ -1634,6 +1634,35 @@ automation rather than treating its saved body as a lock. This option does
 not change ticket comments or establish production delivery. The report role
 must still describe what actually reached the requested destination.
 
+### Running newly added tests explicitly
+
+The staged example wraps the operator's test command with
+`harnesses/verify_added_tests.py -- <command>`. That wrapper and
+`verify_merged.py` also look for test files added since the prepared checkout's
+original commit, including committed, staged and untracked additions. The
+workspace launcher supplies that commit as `TASK_BASE_COMMIT`; standalone
+launchers can set `ADDED_TEST_BASE` to an explicit Git revision. Post-delivery
+checks run the detected files in the fetched delivery, not the worker's tree.
+
+Set `ADDED_TEST_PATTERNS` to newline-separated path globs (default `*test*`,
+`*_test.go`, `tests/`; a trailing slash matches a directory path), and
+`ADDED_TEST_COMMAND` to a single-file command using `{file}` or `{package}`.
+Examples are `node --experimental-strip-types --test {file}` and
+`go test {package}`. Package means the file's relative parent directory.
+Arguments are split before replacing placeholders and run without a shell;
+filenames with spaces remain one argument. Set these on both verification
+processes. A nonzero exit fails the stage even when the operator's aggregate
+tests pass. `VERIFY_TIMEOUT_SECONDS` bounds each invocation (default 1200).
+
+With no single-file command configured, the report explicitly lists added
+tests as **not executed individually**, without failing the stage. If their
+diff cannot be read, it says detection was unavailable rather than claiming
+there were no new tests; with a single-file command configured that is an
+error. Detection is based on the configured names, not a claim to recognize
+every language's tests. Configure an installation-specific wrapper if its
+languages need different commands. Existing tests remain the aggregate
+command's responsibility.
+
 ### A live check the installation supplies
 
 An installation can give the `verify` stage one more process: its own command
