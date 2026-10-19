@@ -71,6 +71,7 @@ Environment (all from the operator, never from a role):
   DELIVERY_MERGE_METHOD      merge (default), squash, rebase, or none to leave the merge to a person
   DELIVERY_ALLOW_UNCHANGED   1 lets a request that changed no file end without a delivery (default: refused)
   PR_DESCRIPTION_ROLE       optional role whose saved report explains the change (see README)
+  PR_DESCRIPTION_SECTION    optional Markdown heading to select from that report
   PR_DESCRIPTION_MAX_BYTES  full description byte limit (default 60000)
   DELIVERY_REMOTE_URL        optional Git URL override (default: github.com)
   DELIVERY_API_BASE          optional REST base (default: api.github.com)
@@ -462,7 +463,8 @@ def pull_request_body(issue, method):
     if not os.environ.get("PR_DESCRIPTION_ROLE"):
         return body, ""
     text, note = support.description_report()
-    body += "\n\n" + (text or note)
+    if text or note:
+        body += "\n\n" + (text or note)
     try:
         refuse_forbidden_text([(None, body)])
     except DeliveryError as error:

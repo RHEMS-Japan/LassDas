@@ -1561,6 +1561,21 @@ and an oversized report also states its actual UTF-8 byte count. This limit is n
 claim about a hosting service's exact limit. The old repository-document option
 `DELIVERY_PR_BODY_FILE` is removed; there is no compatibility path or migration.
 
+To carry the confirmation role's agreed limitations and checking instructions,
+set `PR_DESCRIPTION_ROLE=confirm_change` and
+`PR_DESCRIPTION_SECTION=Pull request summary` **on delivery only**. Ask that role
+to include an optional `## Pull request summary` section in its ordinary report.
+Delivery appends that section's text after its introduction; the section ends
+at the next heading of the same or higher level. Other report text is not
+published. A missing or empty section leaves just the introduction, not an
+invented claim of verification. The latest report is used, never an older
+section when the latest report omits it. This text is confirmation/reporting
+information, not an additional review verdict. The existing
+`PR_DESCRIPTION_MAX_BYTES` limit covers the complete body, without truncation,
+and delivery's forbidden-text and credential checks still apply. Keep any
+pre-review `PR_DESCRIPTION_ROLE` setting on review separate: a later
+confirmation role has not run when review starts.
+
 The generated body is retained in the delivery process's
 `TASK_HOME/pull-request-description.md`, outside the checkout. The delivery
 record identifies that location and the commit the description accompanies.

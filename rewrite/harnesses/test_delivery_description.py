@@ -47,6 +47,44 @@ class DescriptionTests(unittest.TestCase):
         self.assertEqual(len(self.fixture.state["pulls"]), 1)
         self.assertFalse(any(method == "PATCH" for method, _ in self.fixture.state["requests"]))
 
+    def test_confirmation_summary_is_optional_and_uses_only_the_latest_report(self):
+        settings = dict(PR_DESCRIPTION_ROLE="confirm_change", PR_DESCRIPTION_SECTION="Pull request summary")
+        for summary in ("Home display unverified. Open the home page to check.", "Updated checking instructions.", ""):
+            with self.subTest(summary=summary):
+                output = "Read the change.\n"
+                if summary:
+                    output += "## Pull request summary\n" + summary + "\n## Private observations\nDo not publish this."
+                self.history.write_text(json.dumps({"history": [
+                    {"role": "confirm_change", "speaker": "reader", "output": "## Pull request summary\nOld text"},
+                    {"role": "work", "speaker": "writer", "output": "Revised the change"},
+                    {"role": "confirm_change", "speaker": "reader", "output": output},
+                ]}))
+                result = self.deliver(**settings)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                body = self.fixture.state["pulls"][0]["body"]
+                self.assertNotIn("Old text", body)
+                self.assertNotIn("Private observations", body)
+                self.assertNotIn("Read the change", body)
+                if summary:
+                    self.assertTrue(body.endswith(summary), body)
+                else:
+                    self.assertTrue(body.endswith("Merging it is left to a person."), body)
+
+    def test_confirmation_summary_refuses_oversize_and_forbidden_text_before_push(self):
+        for summary, settings, reason in (
+            ("界" * 20000, {}, "60000-byte"),
+            ("private-label", {"DELIVERY_FORBIDDEN_TEXT": "private-label"}, "forbidden text"),
+        ):
+            with self.subTest(reason=reason):
+                self.history.write_text(json.dumps({"history": [
+                    {"role": "confirm_change", "speaker": "reader", "output": "## Pull request summary\n" + summary},
+                ]}))
+                result = self.deliver(PR_DESCRIPTION_ROLE="confirm_change", PR_DESCRIPTION_SECTION="Pull request summary", **settings)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stderr)
+                self.assertEqual(self.fixture.state["pulls"], [])
+                self.assertNotIn("refs/heads/ticket/TICKET-41", self.fixture.remote_branches())
+
     def test_next_round_updates_the_same_pull_request_without_shortening(self):
         self.explain("First explanation\n")
         self.assertEqual(self.deliver().returncode, 0)

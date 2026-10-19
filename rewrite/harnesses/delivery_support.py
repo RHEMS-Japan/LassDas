@@ -130,6 +130,17 @@ def description_report():
                                       "before review, not a process name or a later reporting role" % role)
     if not text.strip():
         raise DeliveryError("The latest report of role %s is empty; return to the worker for an explanation" % role)
+    section = os.environ.get("PR_DESCRIPTION_SECTION", "")
+    if section:
+        # A section is optional. Do not fall back to an older report or publish
+        # the surrounding observations when this report has no summary.
+        heading = re.search(r"(?m)^(#{1,6})[ \t]+" + re.escape(section) + r"[ \t]*\r?$", text)
+        if not heading:
+            return "", ""
+        text = text[heading.end():]
+        following = re.search(r"(?m)^#{1," + str(len(heading.group(1))) + r"}[ \t]+", text)
+        text = text[:following.start()] if following else text
+        text = text.strip()
     description_size(prefix + text, "The complete description (latest report of role %s: %d bytes)"
                      % (role, len(text.encode("utf-8"))))
     return text, ""
