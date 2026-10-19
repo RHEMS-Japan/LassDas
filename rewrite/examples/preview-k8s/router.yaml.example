@@ -142,11 +142,16 @@ data:
         location = /_preview/open { error_log stderr crit; js_content preview.open; }
         location = /_preview/check { internal; js_content preview.check; }
         location ^~ /_preview/ { return 404; }
-        # relay: begin. A refusal returns before the password is checked:
-        # "return" answers ahead of auth_basic, with the fixed sentence only,
-        # and nothing is sent to the API.
+        # relay: begin. The relay asks for the signed URL's cookie, not the
+        # password: a page's own code may send an Authorization header of its
+        # own, which auth_basic would read in place of the password the
+        # browser keeps. The cookie is set only after the password and the
+        # signed URL (/_preview/open). A refusal returns before the cookie is
+        # checked: "return" answers ahead of auth_request, with the fixed
+        # sentence only, and nothing is sent to the API.
         location = /_relay/api {
           internal;
+          auth_basic off;
           auth_request /_preview/check;
           error_page 403 = @relay_refused;
           error_page 502 503 504 = @relay_down;

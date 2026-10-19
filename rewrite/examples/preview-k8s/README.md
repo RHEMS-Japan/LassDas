@@ -407,8 +407,9 @@ address stops opening at the preview's end.
   `__Host-preview` (Secure, HttpOnly, SameSite=Lax, Path=/, no Domain, until
   the end) and answers 302 to `/`, with `Referrer-Policy: no-referrer`.
   Every other path needs the password and that cookie; without them it
-  answers 401 and 403. Paths under `/_preview/` belong to the router and
-  never reach the application.
+  answers 401 and 403. The paths a relay sends to an API need the cookie
+  alone ([Relaying an API](#relaying-an-api)). Paths under `/_preview/`
+  belong to the router and never reach the application.
 - **The application's cookies:** before forwarding, the router removes its
   own cookie from the `Cookie` header; in the answer, it rewrites the
   `Domain` of every `Set-Cookie` to the host and drops one of its own name or
@@ -680,6 +681,14 @@ cluster, with a key only the router holds, and only when it reads.
   (`sample-stg-example-12`).
 - **Which paths:** those under `<relay-path-prefix>`. Every other path of
   these previews goes to the preview as before.
+- **The cookie, not the password.** The relayed paths need the signed URL's
+  cookie alone. A page's own code may send an `Authorization` header of its
+  own (a token of the application's), and the password check would read it
+  in place of the password the browser keeps and answer 401. The cookie is
+  set only after the password and the signed URL (`/_preview/open`), it works
+  on that host only and until the preview's end, and without it the relay
+  answers 403 and sends nothing. The pages, `/_preview/open` and every path
+  not relayed still need the password.
 - **Only GET and HEAD of an allowed path.** Each allowed path is one line,
   `<relay-allowed-path>`, a regular expression of the whole path
   (`/api/items/[0-9]+`). Every other method is refused, and so is every GET
@@ -713,7 +722,8 @@ cluster, with a key only the router holds, and only when it reads.
   because after the move `$uri` is that location's name and every allowed
   path would be refused.
 - **What the API receives:** the request with `<relay-header>` set to the
-  key and `Host` the Service's name. `Authorization` (the shared password),
+  key and `Host` the Service's name. `Authorization` (the shared password,
+  or the page's own),
   `Cookie` (the router's and the page's) and each `<relay-cleared-header>`
   are sent empty. Every header is set in the relay's location: nginx carries
   none of the location `/`'s over once one is set there.
@@ -780,8 +790,9 @@ blocks as text everywhere, and runs the router's whole configuration with
 this example filled in on an nginx with the njs and auth_request modules
 (`PREVIEW_NGINX`), skipping that where none is named. It sends real requests
 to stand-ins for the API and the Pod: the cases above, the labels that are
-and are not relayed, the headers the API receives, and controls that show
-each check sees the relay's pieces taken out. That run was nginx 1.28.0 with
+and are not relayed, the cookie without the password (and with a page's own
+`Authorization`), the headers the API receives, and controls that show each
+check sees the relay's pieces taken out. That run was nginx 1.28.0 with
 njs 1.0.1 on macOS, and CI runs it with nginx 1.30.6 and njs 1.0.2 from
 nginx.org's packages; the router's image and the real Service are checked on
 the cluster (see [Checking a running preview](#checking-a-running-preview)).
@@ -807,7 +818,10 @@ preview is up (the name below is an example):
   `Authorization` and `__Host-preview`: neither may be there.
 - **The relay, when there is one.** With the password and a signed URL of a
   relayed preview, an allowed GET answers 200 with the API's JSON (the router
-  reaches the Service on port 80 and the key works), a refused path and
+  reaches the Service on port 80 and the key works), and so does the same GET
+  with the cookie but without the password, with `Authorization: Bearer x`
+  as a page's code would send it, while a page of that preview without the
+  password answers 401. A refused path and
   `POST` answer 403 with their JSON sentence, the same path through a preview
   of another name reaches that preview, and the page's answers carry
   `Content-Security-Policy: connect-src 'self'`.
@@ -897,9 +911,17 @@ fails its check with 403 and the requester gets the question in words.
   line, with its token, there either; such failures are not logged at all.
 - One password file for every installation the router serves: a requester of
   one installation can open another's previews.
-- The relay refuses before the password is checked: a request without it gets
-  the refusal's sentence for a path not allowed and 401 for an allowed one,
-  and can tell the allowed paths from that. Nothing is sent to the API.
+- The relayed paths need the signed URL's cookie and not the password. A
+  browser or device that holds the cookie (one it was taken from, say) reads
+  that preview's relayed API without the password, on that host only and
+  until the preview's end. The cookie is HttpOnly, so the page's code cannot
+  read it. It is SameSite=Lax, so requests from other hosts under the same
+  registrable domain carry it too; the relay adds no CORS headers, so their
+  code reads the answers only where the API's own answer allows their origin.
+- The relay refuses before the cookie is checked: a request without it gets
+  the refusal's sentence for a path not allowed and the cookie's sentence for
+  an allowed one, and can tell the allowed paths from that. Nothing is sent
+  to the API.
 - The relay takes each query form in its listed order only: a page that
   sends the same names in another order is refused.
 - The relay acts with its key's rights. Whatever an allowed path reads with

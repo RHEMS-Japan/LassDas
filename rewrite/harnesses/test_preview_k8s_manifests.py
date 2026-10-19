@@ -798,6 +798,15 @@ class RelayTemplateTests(unittest.TestCase):
         self.assertIn("add_header Content-Security-Policy $relay_csp always;", self.config)
         self.assertIn("""map $relay_label $relay_csp { default ""; 1 "connect-src 'self'"; }""", self.config)
 
+    def test_the_relay_asks_for_the_cookie_alone(self):
+        location = self.relay_location()
+        self.assertIn("auth_basic off;", location, "a page's own Authorization would fail the password")
+        self.assertIn("auth_request /_preview/check;", location, "the signed URL's cookie stays required")
+        server = self.config[self.config.index("server_name *.<preview-domain>;"):]
+        self.assertEqual(server.count("auth_basic off;"), 3, "the two pages and the relay, nothing else")
+        self.assertNotIn("auth_basic off;", server[server.index("    location / {"):])
+        self.assertNotIn("satisfy any", self.config)
+
     def test_the_key_is_the_router_s_alone(self):
         self.assertIn("env PREVIEW_RELAY_KEY;", self.config)
         self.assertIn("js_set $relay_key preview.relayKey;", self.config)
@@ -1009,6 +1018,32 @@ class RelayNginxTests(unittest.TestCase):
         for word in ("/_relay/api", "owner=", "page=", RELAY_KEY, self.PASSWORD):
             self.assertNotIn(word, written)
 
+    def test_the_relay_asks_for_the_cookie_and_not_the_password(self):
+        """A page's own code may write Authorization (a token of its own): the
+        relay's paths need the signed URL's cookie alone, and the pages and
+        the signed URL still need the password."""
+        self.start()
+        for headers in (None, {"Authorization": "Bearer page-token"}):
+            with self.subTest(headers=headers):
+                code, kind, body, _ = self.ask("GET", "/api/items/7", password=False, headers=headers)
+                self.assertEqual((code, kind), (200, "application/json"), body)
+                self.assertEqual(json.loads(body)["from"], "api")
+                received = self.api.received[-1]["headers"]
+                self.assertNotIn("authorization", received, "the page's Authorization reached the API")
+                self.assertEqual(received.get("x-example-key"), RELAY_KEY)
+        sent = len(self.api.received)
+        self.refused(self.ask("GET", "/api/items/7", cookie=False), COOKIE_SENTENCE)
+        self.refused(self.ask("GET", "/api/items/7", password=False, cookie=False), COOKIE_SENTENCE)
+        self.refused(self.ask("GET", "/api/items/7", password=False, cookie=False,
+                              headers={"Authorization": "Bearer page-token"}), COOKIE_SENTENCE)
+        self.assertEqual(len(self.api.received), sent, "a request without the cookie reached the API")
+        for headers in (None, {"Authorization": "Bearer page-token"}):
+            with self.subTest(page=headers):
+                self.assertEqual(self.ask("GET", "/index.html", password=False, headers=headers)[0], 401)
+        self.assertEqual(self.ask("GET", "/_preview/open?t=" + self.token(self.HOST), password=False, cookie=False)[0], 401)
+        self.assertEqual(self.pod.received, [])
+        self.assertNotIn("page-token", self.access_log())
+
     def test_what_is_not_allowed_is_refused_before_anything_is_sent(self):
         self.start()
         for method, target, sentence in (
@@ -1144,7 +1179,7 @@ class RelayNginxTests(unittest.TestCase):
         self.start()
         self.refused(self.ask("GET", "/api/items/7", cookie=False), COOKIE_SENTENCE)
         self.refused(self.ask("GET", "/api/other", password=False, cookie=False), REFUSED_SENTENCE)
-        self.assertEqual(self.ask("GET", "/api/items/7", password=False)[0], 401)
+        self.refused(self.ask("GET", "/api/items/7", password=False, cookie=False), COOKIE_SENTENCE)
         code, kind, body, _ = self.ask("GET", "/api/status/401")
         self.assertEqual((code, kind, json.loads(body)["from"]), (401, "application/json", "api"))
         self.assertEqual(self.ask("GET", "/api/status/503")[:2], (503, "application/json"))
@@ -1189,6 +1224,13 @@ class RelayNginxTests(unittest.TestCase):
         self.assertEqual((config.count(needs), config.count(empty)), (1, 1))
         self.start(config.replace(needs, "").replace(empty, empty + needs))
         self.assertEqual(self.ask("GET", "/api/projects/3/items")[0], 200)
+        # Without the relay's "auth_basic off;", a page's own Authorization,
+        # or none, answers 401 on the relay's paths.
+        off = "      auth_basic off;\n"
+        self.assertEqual(config.count(off), 1)
+        self.start(config.replace(off, ""))
+        self.assertEqual(self.ask("GET", "/api/items/7", password=False, headers={"Authorization": "Bearer page-token"})[0], 401)
+        self.assertEqual(self.ask("GET", "/api/items/7", password=False)[0], 401)
 
 
 if __name__ == "__main__":
