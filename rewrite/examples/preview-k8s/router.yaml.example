@@ -49,6 +49,9 @@ data:
     # relay: begin. The key the relay adds, from the Secret preview-relay.
     env PREVIEW_RELAY_KEY;
     # relay: end
+    # relay: begin full. Separate disposable API credential; never the read-only key.
+    env PREVIEW_FULL_RELAY_KEY;
+    # relay: end full
     worker_processes 1;
     pid /tmp/nginx.pid;
     error_log stderr warn;
@@ -115,6 +118,20 @@ data:
                                '$status $body_bytes_sent "$http_user_agent"';
       # relay: end
 
+      # relay: begin full. Optional request-local API; keep label sets disjoint.
+      js_set $full_relay_key preview.fullRelayKey;
+      js_set $full_relay_token preview.relayToken;
+      js_set $full_write_allowed preview.fullWriteAllowed;
+      map $preview_label $full_relay_label { default 0; "~^(?:<full-relay-label-pattern>)$" 1; }
+      map "$full_relay_label:$full_relay_path" $full_relay_on { default 0; "~^1:<full-relay-path-prefix>" 1; }
+      map $full_relay_label $full_relay_csp { default ""; 1 "connect-src 'self'"; }
+      map $full_relay_path $full_relay_refused {
+        default 0;
+        "~[^A-Za-z0-9/._~-]" 1;
+        "~^<full-relay-refused-path>" 1;
+      }
+      log_format preview_full_relay '$remote_addr [$time_local] "$request_method $full_relay_path $server_protocol" $status';
+      # relay: end full
       # Every other host, and the load balancer's health check (which names
       # the Pod's address as its host).
       server {
@@ -179,8 +196,44 @@ data:
         location @relay_refused { access_log /dev/stdout preview_relay; default_type application/json; return 403 '{"error":"$relay_message"}'; }
         location @relay_down { access_log /dev/stdout preview_relay; default_type application/json; return 503 '{"error":"API に届きません"}'; }
         # relay: end
+        # relay: begin full
+        location = /_relay/full {
+          internal;
+          auth_basic off;
+          auth_request /_preview/check;
+          error_page 403 = @full_relay_refused;
+          error_page 502 503 504 = @full_relay_down;
+          if ($full_relay_refused) { return 403; }
+          if ($full_write_allowed = "0") { return 403; }
+          if ($full_relay_key = "") { return 503; }
+          if ($full_relay_token = "") { return 503; }
+          proxy_pass http://pv-$preview_label.<preview-namespace>.svc.cluster.local$full_relay_uri;
+          proxy_set_header Host $host;
+          proxy_set_header Authorization "";
+          proxy_set_header Cookie "";
+          proxy_set_header X-Impersonate-UID "";
+          proxy_set_header X-API-Key "";
+          proxy_set_header <full-relay-header> $full_relay_key;
+          proxy_set_header X-Preview-Relay $full_relay_token;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto https;
+          proxy_hide_header Set-Cookie;
+          proxy_connect_timeout 5s;
+          add_header Content-Security-Policy $full_relay_csp always;
+          access_log /dev/stdout preview_full_relay;
+          error_log stderr crit;
+        }
+        location @full_relay_refused { default_type application/json; return 403 '{"error":"確認用の画面では使えない操作です"}'; }
+        location @full_relay_down { default_type application/json; return 503 '{"error":"API に届きません"}'; }
+        # relay: end full
         location / {
           if ($preview_label = "") { return 404; }
+          # relay: begin full
+          set $full_relay_path $uri;
+          set $full_relay_uri $uri$is_args$args;
+          if ($full_relay_on) { rewrite ^ /_relay/full last; }
+          add_header Content-Security-Policy $full_relay_csp always;
+          # relay: end full
           # relay: begin
           set $relay_path $uri;
           set $relay_uri $uri$is_args$args;
@@ -312,6 +365,11 @@ spec:
               valueFrom:
                 secretKeyRef: { name: preview-relay, key: key, optional: true }
             # relay: end
+            # relay: begin full
+            - name: PREVIEW_FULL_RELAY_KEY
+              valueFrom:
+                secretKeyRef: { name: preview-relay-full, key: key, optional: true }
+            # relay: end full
           volumeMounts:
             - { name: config, mountPath: /etc/preview-router/conf, readOnly: true }
             - { name: pages, mountPath: /etc/preview-router/pages, readOnly: true }

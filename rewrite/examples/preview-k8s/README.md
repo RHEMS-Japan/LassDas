@@ -252,6 +252,10 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
 | `<relay-service>` | router, relay | The API's Service as `<name>.<namespace>`, answering on port 80, for example `api.example-dev`. |
 | `<relay-header>` | router, relay | The header the API reads the key from, for example `X-Example-Key`. |
 | `<relay-cleared-header>` | router, relay | A header a browser can send that the API acts on (one that changes whom a request acts as, for example `X-Act-As`); the relay sends it empty. One line for each, or delete the line. |
+| `<full-relay-label-pattern>` | router, disposable API relay | Whole labels for previews with their own API, disjoint from the read-only relay, for example `samplefull-example-[0-9]+`. |
+| `<full-relay-path-prefix>` | router, disposable API relay | Normalized API path prefix, for example `/api/`. |
+| `<full-relay-refused-path>` | router, disposable API relay | Refused path prefix pattern, for example `/api/auth/`. |
+| `<full-relay-header>` | router, disposable API relay | API key header, for example `X-Example-Key`. |
 | `<region>` | step 1 only | The region of the load balancer. |
 | `<api-server>` | `PREVIEW_K8S_SERVER` | The address of the cluster's API server. The engine's Pod has to reach it. |
 
@@ -808,6 +812,37 @@ check sees the relay's pieces taken out. That run was nginx 1.28.0 with
 njs 1.0.1 on macOS, and CI runs it with nginx 1.30.6 and njs 1.0.2 from
 nginx.org's packages; the router's image and the real Service are checked on
 the cluster (see [Checking a running preview](#checking-a-running-preview)).
+
+## Relaying a disposable API
+
+The optional `relay: begin full` blocks route an API prefix to that preview's
+own Service, never the read-only relay's Service. Remove all full blocks when
+unused; remove all relay blocks when neither mode is used. Without full
+blocks the old configuration is byte-identical. Fill the four full-relay
+placeholders separately. Label patterns must not overlap.
+
+The router reads `PREVIEW_FULL_RELAY_KEY` from a separate optional Secret
+`preview-relay-full` (key `key`). Missing key means 503, never fallback to the
+read-only key. Cookie authentication still applies, including when a browser
+sends its own Authorization header. Every method except GET/HEAD requires
+an exact `Origin: https://<this-preview-host>`; absent, foreign or duplicate
+origins are refused. The refused path is checked after path normalization.
+Authorization, Cookie, X-Impersonate-UID and X-API-Key are removed, the chosen
+API key is set, and upstream Set-Cookie is discarded. Both kinds of preview
+page carry `connect-src 'self'`; this does not stop exfiltration through
+images or navigation and does not make unreviewed code safe.
+
+For the disposable API the router sets X-Preview-Relay to lowercase hex
+HMAC-SHA256(signing key, `relay:` + preview label), without a newline.
+The operator supplies the same derived value to the page proxy, which must
+reject a missing or different value with 403 and remove that header before
+forwarding to the API. It must expose only static files, not snapshots or
+logs. Direct API ingress must be blocked separately by the operator; this
+example does not change cluster rules. A bearer token is not an ingress rule.
+
+The local router tests exercise separate synthetic keys, cookie/Origin
+checks, a page POST refusal and a rejecting page-proxy stand-in. They do not
+prove cluster ingress isolation or a real application's authentication.
 
 ## Checking a running preview
 

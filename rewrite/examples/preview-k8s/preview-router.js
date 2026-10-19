@@ -180,4 +180,28 @@ function relayKey(r) {
     return process.env.PREVIEW_RELAY_KEY || '';
 }
 
-export default {open, check, otherCookies, filterCookies, relayKey, sign, signCookie, valid, validCookie, same};
+function fullRelayKey(r) {
+    return process.env.PREVIEW_FULL_RELAY_KEY || '';
+}
+
+function relayToken(r) {
+    var secret = key();
+    var label = r.variables.preview_label || '';
+    if (!secret || !/^[a-z0-9-]+$/.test(label)) {
+        return '';
+    }
+    return crypto.createHmac('sha256', secret).update('relay:' + label).digest('hex');
+}
+
+function fullWriteAllowed(r) {
+    if (r.method === 'GET' || r.method === 'HEAD') {
+        return '1';
+    }
+    var origins = r.rawHeadersIn.filter(function (pair) {
+        return pair[0].toLowerCase() === 'origin';
+    });
+    return origins.length === 1 && origins[0][1] === 'https://' + r.variables.host ? '1' : '0';
+}
+
+export default {open, check, otherCookies, filterCookies, relayKey, fullRelayKey, relayToken,
+    fullWriteAllowed, sign, signCookie, valid, validCookie, same};
