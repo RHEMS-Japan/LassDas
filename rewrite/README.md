@@ -1692,6 +1692,27 @@ holds the five examples to these sentences, and
 `harnesses/test_setup_done_definition.py` runs the setup guide's check against
 local stand-ins. Neither shows that a real model follows the sentences.
 
+### Optional request-local dependency caches
+
+Set `intake.dependency_cache: true` to let roles in one request reuse dependency
+downloads and Go build results. It is off by default: no additional environment,
+mount or directory is supplied when unset/false. The watcher owns
+`TASK_DEPENDENCY_CACHE` and the Linux launcher accepts only the
+`dependency-cache` sibling of that request's workspace. It mounts that directory,
+not its parent or another request. Existing no-symlink descriptor rules apply.
+
+The launcher sets `npm_config_cache`, `npm_config_store_dir` (pnpm's store),
+`GOMODCACHE` and `GOCACHE` to separate subdirectories there. Existing role homes,
+model state and credentials remain separate. Installed `node_modules` are not
+combined; custom tool settings or hardcoded cache paths can bypass these defaults.
+The cache is untrusted writable input shared within this request, never evidence
+of correctness. Leave the option off if its roles must not share such input.
+It does not replace `PNPM_HOME`: global installs and executable directories stay
+private to each role. Finished-request cleanup removes a shared cache that was
+created while enabled, even if the option was later turned off. With no shared
+cache present, cleanup adds no writes or removals. No existing data is migrated.
+See ADR 0013 for the isolation trade-off.
+
 ### A read-only status page
 
 `bin/ticket-status` serves what the queue directory holds, as it is, over

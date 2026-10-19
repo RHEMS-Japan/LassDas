@@ -64,6 +64,7 @@ type intakeConfig struct {
 	StallNoticeMinutes *int `json:"stall_notice_minutes,omitempty"`
 	// DiskNoticePercent defaults to 85; zero disables capacity notices.
 	DiskNoticePercent *int `json:"disk_notice_percent,omitempty"`
+	DependencyCache   bool `json:"dependency_cache,omitempty"`
 	// Statuses names, by id, where the issue moves at each turn of the work.
 	Statuses *statusConfig `json:"statuses,omitempty"`
 	// CategoryOnAccept is added to an accepted issue, so the tracker's own
@@ -749,6 +750,9 @@ func bindRequestConfig(cfg config, directory, issue string) (config, error) {
 			// launcher already lets it write and which outlasts a restart.
 			home := filepath.Join(directory, "homes", fmt.Sprintf("%d-%d", i, j))
 			owned := map[string]string{"TASK_WORKSPACE": workspace, "TASK_HOME": home, "TASK_ISSUE": issue, chain.ActivityEnv: filepath.Join(home, "task-activity.json")}
+			if cfg.Intake != nil && cfg.Intake.DependencyCache {
+				owned["TASK_DEPENDENCY_CACHE"] = filepath.Join(directory, "dependency-cache")
+			}
 			if cfg.Workflow != nil && cfg.Workflow.Preview != nil && role.Name == cfg.Workflow.Preview.Up {
 				// Only the role that puts the page up writes its address,
 				// in its own home, as the activity record is kept.

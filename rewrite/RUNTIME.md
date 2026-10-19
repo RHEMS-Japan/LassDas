@@ -95,6 +95,13 @@ The role starts in an empty filesystem namespace, with system tools (`/usr` and
 the system's `/etc/alternatives` links into it), certificate configuration and
 explicit runtime paths read-only. Only its workspace, chosen
 writable paths, private home, `/proc`, `/dev` and temporary directory are added.
+When the operator enables `intake.dependency_cache`, the request's
+`dependency-cache` directory is also writable; only its contents, not the
+parent or neighboring requests, are shared between roles. The launcher redirects
+npm/pnpm/Go caches there. Role homes, credentials and Git metadata retain their
+existing permissions; pnpm's global install directory is not redirected.
+Leave it off to retain separate dependency caches
+(ADR 0013); cached contents are untrusted input from other roles of this request.
 Path components are opened without following symlinks and passed as descriptors
 to bubblewrap. The role is PID 1 of its namespace; it cannot create further user
 namespaces. Its detached local children die when that role exits. Remote jobs

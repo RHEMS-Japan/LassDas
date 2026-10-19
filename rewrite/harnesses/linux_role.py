@@ -98,6 +98,12 @@ def create_path(workspace, relative):
         os.close(descriptor)
 
 
+def dependency_environment(cache):
+    """Only package caches; never credentials or model state."""
+    return {"npm_config_cache": str(cache / "npm"), "npm_config_store_dir": str(cache / "pnpm"),
+            "GOMODCACHE": str(cache / "go-mod"), "GOCACHE": str(cache / "go-build")}
+
+
 def command(args, environment):
     if sys.platform != "linux":
         raise RuntimeError("This launcher requires Linux namespaces and bubblewrap")
@@ -108,6 +114,13 @@ def command(args, environment):
     home = absolute(environment["TASK_HOME"])
     if home == workspace or home.is_relative_to(workspace) or workspace.is_relative_to(home):
         raise ValueError("TASK_HOME must be separate from the shared workspace")
+    cache = absolute(environment["TASK_DEPENDENCY_CACHE"]) if environment.get("TASK_DEPENDENCY_CACHE") else None
+    if cache is not None:
+        if cache != workspace.parent / "dependency-cache":
+            raise ValueError("Dependency cache must be this request's workspace sibling")
+        if home == cache or home.is_relative_to(cache) or cache.is_relative_to(home):
+            raise ValueError("Dependency cache must be separate from the role home")
+    grants = [workspace, home] + ([cache] if cache is not None else [])
     if not args.program:
         raise ValueError("Pass -- followed by the role's configured command")
     program = args.program[1:] if args.program[0] == "--" else args.program
@@ -132,12 +145,12 @@ def command(args, environment):
     runtimes = [absolute(value) for value in args.runtime]
     history = absolute(environment["TASK_HISTORY"]) if environment.get("TASK_HISTORY") else None
     if history is not None:
-        for path in [workspace, home, *runtimes]:
+        for path in [*grants, *runtimes]:
             if history == path or history.is_relative_to(path) or path.is_relative_to(history):
                 raise ValueError("Request history must be a separate read-only file, not inside another mount")
     for path in runtimes:
         if any(path == grant or path.is_relative_to(grant) or grant.is_relative_to(path)
-               for grant in (workspace, home)):
+               for grant in grants):
             raise ValueError("Runtime mounts must not overlap task data")
 
     descriptors = []
@@ -192,6 +205,8 @@ def command(args, environment):
             if metadata.is_dir() and not metadata.is_symlink() and metadata not in writable:
                 result += mount(metadata, directory=True)
         result += mount(home, read_only=False, directory=True, create=True)
+        if cache is not None:
+            result += mount(cache, read_only=False, directory=True, create=True)
         if history is not None:
             descriptor = open_path(history)
             descriptors.append(descriptor)
@@ -203,6 +218,8 @@ def command(args, environment):
         result += ["--chdir", str(workspace), "--", *program]
         child_environment = dict(environment)
         child_environment.update(HOME=str(home), HERMES_HOME=str(home), TMPDIR="/tmp")
+        if cache is not None:
+            child_environment.update(dependency_environment(cache))
         return result, child_environment, descriptors
     except BaseException:
         for descriptor in descriptors:

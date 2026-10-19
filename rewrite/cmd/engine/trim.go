@@ -14,6 +14,16 @@ import (
 func trimFinished(directory string) error {
 	homes := filepath.Join(directory, "homes")
 	marker := filepath.Join(homes, ".trimmed")
+	// Earlier launches may have used this cache before the option was turned
+	// off. Its cleanup cannot depend on today's option or the home marker.
+	cache := filepath.Join(directory, "dependency-cache")
+	if _, err := os.Lstat(cache); err == nil {
+		if err := removeTree(cache); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if _, err := os.Stat(marker); err == nil {
 		return nil
 	}
