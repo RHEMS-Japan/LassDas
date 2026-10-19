@@ -409,7 +409,12 @@ address stops opening at the preview's end.
   The cookie's value is `<end>.<signature>` with a signature of its own:
   HMAC-SHA256 with the same key over `cookie`, a newline, the host, a newline
   and `<end>`. The URL's token is never taken as the cookie, so whoever reads
-  the URL still needs the password to hold one.
+  the URL still needs the password to hold one. A cookie set before the
+  router's script took this form (the URL's token itself) is refused: when
+  the script is replaced, every open preview of every installation the router
+  serves, with a relay or without, answers 403 with
+  "この画面は課題に投稿された URL から開いてください" until its signed URL is opened
+  again. The URL works until its end.
   Every other path needs the password and that cookie; without them it
   answers 401 and 403. The paths a relay sends to an API need the cookie
   alone ([Relaying an API](#relaying-an-api)). Paths under `/_preview/`
@@ -693,6 +698,9 @@ cluster, with a key only the router holds, and only when it reads.
   value is not the URL's token, it works on that host only and until the
   preview's end, and without it the relay answers 403 and sends nothing. The
   pages, `/_preview/open` and every path not relayed still need the password.
+  The line that turns the password check off, `auth_basic off;`, sits in the
+  relay's location between the markers: a router without a relay asks for
+  the password on every path as before.
 - **Only GET and HEAD of an allowed path.** Each allowed path is one line,
   `<relay-allowed-path>`, a regular expression of the whole path
   (`/api/items/[0-9]+`). Every other method is refused, and so is every GET
@@ -859,7 +867,10 @@ password file (step 3 of the setup), the Secret `preview-router-auth`
 replaced and the router restarted, the new `user:password` into the engine's
 Secret as `PREVIEW_CHECK_AUTH` and the engine restarted, then the old line
 removed. The requesters' password is changed in the password file alone and
-handed to them again outside the tracker.
+handed to them again outside the tracker. A browser that already holds a
+preview's cookie keeps reading that preview's relayed API until the
+preview's end, whatever the password: to stop it at once, change the signing
+key (below) or take the relay out.
 
 The signing key of the signed URLs is held twice, by the router and by the
 engine, and both have to change:
@@ -915,13 +926,18 @@ fails its check with 403 and the requester gets the question in words.
   line, with its token, there either; such failures are not logged at all.
 - One password file for every installation the router serves: a requester of
   one installation can open another's previews.
-- The relayed paths need the signed URL's cookie and not the password. A
-  browser or device that holds the cookie (one it was taken from, say) reads
-  that preview's relayed API without the password, on that host only and
-  until the preview's end. The cookie is HttpOnly, so the page's code cannot
-  read it. It is SameSite=Lax, so requests from other hosts under the same
-  registrable domain carry it too; the relay adds no CORS headers, so their
-  code reads the answers only where the API's own answer allows their origin.
+- On the relayed paths the password does not guard: the signed URL's cookie
+  is the only guard. A cookie copied from one browser or device works on
+  another, without the password, on that host only and until the preview's
+  end (`PREVIEW_LIFETIME_HOURS` after it was last brought up, 72 by
+  default). The cookie is HttpOnly, so the page's code cannot read it. It is
+  SameSite=Lax, so requests from other hosts under the same registrable
+  domain carry it too; the relay adds no CORS headers, so their code reads
+  the answers only where the API's own answer allows their origin.
+- The relay does not depend on the preview's Pod. After a preview is
+  delivered or stopped and its Pod is gone, its pages answer 502 with the
+  router's page, but a browser that holds its cookie still reads the relayed
+  API until the preview's end.
 - The relay refuses before the cookie is checked: a request without it gets
   the refusal's sentence for a path not allowed and the cookie's sentence for
   an allowed one, and can tell the allowed paths from that. Nothing is sent
