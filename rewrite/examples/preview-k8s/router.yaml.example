@@ -137,8 +137,7 @@ data:
         error_page 403 /denied.html;
         location = /ended.html { internal; auth_basic off; root /etc/preview-router/pages; }
         location = /denied.html { internal; auth_basic off; root /etc/preview-router/pages; }
-        # After the password: a valid token sets the cookie, a value of its own
-        # and never the token (README.md, "The signed URL"), and a 302 to /.
+        # After the password: a valid token becomes the cookie, 302 to /.
         # Only critical errors here: a mistyped password would otherwise log the
         # request line, with its token, at the error level.
         location = /_preview/open { error_log stderr crit; js_content preview.open; }

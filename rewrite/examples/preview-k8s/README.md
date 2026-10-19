@@ -929,11 +929,11 @@ fails its check with 403 and the requester gets the question in words.
 - On the relayed paths the password does not guard: the signed URL's cookie
   is the only guard. A cookie copied from one browser or device works on
   another, without the password, on that host only and until the preview's
-  end (`PREVIEW_LIFETIME_HOURS` after it was last brought up, 72 by
-  default). The cookie is HttpOnly, so the page's code cannot read it. It is
-  SameSite=Lax, so requests from other hosts under the same registrable
-  domain carry it too; the relay adds no CORS headers, so their code reads
-  the answers only where the API's own answer allows their origin.
+  end (`PREVIEW_LIFETIME_HOURS` after it was last brought up, 72 in the
+  example settings). The cookie is HttpOnly, so the page's code cannot read
+  it. It is SameSite=Lax, so requests from other hosts under the same
+  registrable domain carry it too; the relay adds no CORS headers, so their
+  code reads the answers only where the API's own answer allows their origin.
 - The relay does not depend on the preview's Pod. After a preview is
   delivered or stopped and its Pod is gone, its pages answer 502 with the
   router's page, but a browser that holds its cookie still reads the relayed
