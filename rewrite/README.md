@@ -1502,14 +1502,15 @@ again reaches that page.
 
 ### A pull request description from the run's reports
 
-An operator can give the fixed review and delivery commands the same
-`PR_DESCRIPTION_ROLE`, naming a role that reports before review and runs again
-after a review send-back (`work` in the shipped example), not a process name
-or the later reporting role. Its report explains the change to a person
-reviewing the pull request. Tell that existing role to
+Two setups use `PR_DESCRIPTION_ROLE`, always a role name, not a process name.
+For a reviewed explanation, give review and delivery the same role that reports
+before review and runs again after a send-back (for example `work`). For a
+delivery-only confirmation summary, the shipped example selects `confirm_change`
+and an optional section on delivery; that later text is not reviewed with the
+diff. Either explains the change to a person reading the pull request. Tell the role to
 write its findings, implementation explanation, settings and verification
 commands in its final ordinary report. No special headings or model answer
-schema are required. With no role selected, the fixed delivery description
+schema are required for the full-report setup. With neither role nor section selected, the fixed delivery description
 is unchanged.
 
 For both that explanation and the final requester report, the shipped role
@@ -1523,8 +1524,9 @@ calling it absent. Include performance results only when the request concerns
 performance. A work report written before later checks must mark those checks
 as not yet run; the final report can use their observed results.
 
-These are instructions to the reporting models, not required headings parsed
-by the engine. Review the account against the actual records; the delivery
+Those narrative categories are instructions to the reporting models, not
+required headings. Only the optional section selector below reads a heading.
+Review the account against the actual records; the delivery
 helper preserves the selected role's ordinary text without grading its prose.
 Providing no live method does not itself fail a request, but it does not prove
 a requested deployed behavior either. No live-check configuration or new
@@ -1532,20 +1534,21 @@ verification method is introduced here.
 
 This uses the runtime's read-only `TASK_HISTORY` reference, not a document in
 the consumer's repository. Configure this option only with a runtime that
-supplies that reference to both commands. The latest contiguous set of reports
+supplies that reference to each configured command. In full-report mode the latest contiguous set of reports
 from the selected role is used, with each process's original words. Requester
 and runtime control messages are not substitutes for that role's report. The
-review receives exactly this selected text alongside the diff. It must check
+review receives that selected text alongside the diff when configured for the
+pre-review explanation. It must check
 the explanation too; its presence is not proof that the change is correct.
 
 The delivery adds the selected text to its ordinary introduction and checks
 the whole description for `DELIVERY_FORBIDDEN_TEXT` and its credential before
-any publication. Give review and delivery the same `PR_DESCRIPTION_ROLE`,
+any publication. For the reviewed-explanation setup, give review and delivery the same `PR_DESCRIPTION_ROLE`,
 `PR_DESCRIPTION_MAX_BYTES` and `DELIVERY_MERGE_METHOD` (default `merge`). The
 same `TASK_ISSUE` must reach both; `watch` supplies it from the assigned request.
 `PR_DESCRIPTION_MAX_BYTES` is a
 positive UTF-8 byte limit (default 60000); both commands check the complete
-body, including the shared introduction. An oversized or empty selected report
+body, including the shared introduction. An oversized report, or an empty report in full-report mode,
 sends the work back with its reason (exit 1), rather than holding the review
 without asking a model. When the checkpoint is missing, unreadable, malformed
 or over its local read limit, review continues without the explanation, and
@@ -1553,13 +1556,62 @@ both the model's input and the delivery result state what could not be read.
 The pull request body states that omission too; the remaining diff and test
 output are still reviewed. An unset `TASK_HISTORY` or `TASK_ISSUE`, an invalid size setting,
 or no recorded report from the selected role asks the operator to fix the
-configuration and restart, even with `REVIEW_UNAVAILABLE=pass`. So does a limit
+configuration and restart, even with `REVIEW_UNAVAILABLE=pass`. When a PR body
+will be prepared, delivery validates these settings before staging or committing,
+and holds instead of immediately sending the
+work back to a model that cannot correct operator settings. So does a limit
 too small for the required introduction or the reason an explanation was omitted:
 the worker cannot shorten that fixed text. A recorded but
-empty report still goes back to the worker; the refusal identifies the role,
+empty full report still goes back to the worker; the refusal identifies the role,
 and an oversized report also states its actual UTF-8 byte count. This limit is not a
 claim about a hosting service's exact limit. The old repository-document option
 `DELIVERY_PR_BODY_FILE` is removed; there is no compatibility path or migration.
+
+To carry the confirmation role's agreed limitations and checking instructions,
+set `PR_DESCRIPTION_ROLE=confirm_change` and
+`PR_DESCRIPTION_SECTION=Pull request summary` **on delivery only**. Ask that role
+to include an optional `## Pull request summary` section in its ordinary report.
+Delivery appends a heading and that section's text after its introduction; the section ends
+at the next heading-shaped line, even a deeper or indented heading. Other report text is not
+published. A missing or empty section leaves just the introduction, not an
+invented claim of verification. Its absence is recorded as
+`description_section_absent` in the delivery receipt, with a sentence explaining
+the absence on stdout, not in the PR body. The newest nonfailed process report
+in the latest contiguous attempt of that role is selected on its own, never joined with
+an older report or replaced by an older section when it omits one. ATX and
+Setext headings locate the section outside fenced code and HTML blocks. A heading
+inside an unclosed HTML block or an indented list continuation is not a section
+start. Inline HTML and lines
+beginning with `|` can start that heading's paragraph; HTML block starts cannot.
+After selection, any ATX-shaped line (at any indentation) or `---`/`===`-style
+underline directly after a nonblank line ends the selection, regardless of
+fence or list interpretation. Subheadings are not included. Keep the summary
+as ordinary paragraphs or lists; avoid heading-shaped lines in code examples.
+This deliberately prefers a shortened summary over publishing private notes.
+If the cut leaves an open code fence, or a fence is unclosed at the end, the section is
+absent, with `description_section_absence_reason=unclosed_fence` in the receipt
+and a dedicated sentence on stdout. A missing or blank section instead records
+`absent_or_empty`. Whole paragraph headings are excluded when their beginning
+is known; only CRLF, CR and LF split lines. Title matching ignores
+case, outer spaces, closing hashes and a final colon. Setting a section without
+a role, or setting it to a blank value, is a configuration error. Do not set a
+section on review: section selection is delivery-only, and review holds until
+that setting is removed. This confirmation/reporting text is published
+without the earlier code review checking it; it is not another review verdict. The existing
+`PR_DESCRIPTION_MAX_BYTES` limit covers the complete body, without truncation,
+and delivery's forbidden-text and credential checks still apply. Keep any
+pre-review `PR_DESCRIPTION_ROLE` setting on review separate: a later
+confirmation role has not run when review starts. A summary content refusal still
+follows delivery's configured `on_failure` (the example returns to elicitation
+and repeats work and verification); it does not route directly to confirmation.
+The refusal identifies whether the offending text came from the introduction,
+the selected report or section, or the omission notice, without printing it.
+Refused fixed introduction or omission text is an operator-setting error, not
+something the model can rewrite. Delivery-setting errors hold when a PR body is
+needed; unchanged endings and already completed/closed deliveries do not read
+description settings or require `TASK_HISTORY`. Fix the setting and restart the
+engine. The interrupted delivery then follows the configured `on_failure` route;
+the example returns to elicitation before delivery is tried again.
 
 The generated body is retained in the delivery process's
 `TASK_HOME/pull-request-description.md`, outside the checkout. The delivery

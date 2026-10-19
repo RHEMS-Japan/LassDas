@@ -75,17 +75,130 @@ def description_size(text, source="The pull request description"):
                             % (source, size, limit))
 
 
+def markdown_section(text, title, *, absence=None):
+    """Find a section, then cut at any heading shape rather than risk a leak."""
+    normalize = lambda value: value.strip().rstrip(":：").strip().casefold()
+    lines = [line for line in re.findall(r"[^\r\n]*(?:\r\n|[\r\n]|$)", text) if line]
+    start, fence, paragraph, html_end = None, None, None, None
+    list_continuation = False
+    before_list, list_gap = False, False
+    html_block = (r"^ {0,3}(?:<!--|<\?|<![A-Z]|<!\[CDATA\[|"
+                  r"<(?:script|pre|style|textarea)(?=[ \t>]|$)|"
+                  r"</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|"
+                  r"dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|"
+                  r"h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|"
+                  r"optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|"
+                  r"track|ul)(?=[ \t/>]|$))")
+    def uncertain_fence():
+        if absence is not None:
+            absence.append("unclosed_fence")
+        return None
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip("\r\n")
+        rule = re.fullmatch(r" {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})", line)
+        if html_end is not None:
+            if (html_end and re.search(html_end, line, re.IGNORECASE)) or (not html_end and not line.strip(" \t")):
+                html_end = None
+            i += 1
+            continue
+        if start is None and not fence:
+            if rule and not (before_list and line.startswith((" ", "\t"))):
+                before_list = False
+            elif re.match(r"^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+", line):
+                before_list, list_gap = True, False
+            elif before_list:
+                if not line.strip(" \t"):
+                    list_gap = True
+                elif line.startswith((" ", "\t")) or (not list_gap and not re.match(r"#{1,6}(?:[ \t]+|$)", line)):
+                    i += 1
+                    continue
+                else:
+                    before_list, list_continuation = False, False
+        if start is not None:
+            # Once selected, list/fence interpretation must never extend the
+            # public text past a possible private heading, at any depth.
+            atx = re.match(r"^[ \t]*#{1,6}(?:[ \t]+|$)", line)
+            setext = (i > start and lines[i - 1].strip(" \t\r\n")
+                      and re.fullmatch(r"[ \t]*(?:=+|-+)[ \t]*", line))
+            if atx or setext:
+                if fence:
+                    return uncertain_fence()
+                end = i if atx else paragraph if paragraph is not None else i - 1
+                return "".join(lines[start:end]).strip("\r\n")
+        if fence:
+            marker, indent = fence
+            if re.fullmatch(r" {0," + str(max(3, indent)) + "}" + re.escape(marker[0])
+                            + "{" + str(len(marker)) + r",}[ \t]*", line):
+                fence = None
+            i += 1
+            continue
+        opening = re.match(r"^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?)(`{3,}|~{3,})", line)
+        if opening and not (opening[2][0] == "`" and "`" in line[opening.end():]):
+            fence = opening[2], len(opening[1].expandtabs(4))
+            paragraph = None
+            list_continuation = False
+            i += 1
+            continue
+        heading = re.match(r"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$", line)
+        underline = re.fullmatch(r" {0,3}(=+|-+)[ \t]*", line)
+        label = None
+        if heading:
+            label = re.sub(r"[ \t]+#+[ \t]*$", "", heading[2])
+        elif underline and paragraph is not None:
+            label = " ".join(part.strip() for part in lines[paragraph:i])
+        if label is not None:
+            if start is None and normalize(label) == normalize(title):
+                start = i + 1
+            paragraph = None
+            list_continuation = False
+        elif not line.strip(" \t") or underline or rule:
+            paragraph = None
+            list_continuation = False
+        elif re.match(r"^ {0,3}(?:[-*+][ \t]+\S|1[.)][ \t]+\S|>)", line):
+            paragraph = None
+            list_continuation = True
+        elif (re.match(html_block, line, re.IGNORECASE)
+              or (paragraph is None and re.fullmatch(r''' {0,3}</?[A-Za-z][A-Za-z0-9-]*(?=[ \t/>])(?:[^<>"']|"[^"]*"|'[^']*')*>[ \t]*''', line))):
+            if start is None:
+                raw = re.match(r" {0,3}<(script|pre|style|textarea)(?=[ \t>]|$)", line, re.IGNORECASE)
+                if raw:
+                    html_end = r"</" + raw[1] + r"[ \t]*>"
+                else:
+                    html_end = next((end for begin, end in (("<!--", "-->"), ("<?", r"\?>"),
+                                                            ("<![CDATA[", r"\]\]>"), ("<!", ">"))
+                                     if line.lstrip(" ").startswith(begin)), "")
+                if html_end and re.search(html_end, line, re.IGNORECASE):
+                    html_end = None
+            paragraph = None
+            list_continuation = False
+        elif paragraph is None:
+            if re.match(r"^ {0,3}\d{1,9}[.)][ \t]+", line):
+                list_continuation = True
+            elif not (list_continuation or line.startswith(("    ", "\t"))):
+                paragraph = i
+        i += 1
+    if start is not None and fence is not None:
+        return uncertain_fence()
+    return "".join(lines[start:]).strip("\r\n") if start is not None else None
+
+
 def description_report():
-    """The chosen role's latest reports, from this run's existing checkpoint."""
+    """Return the selected text, omission notice, and section absence reason."""
     role = os.environ.get("PR_DESCRIPTION_ROLE", "")
+    section = os.environ.get("PR_DESCRIPTION_SECTION", "").strip()
+    if "PR_DESCRIPTION_SECTION" in os.environ and not section:
+        raise DescriptionSettingError("PR_DESCRIPTION_SECTION must be nonblank when set")
+    if section and not role:
+        raise DescriptionSettingError("PR_DESCRIPTION_SECTION requires PR_DESCRIPTION_ROLE")
     if not role:
-        return "", ""
+        return "", "", ""
     path = os.environ.get("TASK_HISTORY")
     if not path:
-        raise DescriptionSettingError("TASK_HISTORY is unset; use a runtime that supplies it to review and delivery")
+        raise DescriptionSettingError("TASK_HISTORY is unset; use a runtime that supplies it to this command")
     issue = os.environ.get("TASK_ISSUE")
     if not issue:
-        raise DescriptionSettingError("TASK_ISSUE is unset; use the assigned request in both review and delivery")
+        raise DescriptionSettingError("TASK_ISSUE is unset; supply the assigned request to this command")
     prefix = default_pull_request_body(issue, setting("DELIVERY_MERGE_METHOD", "merge")) + "\n\n"
     try:
         description_size(prefix + "x", "The required introduction and a one-byte report")
@@ -101,7 +214,7 @@ def description_report():
         history = json.loads(raw.decode("utf-8"))["history"]
         if not isinstance(history, list):
             raise ValueError("checkpoint history is not a list")
-        selected = []
+        selected, seen_role = [], False
         for record in reversed(history):
             name, speaker = record["role"], record["speaker"]
             if not isinstance(name, str) or not isinstance(speaker, str):
@@ -109,11 +222,16 @@ def description_report():
             if speaker in {"requester", "runtime"}:
                 continue
             if name == role:
+                seen_role = True
+                if section and record.get("error"):
+                    continue
                 text = record.get("output", "")
                 if not isinstance(text, str):
                     raise ValueError("checkpoint has a malformed report body")
                 selected.append(text)
-            elif selected:
+                if section:
+                    break
+            elif seen_role:
                 break
         text = "\n\n".join(reversed(selected))
         text.encode("utf-8")
@@ -124,15 +242,23 @@ def description_report():
             description_size(prefix + note)
         except DeliveryError as error:
             raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES cannot fit the explanation omission notice: " + str(error)) from error
-        return "", note
+        return "", note, ""
     if not selected:
-        raise DescriptionSettingError("PR_DESCRIPTION_ROLE=%r has no recorded report; choose a role that reports "
-                                      "before review, not a process name or a later reporting role" % role)
-    if not text.strip():
+        if section and seen_role:
+            return "", "", "absent_or_empty"
+        raise DescriptionSettingError("PR_DESCRIPTION_ROLE=%r has no usable recorded report; choose a role that has "
+                                      "already reported before this command, not a process name" % role)
+    if not section and not text.strip():
         raise DeliveryError("The latest report of role %s is empty; return to the worker for an explanation" % role)
-    description_size(prefix + text, "The complete description (latest report of role %s: %d bytes)"
-                     % (role, len(text.encode("utf-8"))))
-    return text, ""
+    if section:
+        absence = []
+        text = markdown_section(text, section, absence=absence)
+        if text is None or not text.strip():
+            return "", "", absence[0] if absence else "absent_or_empty"
+        text = "## " + section + "\n\n" + text
+    label = "section %r of role %s" % (section, role) if section else "latest report of role %s" % role
+    description_size(prefix + text, "The complete description (%s: %d bytes)" % (label, len(text.encode("utf-8"))))
+    return text, "", ""
 
 
 class TransientError(DeliveryError):

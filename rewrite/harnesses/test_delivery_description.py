@@ -1,5 +1,7 @@
 """Full explanation transport through real Git and the local service fixture."""
 import json
+import subprocess
+import sys
 import unittest
 
 import test_adversarial_review as review_fixture
@@ -46,6 +48,56 @@ class DescriptionTests(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual(len(self.fixture.state["pulls"]), 1)
         self.assertFalse(any(method == "PATCH" for method, _ in self.fixture.state["requests"]))
+
+    def test_confirmation_summary_is_optional_and_uses_only_the_latest_report(self):
+        settings = dict(PR_DESCRIPTION_ROLE="confirm_change", PR_DESCRIPTION_SECTION="Pull request summary")
+        summary = "Home display unverified. Open the home page to check."
+        self.history.write_text(json.dumps({"history": [
+            {"role": "confirm_change", "speaker": "reader", "output": "## Pull request summary\nOld text"},
+            {"role": "confirm_change", "speaker": "runtime", "output": "Attempt finished"},
+            {"role": "confirm_change", "speaker": "reader", "output": "Read the change.\n## Pull request summary\n" + summary + "\n## Private observations\nDo not publish this."},
+        ]}))
+        result = self.deliver(**settings)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        body = self.fixture.state["pulls"][0]["body"]
+        for private in ("Old text", "Private observations", "Read the change"):
+            self.assertNotIn(private, body)
+        self.assertTrue(body.endswith("## Pull request summary\n\n" + summary), body)
+
+    def test_absent_summary_is_recorded_but_not_added_to_the_body(self):
+        self.history.write_text(json.dumps({"history": [
+            {"role": "confirm_change", "speaker": "reader", "output": "No summary in this attempt"}]}))
+        result = self.deliver(PR_DESCRIPTION_ROLE="confirm_change", PR_DESCRIPTION_SECTION="Pull request summary")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.fixture.receipt()["description_section_absent"])
+        self.assertIn("section was absent or empty", result.stdout)
+        self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith("Merging it is left to a person."))
+
+    def test_confirmation_summary_refuses_oversize_and_forbidden_text_before_push(self):
+        for summary, settings, reason in (
+            ("界" * 20000, {}, "60000-byte"),
+            ("private-label", {"DELIVERY_FORBIDDEN_TEXT": "private-label"}, "forbidden text"),
+        ):
+            with self.subTest(reason=reason):
+                self.history.write_text(json.dumps({"history": [
+                    {"role": "confirm_change", "speaker": "reader", "output": "## Pull request summary\n" + summary},
+                ]}))
+                result = self.deliver(PR_DESCRIPTION_ROLE="confirm_change", PR_DESCRIPTION_SECTION="Pull request summary", **settings)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stderr)
+                self.assertEqual(self.fixture.state["pulls"], [])
+                self.assertNotIn("refs/heads/ticket/TICKET-41", self.fixture.remote_branches())
+
+    def test_unclosed_summary_is_recorded_absent_without_publishing_private_notes(self):
+        self.explain("## Summary\nVerified\n\x60\x60\x60\ncode\n## Private\nprivate notes")
+        result = self.deliver(PR_DESCRIPTION_SECTION="Summary")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.fixture.receipt()["description_section_absent"])
+        self.assertEqual(self.fixture.receipt().get("description_section_absence_reason"), "unclosed_fence")
+        self.assertIn("unclosed code fence", result.stdout)
+        body = self.fixture.state["pulls"][0]["body"]
+        self.assertNotIn("private notes", body)
+        self.assertNotIn("Verified", body)
 
     def test_next_round_updates_the_same_pull_request_without_shortening(self):
         self.explain("First explanation\n")
@@ -212,16 +264,88 @@ class DescriptionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith(text))
 
-    def test_empty_or_failed_report_goes_back_without_publishing(self):
-        for history in (b'{"history":[]}',
-                        json.dumps({"history": [{"role": "work", "speaker": "writer",
-                                                "output": "", "error": "process failed"}]}).encode()):
-            with self.subTest(history=history):
-                self.history.write_bytes(history)
-                result = self.deliver()
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(self.fixture.state["pulls"], [])
-                self.assertNotIn("refs/heads/ticket/TICKET-41", self.fixture.remote_branches())
+    def test_empty_full_report_goes_back_without_publishing(self):
+        self.explain("")
+        result = self.deliver()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.fixture.state["pulls"], [])
+        self.assertNotIn("refs/heads/ticket/TICKET-41", self.fixture.remote_branches())
+
+    def test_description_setting_holds_before_staging_or_publication(self):
+        self.explain("Explanation")
+        before = self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout
+        for settings in ({"PR_DESCRIPTION_SECTION": "Summary"},
+                         {"PR_DESCRIPTION_ROLE": "misspelled-role"},
+                         {"PR_DESCRIPTION_ROLE": "work", "PR_DESCRIPTION_SECTION": " "},
+                         {"PR_DESCRIPTION_ROLE": "work", "DELIVERY_FORBIDDEN_TEXT": "Prepared by"},
+                         {"PR_DESCRIPTION_ROLE": "work", "DELIVERY_FORBIDDEN_TEXT": "explanation omitted",
+                          "TASK_HISTORY": str(self.fixture.home / "missing-history.json")}):
+            with self.subTest(settings=settings):
+                supplied = dict(TASK_HISTORY=str(self.history), DELIVERY_MERGE_METHOD="none")
+                supplied.update(settings)
+                env = self.fixture.environment(**supplied)
+                with subprocess.Popen([sys.executable, "-B", str(delivery_fixture.SCRIPT)], stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                      cwd=self.fixture.workspace, env=env) as process:
+                    try:
+                        output, errors = process.communicate(timeout=1)
+                        self.fail("Setting returned instead of holding: " + output + errors)
+                    except subprocess.TimeoutExpired:
+                        process.terminate()
+                        output, errors = process.communicate(timeout=5)
+                self.assertIn("held before staging", output + errors)
+                self.assertIn("fix the setting and restart", output + errors)
+                self.assertIn("on_failure", output + errors)
+                self.assertEqual(self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout, before)
+                self.assertEqual(self.fixture.git(self.fixture.workspace, "diff", "--cached", "--name-only").stdout, "")
+                self.assertEqual(self.fixture.state["requests"], [])
+                self.assertEqual(self.fixture.receipt(), {})
+
+    def test_no_change_does_not_require_description_settings(self):
+        self.explain("Explanation")
+        original = self.fixture.git(self.fixture.workspace, "show", "HEAD:main.go").stdout
+        self.fixture.change("main.go", original)
+        before = self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout
+        for settings in ({"PR_DESCRIPTION_ROLE": "misspelled-role", "TASK_HISTORY": str(self.history)},
+                         {"PR_DESCRIPTION_ROLE": "work"},
+                         {"PR_DESCRIPTION_SECTION": "Summary"}):
+            with self.subTest(settings=settings):
+                env = self.fixture.environment(DELIVERY_ALLOW_UNCHANGED="1", DELIVERY_MERGE_METHOD="none", **settings)
+                with subprocess.Popen([sys.executable, "-B", str(delivery_fixture.SCRIPT)], stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                      cwd=self.fixture.workspace, env=env) as process:
+                    try:
+                        output, errors = process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.terminate()
+                        output, errors = process.communicate(timeout=5)
+                        self.fail("No-body ending held for description settings: " + output + errors)
+                self.assertEqual(process.returncode, 0, output + errors)
+                self.assertIn("Nothing was delivered", output)
+                self.assertTrue(self.fixture.receipt()["unchanged"])
+                self.assertEqual(self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout, before)
+                self.assertEqual(self.fixture.state["requests"], [])
+
+    def test_closed_delivery_does_not_require_description_settings(self):
+        self.explain("Explanation")
+        self.assertEqual(self.deliver().returncode, 0)
+        self.fixture.state["pulls"][0]["state"] = "closed"
+        for unused in ({"PR_DESCRIPTION_ROLE": "misspelled-role"},
+                       {"TASK_HISTORY": "", "PR_DESCRIPTION_SECTION": " "}):
+            with self.subTest(unused=unused):
+                result = self.deliver(**unused)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(self.fixture.receipt()["closed_unmerged"])
+
+    def test_completed_delivery_does_not_require_description_settings(self):
+        self.explain("Explanation")
+        initial = self.deliver(DELIVERY_MERGE_METHOD="merge")
+        self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+        self.assertTrue(self.fixture.receipt()["merge_sha"])
+        requests = list(self.fixture.state["requests"])
+        result = self.deliver(PR_DESCRIPTION_ROLE="misspelled-role", TASK_HISTORY="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.state["requests"], requests)
 
     def test_review_uses_the_delivered_bodys_byte_limit(self):
         self.explain("変更と検証の説明。")

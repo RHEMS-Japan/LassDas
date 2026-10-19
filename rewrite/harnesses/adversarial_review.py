@@ -417,9 +417,11 @@ def prepare():
     """The settings, read before anything is asked, and the workspace and
     TASK_HOME, which a held review looks at again."""
     # A model outage may be bypassed, but cannot repair a description setting.
+    if "PR_DESCRIPTION_SECTION" in os.environ:
+        raise delivery_support.DescriptionSettingError("PR_DESCRIPTION_SECTION is delivery-only; remove it from review")
     description, note, description_error = "", "", ""
     try:
-        description, note = delivery_support.description_report()
+        description, note, _ = delivery_support.description_report()
     except delivery_support.DescriptionSettingError:
         raise
     except delivery_support.DeliveryError as error:
