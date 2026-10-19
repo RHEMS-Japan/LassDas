@@ -406,6 +406,10 @@ address stops opening at the preview's end.
   time), and `<end>` has to be later than now. Then it sets the cookie
   `__Host-preview` (Secure, HttpOnly, SameSite=Lax, Path=/, no Domain, until
   the end) and answers 302 to `/`, with `Referrer-Policy: no-referrer`.
+  The cookie's value is `<end>.<signature>` with a signature of its own:
+  HMAC-SHA256 with the same key over `cookie`, a newline, the host, a newline
+  and `<end>`. The URL's token is never taken as the cookie, so whoever reads
+  the URL still needs the password to hold one.
   Every other path needs the password and that cookie; without them it
   answers 401 and 403. The paths a relay sends to an API need the cookie
   alone ([Relaying an API](#relaying-an-api)). Paths under `/_preview/`
@@ -685,10 +689,10 @@ cluster, with a key only the router holds, and only when it reads.
   cookie alone. A page's own code may send an `Authorization` header of its
   own (a token of the application's), and the password check would read it
   in place of the password the browser keeps and answer 401. The cookie is
-  set only after the password and the signed URL (`/_preview/open`), it works
-  on that host only and until the preview's end, and without it the relay
-  answers 403 and sends nothing. The pages, `/_preview/open` and every path
-  not relayed still need the password.
+  set only after the password and the signed URL (`/_preview/open`), its
+  value is not the URL's token, it works on that host only and until the
+  preview's end, and without it the relay answers 403 and sends nothing. The
+  pages, `/_preview/open` and every path not relayed still need the password.
 - **Only GET and HEAD of an allowed path.** Each allowed path is one line,
   `<relay-allowed-path>`, a regular expression of the whole path
   (`/api/items/[0-9]+`). Every other method is refused, and so is every GET

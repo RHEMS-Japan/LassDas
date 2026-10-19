@@ -1526,11 +1526,13 @@ class PreviewExampleTests(unittest.TestCase):
 
     def router(self, anonymous=(401,), unsigned=403, opened=None, answers=(200,), refuse_user=False):
         """A local stand-in for the router: the password on every path,
-        /_preview/open?t= turning the expected token into the cookie, and
-        the cookie required on every other path. answers are the
-        application's statuses, one per request, the last one repeated."""
+        /_preview/open?t= with the expected token setting a cookie of its
+        own (not the token, as the router does), and that cookie required on
+        every other path. answers are the application's statuses, one per
+        request, the last one repeated."""
         expected = "Basic " + CHECK_HEADER
         token = self.TOKEN_IN_URL
+        issued = "1800000000.Y29va2llLW9mLXRoZS1zdGFuZC1pbi1yb3V0ZXItaXNzdWVk"
         pending = list(answers)
         unauthenticated = list(anonymous) if isinstance(anonymous, (list, tuple)) else [anonymous]
 
@@ -1551,10 +1553,10 @@ class PreviewExampleTests(unittest.TestCase):
                     elif query.get("t") == [token]:
                         code, headers["Location"] = 302, "/"
                         headers["Set-Cookie"] = ("__Host-preview=%s; Path=/; Max-Age=3600; Secure; HttpOnly; "
-                                                 "SameSite=Lax" % token)
+                                                 "SameSite=Lax" % issued)
                     else:
                         code = 403
-                elif "__Host-preview=%s" % token in (self.headers.get("Cookie") or ""):
+                elif "__Host-preview=%s" % issued in (self.headers.get("Cookie") or ""):
                     code = pending.pop(0) if len(pending) > 1 else pending[0]
                     if 300 <= code < 400:
                         headers["Location"] = "http://127.0.0.1:9/elsewhere"
