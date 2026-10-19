@@ -346,6 +346,68 @@ directories under `queue/jobs/<id>/homes/` are removed, since they are most of a
 request's footprint and nobody reads them; the record, the request, the
 notices, the workspace and each home's logs and files stay.
 
+#### Opt-in removal of regenerated install directories
+
+`intake.trim_install_dirs` is an exact list of directories relative to each
+role process's home and, separately, the request workspace. It defaults to
+`[]`: no extra inspection, deletion or launch wrapper. For example:
+
+```json
+"trim_install_dirs": [".cache/go-build", "client/node_modules"]
+```
+
+After all processes of a role have returned and their results have been saved,
+the runtime removes only those directories in that role's homes immediately
+before a different role starts. It keeps them on a same-role retry and while
+waiting for a reply. This also applies when a failed role hands work back to
+another role: the recorded output and logs stay. No workspace directory is
+removed at a stage transition. After delivery or stop, the same list applies
+to the workspace at the existing cleanup point, after stop reporting and the
+preview-down wait (or its configured hold expiry). Existing final home-cache
+cleanup is unchanged. Before workspace cleanup, receipts are also checked
+against that request's saved configuration, not only today's watch settings.
+A missing or unreadable saved configuration holds workspace cleanup. Cleanup
+errors are logged; they do not fail delivery.
+
+This setting is permission to remove declared regenerable directories, not an
+installer. **Enable it only when every affected role's operator command always
+prepares its dependencies before running and checks preparation's exit status.**
+Keep its own download cache, manifests, tools, source, logs and receipts outside
+the list. Model instructions alone do not guarantee preparation. With the same
+lock and a populated private cache, an operator can reinstall offline; a changed
+lock, missing module/toolchain, native build or install script can still require
+more inputs. Such failure stays a real command failure. Network rights do not
+change. The engine neither detects a package manager nor shares caches/hardlinks
+between roles.
+
+The example reclaims compiled Go results and the finished workspace's installed
+client dependencies. It deliberately leaves `go/pkg/mod` and `.npm/_cacache`
+out: those are download caches needed for offline preparation. Further savings
+from sharing those caches between roles are outside this feature. Set GOCACHE
+and GOMODCACHE to distinct private locations and test the actual commands before
+opting in; removing build output means compiling it again, not instant recovery.
+
+Paths are exact, without globbing or searching nested directories. `node_modules`
+does not mean `client/node_modules`. Empty/root/dot/parent paths, Git metadata,
+logs, runtime records and overlap with a configured receipt are rejected
+without regard to letter case, including on case-insensitive filesystems.
+Intermediate or target symlinks, special files and different mounts are not
+followed; symlinks inside a selected directory are removed only as links.
+Choosing a source directory by another name is still destructive: the operator
+must name only regenerable install output, not a broad source root.
+
+Use the shipped PID-isolating launcher or an operator command that terminates
+all of its children before returning. A detached background process's absence
+cannot be inferred from its parent's exit. Do not opt in for homes used by a
+long-lived service. The shipped preview example copies its files into a Pod's
+own storage; arbitrary preview commands need not do that, so the existing
+preview lifetime is preserved. A hold expiry is not proof of successful
+teardown. A crash at the transition can defer early home cleanup until a later
+transition or final cleanup; no additional cleanup journal is introduced.
+
+The decision and alternatives are in
+[ADR 0013](docs/adr/0013-remove-only-declared-regenerable-directories.md).
+
 One process owns a queue directory. Graceful cancellation waits for its active
 children to stop before releasing ownership. Restarting the same queue reuses
 original requests, pending histories and workspaces; the existing engine tells

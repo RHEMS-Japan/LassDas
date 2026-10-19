@@ -30,6 +30,7 @@ by the section name given beside the lines.
 | [0010](0010-worker-writes-the-checkout-but-not-git.md) | The worker may write the whole checkout, but not its `.git` | RUNTIME.md, "Linux role launch" |
 | [0011](0011-the-requester-sees-a-change-before-delivery-only-when-it-alters-use.md) | The requester sees a change before delivery only when it alters how the product is used | README, "Confirming the change before delivery" |
 | [0012](0012-forced-exits-in-a-row-at-one-stage-pause-a-request-without-a-time-limit.md) | Without a time limit, forced exits in a row at one stage pause a request | README, "Active-work limits and recovery" |
+| [0013](0013-remove-only-declared-regenerable-directories.md) | Remove only operator-declared regenerable directories at safe role/request boundaries | README, "Opt-in removal of regenerated install directories" |
 
 ## Considered and not recorded
 

@@ -259,6 +259,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 	if err := cfg.ModelSelection.validate(); err != nil {
 		return err
 	}
+	if err := validateInstallTrim(cfg); err != nil {
+		return err
+	}
 	roles, purposes := map[string]chain.Role{}, map[string]string{}
 	for _, role := range cfg.Roles {
 		if role.Name == "" || role.Name == "done" || len(role.Processes) == 0 {
@@ -443,6 +446,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 	questionAware, questionMonitor, err := questionExecutor(cfg, assigned, *directory, executor)
 	if err != nil {
 		return err
+	}
+	if cfg.Intake != nil && len(cfg.Intake.TrimInstallDirs) != 0 {
+		questionAware = installTrimExecutor{next: questionAware, cfg: cfg, job: filepath.Dir(store.Dir), observe: observe}
 	}
 	engine := chain.Chain{
 		Router:   router,
