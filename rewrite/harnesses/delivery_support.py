@@ -76,11 +76,12 @@ def description_size(text, source="The pull request description"):
 
 
 def markdown_section(text, title, *, absence=None):
-    """Select one ATX/Setext section; record uncertain fences if requested."""
+    """Find a section, then cut at any heading shape rather than risk a leak."""
     normalize = lambda value: value.strip().rstrip(":：").strip().casefold()
     lines = [line for line in re.findall(r"[^\r\n]*(?:\r\n|[\r\n]|$)", text) if line]
-    start, level, fence, paragraph = None, None, None, None
+    start, fence, paragraph, html_end = None, None, None, None
     list_continuation = False
+    before_list, list_gap = False, False
     html_block = (r"^ {0,3}(?:<!--|<\?|<![A-Z]|<!\[CDATA\[|"
                   r"<(?:script|pre|style|textarea)(?=[ \t>]|$)|"
                   r"</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|"
@@ -95,11 +96,38 @@ def markdown_section(text, title, *, absence=None):
     i = 0
     while i < len(lines):
         line = lines[i].rstrip("\r\n")
+        rule = re.fullmatch(r" {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})", line)
+        if html_end is not None:
+            if (html_end and re.search(html_end, line, re.IGNORECASE)) or (not html_end and not line.strip(" \t")):
+                html_end = None
+            i += 1
+            continue
+        if start is None and not fence:
+            if rule and not (before_list and line.startswith((" ", "\t"))):
+                before_list = False
+            elif re.match(r"^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+", line):
+                before_list, list_gap = True, False
+            elif before_list:
+                if not line.strip(" \t"):
+                    list_gap = True
+                elif line.startswith((" ", "\t")) or (not list_gap and not re.match(r"#{1,6}(?:[ \t]+|$)", line)):
+                    i += 1
+                    continue
+                else:
+                    before_list, list_continuation = False, False
+        if start is not None:
+            # Once selected, list/fence interpretation must never extend the
+            # public text past a possible private heading, at any depth.
+            atx = re.match(r"^[ \t]*#{1,6}(?:[ \t]+|$)", line)
+            setext = (i > start and lines[i - 1].strip(" \t\r\n")
+                      and re.fullmatch(r"[ \t]*(?:=+|-+)[ \t]*", line))
+            if atx or setext:
+                if fence:
+                    return uncertain_fence()
+                end = i if atx else paragraph if paragraph is not None else i - 1
+                return "".join(lines[start:end]).strip("\r\n")
         if fence:
             marker, indent = fence
-            # A list/indented fence cannot hide a following top-level section.
-            if indent and re.match(r"^#{1,6}(?:[ \t]+|$)", line):
-                return uncertain_fence()
             if re.fullmatch(r" {0," + str(max(3, indent)) + "}" + re.escape(marker[0])
                             + "{" + str(len(marker)) + r",}[ \t]*", line):
                 fence = None
@@ -114,35 +142,40 @@ def markdown_section(text, title, *, absence=None):
             continue
         heading = re.match(r"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$", line)
         underline = re.fullmatch(r" {0,3}(=+|-+)[ \t]*", line)
-        size, label, beginning = 0, "", i
+        label = None
         if heading:
-            size = len(heading[1])
             label = re.sub(r"[ \t]+#+[ \t]*$", "", heading[2])
         elif underline and paragraph is not None:
-            size = 1 if underline[1][0] == "=" else 2
-            beginning = paragraph
             label = " ".join(part.strip() for part in lines[paragraph:i])
-        if size:
-            if start is not None and size <= level:
-                return "".join(lines[start:beginning]).strip("\r\n")
+        if label is not None:
             if start is None and normalize(label) == normalize(title):
-                start, level = i + 1, size
+                start = i + 1
             paragraph = None
             list_continuation = False
-        elif not line.strip(" \t") or underline or re.fullmatch(r" {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})", line):
+        elif not line.strip(" \t") or underline or rule:
             paragraph = None
             list_continuation = False
         elif re.match(r"^ {0,3}(?:[-*+][ \t]+\S|1[.)][ \t]+\S|>)", line):
             paragraph = None
             list_continuation = True
-        elif re.match(html_block, line, re.IGNORECASE):
+        elif (re.match(html_block, line, re.IGNORECASE)
+              or (paragraph is None and re.fullmatch(r''' {0,3}</?[A-Za-z][A-Za-z0-9-]*(?=[ \t/>])(?:[^<>"']|"[^"]*"|'[^']*')*>[ \t]*''', line))):
+            if start is None:
+                raw = re.match(r" {0,3}<(script|pre|style|textarea)(?=[ \t>]|$)", line, re.IGNORECASE)
+                if raw:
+                    html_end = r"</" + raw[1] + r"[ \t]*>"
+                else:
+                    html_end = next((end for begin, end in (("<!--", "-->"), ("<?", r"\?>"),
+                                                            ("<![CDATA[", r"\]\]>"), ("<!", ">"))
+                                     if line.lstrip(" ").startswith(begin)), "")
+                if html_end and re.search(html_end, line, re.IGNORECASE):
+                    html_end = None
             paragraph = None
             list_continuation = False
         elif paragraph is None:
             if re.match(r"^ {0,3}\d{1,9}[.)][ \t]+", line):
                 list_continuation = True
-            elif not (list_continuation or line.startswith(("    ", "\t"))
-                      or re.match(r"^ {0,3}[|<]", line)):
+            elif not (list_continuation or line.startswith(("    ", "\t"))):
                 paragraph = i
         i += 1
     if start is not None and fence is not None:

@@ -23,8 +23,13 @@ the operator can correct holds the process instead of immediately requesting
 model rework. Endings that create no PR body do not require those settings.
 The operator corrects the setting and restarts; the interrupted delivery then
 follows its configured `on_failure` route, which may include model work before
-delivery is tried again. Section selection treats list-item fences
-conservatively, follows paragraph interruption rules, and splits CRLF/CR/LF only.
+delivery is tried again. After finding the section, any heading-shaped line
+ends it even inside a fence or list; ambiguous syntax may shorten the summary,
+never extend it into private text. Deeper headings are boundaries too. Fence
+and paragraph handling locate the start and detect an open fence at the cut,
+not authorize text beyond that boundary. Headings inside HTML blocks do not
+start a section; an unclosed block leaves those candidates absent. Only
+CRLF/CR/LF split lines.
 
 ## Alternatives compared
 

@@ -1572,23 +1572,27 @@ set `PR_DESCRIPTION_ROLE=confirm_change` and
 `PR_DESCRIPTION_SECTION=Pull request summary` **on delivery only**. Ask that role
 to include an optional `## Pull request summary` section in its ordinary report.
 Delivery appends a heading and that section's text after its introduction; the section ends
-at the next heading of the same or higher level. Other report text is not
+at the next heading-shaped line, even a deeper or indented heading. Other report text is not
 published. A missing or empty section leaves just the introduction, not an
 invented claim of verification. Its absence is recorded as
 `description_section_absent` in the delivery receipt, with a sentence explaining
 the absence on stdout, not in the PR body. The newest nonfailed process report
 in the latest contiguous attempt of that role is selected on its own, never joined with
 an older report or replaced by an older section when it omits one. ATX and
-Setext headings are understood outside fenced code; a Setext heading includes its
-whole paragraph, not a preceding list, quote, table or HTML line. Subheadings
-inside the section are included. Start code fences on their own lines, not on
-list-item lines. List-item fences are recognized conservatively: a column-zero
-heading while a list/indented fence is open ends the selection rather than
-publishing a possibly private section. An unclosed code fence makes the section
+Setext headings locate the section outside fenced code and HTML blocks. A heading
+inside an unclosed HTML block or an indented list continuation is not a section
+start. Inline HTML and lines
+beginning with `|` can start that heading's paragraph; HTML block starts cannot.
+After selection, any ATX-shaped line (at any indentation) or `---`/`===`-style
+underline directly after a nonblank line ends the selection, regardless of
+fence or list interpretation. Subheadings are not included. Keep the summary
+as ordinary paragraphs or lists; avoid heading-shaped lines in code examples.
+This deliberately prefers a shortened summary over publishing private notes.
+If the cut leaves an open code fence, or a fence is unclosed at the end, the section is
 absent, with `description_section_absence_reason=unclosed_fence` in the receipt
 and a dedicated sentence on stdout. A missing or blank section instead records
-`absent_or_empty`. Paragraph boundaries distinguish continuations from blocks
-that can interrupt a paragraph; only CRLF, CR and LF split lines. Title matching ignores
+`absent_or_empty`. Whole paragraph headings are excluded when their beginning
+is known; only CRLF, CR and LF split lines. Title matching ignores
 case, outer spaces, closing hashes and a final colon. Setting a section without
 a role, or setting it to a blank value, is a configuration error. Do not set a
 section on review: section selection is delivery-only, and review holds until

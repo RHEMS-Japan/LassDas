@@ -12,6 +12,44 @@ import adversarial_review
 
 
 class SectionTests(unittest.TestCase):
+    def test_list_contained_headings_do_not_start_the_public_section(self):
+        for marker in ("- ", "1. ", "2) "):
+            indent = " " * len(marker)
+            for heading in ("## Summary", "Summary\n" + indent + "---"):
+                for blank in ("", "\n", "\n" + indent + "***\n", "\n" + indent + "---\n"):
+                    with self.subTest(marker=marker, heading=heading, blank=blank):
+                        text = marker + "Private example\n" + blank + indent + heading + "\n" + indent + "PRIVATE\n"
+                        self.assertIsNone(support.markdown_section(text, "Summary"))
+                        self.assertEqual(support.markdown_section(text + "\n## Summary\nVisible", "Summary"), "Visible")
+        self.assertEqual(support.markdown_section("- Example\n\nSummary\n---\nVisible", "Summary"), "Visible")
+
+    def test_html_blocks_cannot_supply_a_false_section_start(self):
+        for opening, closing in (("<script>", "</script>"), ("<!--", "-->"),
+                                 ("<pre>", "</pre>"), ("<?", "?>"),
+                                 ("<![CDATA[", "]]>"), ("<!DECLARATION", ">"),
+                                 ("<div>", ""), ("<custom attr='<foo>'>", ""),
+                                 ('<custom title="a>b">', "")):
+            with self.subTest(opening=opening):
+                fake = opening + "\n## Summary\nPRIVATE_INSIDE_HTML\n" + closing + "\n"
+                self.assertIsNone(support.markdown_section(fake, "Summary"))
+                self.assertEqual(support.markdown_section(fake + "\n## Summary\nVisible", "Summary"), "Visible")
+                self.assertIsNone(support.markdown_section(opening + "\n## Summary\nPRIVATE", "Summary"))
+
+    def test_a_list_item_ending_before_its_fence_cannot_publish_private_text(self):
+        for marker in ("- ", "2. "):
+            for heading in ("   ## Private", "    ## Private", "\t## Private", "Private heading\n---"):
+                with self.subTest(marker=marker, heading=heading):
+                    text = "## Summary\nVisible\n" + marker + "```sh\ncode\n" + heading + "\nPRIVATE\n  ```\n"
+                    self.assertNotIn("PRIVATE", support.markdown_section(text, "Summary") or "")
+
+    def test_inline_html_and_pipe_paragraph_headings_do_not_leak(self):
+        for heading in ("<b>Private heading</b>", "| Private heading |"):
+            for blank in ("", "Visible\n\n"):
+                with self.subTest(heading=heading, blank=blank):
+                    text = "## Summary\n" + blank + heading + "\n---\nPRIVATE\n"
+                    self.assertNotIn("PRIVATE", support.markdown_section(text, "Summary") or "")
+            self.assertEqual(support.markdown_section(heading + "\n---\nVisible", heading), "Visible")
+
     def test_list_fences_never_hide_private_sections(self):
         for item in ("- ", "* ", "+ ", "1. ", "2) ", "123456789. "):
             for fence in ("```", "~~~~"):
@@ -42,10 +80,10 @@ class SectionTests(unittest.TestCase):
             "Visible\n<!-- closed -->")
         for marker in ("- ", "1. ", "2) "):
             text = "## Summary\n" + marker + "Unverified\n  still pending\n---\n## Private\nPRIVATE"
-            self.assertEqual(support.markdown_section(text, "Summary"), marker + "Unverified\n  still pending\n---")
+            self.assertEqual(support.markdown_section(text, "Summary"), marker + "Unverified")
         self.assertEqual(support.markdown_section("## Summary\n    code\nPrivate heading\n---\nPRIVATE", "Summary"), "    code")
         self.assertEqual(support.markdown_section("Before\n```\ncode\n```\nSummary\n---\nVisible", "Summary"), "Visible")
-        self.assertEqual(support.markdown_section("## Summary\nVisible\n### Summary\nMore\n## Private\nPRIVATE", "Summary"), "Visible\n### Summary\nMore")
+        self.assertEqual(support.markdown_section("## Summary\nVisible\n### Summary\nMore\n## Private\nPRIVATE", "Summary"), "Visible")
 
     def test_only_markdown_line_endings_split_lines(self):
         for separator in ("\x85", "\u2028", "\x0b", "\x0c"):
@@ -59,9 +97,10 @@ class SectionTests(unittest.TestCase):
         for heading in ("## Pull request summary", "   ## pull REQUEST summary: ##", "Pull request summary\n---"):
             for fence in ("```", "~~~~"):
                 with self.subTest(heading=heading, fence=fence):
-                    text = heading + "\nKeep this\n" + fence + "\n# shell comment\n" + fence + "\nMore steps\n\nNext section\n---\nPrivate text"
+                    text = heading + "\nKeep this\n" + fence + "\necho example\n" + fence + "\nMore steps\n\nNext section\n---\nPrivate text"
                     self.assertEqual(support.markdown_section(text, " Pull request summary "),
-                                     "Keep this\n" + fence + "\n# shell comment\n" + fence + "\nMore steps")
+                                     "Keep this\n" + fence + "\necho example\n" + fence + "\nMore steps")
+        self.assertIsNone(support.markdown_section("## Summary\n```\n# shell comment\n```\nPrivate", "Summary"))
         self.assertIsNone(support.markdown_section("```\n## Pull request summary\nexample\n```", "Pull request summary"))
         self.assertEqual(support.markdown_section("## Pull request summary\n## Next\nprivate", "Pull request summary"), "")
 
@@ -81,12 +120,12 @@ class SectionTests(unittest.TestCase):
                      "| Unverified | live display |", "<div>Unverified</div>"):
             with self.subTest(line=line):
                 text = "## Summary\n" + line + "\n---\n\n## Private\nprivate notes"
-                self.assertEqual(support.markdown_section(text, "Summary"), line + "\n---")
+                self.assertEqual(support.markdown_section(text, "Summary"), "")
         self.assertEqual(support.markdown_section(
             "## Summary\nVisible\n\nTwo-line private\nheading\n---\nprivate notes", "Summary"), "Visible")
         self.assertEqual(support.markdown_section(
             "## Summary\nVisible\n### Limits\nUnverified\n# Private\nprivate notes", "Summary"),
-            "Visible\n### Limits\nUnverified")
+            "Visible")
         self.assertEqual(support.markdown_section(
             "## Summary\n    indented code\n## Private\nprivate notes", "Summary"), "    indented code")
         self.assertEqual(support.markdown_section(
