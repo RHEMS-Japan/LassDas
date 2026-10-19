@@ -1644,8 +1644,10 @@ has finished. These two test runs do not compete for the same ports or services.
 Failure returns to `elicit`. Its bundled `harnesses/added_tests.py` and the image's
 `verify_merged.py` share detection and execution. The aggregate commands keep
 their original launcher, output, environment and timeout; post-delivery checks
-run the aggregate commands before the additional tests, with `TMPDIR` in the
-fetched clone's private parent directory, not the sandbox's memory-backed `/tmp`.
+run the aggregate commands before the additional tests. For the aggregate
+commands only, `TMPDIR` is set in the fetched clone's private parent directory,
+not the sandbox's memory-backed `/tmp`; individually added tests do not receive
+this override.
 
 Before delivery, additions are measured against the integration-side commit
 already contained in the checkout or currently being merged, including staged
