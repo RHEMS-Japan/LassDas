@@ -65,6 +65,9 @@ destination. The browser stays on the same public HTTPS origin.
    reason (the dependency step, a rules container, the hand-over, a failed
    read, the time) before the Pod's last rules container (`net`) has ended
    with status 0, `up` removes the Deployment first and says so.
+   After that container succeeds, `PREVIEW_FAILURE_FILE`, if configured,
+   replaces startup-failure details with the constrained application report
+   described below; earlier refusal and timeout reasons remain unchanged.
 6. Makes the signed URL for the preview's end, and opens the public address
    as the requester would: (a) `PREVIEW_READY_PATH` without the password,
    which the router must answer with 401; (b) the same with the check user's
@@ -383,7 +386,11 @@ none set, the Pod template, archive and change identifier are unchanged.
 - `volumes` adds named `emptyDir` volumes with required `sizeLimit` and
   optional `medium: "Memory"`. They do not enlarge the source volume or the
   archive's shared 1 GiB limit. Extra containers need resources within the
-  namespace's existing limits and quota. No admission policy is loosened.
+  namespace's existing LimitRange and quota, not `PREVIEW_MEMORY`.
+  `sizeLimit` requires a positive integer followed by `Mi` or `Gi`.
+  CPU quantities below one core must use millicores (`500m`, not `0.5`).
+  Container port names are passed to Kubernetes without local validation.
+  No admission policy is loosened.
 - `PREVIEW_EXTRA_FILES`: a JSON object mapping archive-root file names to
   absolute, regular-file paths outside the checkout. No symlink is followed
   along those paths. A name already present in the source, including a
@@ -393,11 +400,19 @@ none set, the Pod template, archive and change identifier are unchanged.
   directory and remove it in a finally block. The command's tar copy is
   removed with its own temporary directory. Changing a daily snapshot means
   a new identifier and a new Pod, even if source code did not change.
+  Nonempty `PREVIEW_EXTRA_FILES` cannot be combined with `PREVIEW_INSTALL`:
+  that step can reach public addresses and must never receive private inputs.
 - `PREVIEW_RESULT_LINES`: a JSON array of explanatory lines appended after
   the ordinary three lines. Use it to say which API/data this page uses and
   which operations cannot be tested. No environment values are interpolated.
+  The joined UTF-8 lines must be at most 8 KiB and contain no control or
+  bidirectional formatting characters.
 - `PREVIEW_FAILURE_FILE`: an optional path relative to `/src`, read from
-  app when startup fails. It must contain one small JSON object: `stage`
+  app when startup fails after the last rules container completed successfully.
+  Before then, quota/policy refusals, install exit codes, setup failures and
+  timeouts keep their original reason. The image needs `head`; the reader
+  caps its output at 1025 bytes and ignores stderr, even if request code
+  replaces `head`. The file must contain at most 1024 bytes of JSON: `stage`
   (`snapshot`, `migration`, `seed` or `start`), `container` (a configured
   ordinary container), and, for migration only, `file` (a name actually
   packed under `migrations/`) and `code` (four or five decimal digits).
@@ -412,6 +427,8 @@ none set, the Pod template, archive and change identifier are unchanged.
 The existing `app` container can run an API while an additional page
 container serves `PREVIEW_PORT`. Point `PREVIEW_READY_PATH` at the page's
 API health proxy: the kubelet cannot probe a loopback-only API directly.
+The app already declares port `http` on `PREVIEW_PORT`: do not declare that
+port a second time on the page container. Its process may still listen there.
 Mount only built static files into the page container, not snapshots or
 logs. Extra containers and input files can hold sensitive data; network
 isolation, data minimization and deletion remain the operator's duties.
@@ -514,7 +531,7 @@ standard error and nothing on standard output.
 | Status | When |
 | --- | --- |
 | 0 | `up`: the preview answers on its public address and `TASK_PREVIEW` is written. `down`: neither the Deployment nor the Service of the request is left, also when there was none. `origin`: the origin is printed. |
-| 1 | Anything else. The last line of the output is the reason, with the cluster's own message where it gave one (a policy refusal names the policy). `TASK_PREVIEW` is not written. |
+| 1 | Anything else. The last line is the reason (a policy refusal names the policy). With `PREVIEW_FAILURE_FILE`, failures after the last rules container use the constrained application diagnostic instead; earlier failures keep the original reason. `TASK_PREVIEW` is not written. |
 | 2 | A wrong command line. The engine never starts it so with this configuration. Also `origin` without one of its settings, or with a wrong one. |
 
 After a failure nothing is removed, except a Deployment whose Pod's last

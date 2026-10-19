@@ -57,6 +57,7 @@ import http.client
 import json
 import os
 import re
+import selectors
 import shutil
 import stat
 import subprocess
@@ -386,6 +387,8 @@ def read_settings(environment, command):
     pod_annotations = pod_annotations_setting(environment.get("PREVIEW_POD_ANNOTATIONS"))
     options = pod_options(environment)
     extra = option_json(environment, "PREVIEW_EXTRA_FILES", dict, {})
+    if extra and install is not None:
+        raise Failure("PREVIEW_EXTRA_FILES cannot be combined with PREVIEW_INSTALL: the install step can reach public addresses")
     for name, source in extra.items():
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) or not plain_path(source, True):
             raise Failure("PREVIEW_EXTRA_FILES must map plain file names to absolute file paths")
@@ -768,9 +771,34 @@ class Cluster:
         self.base = ["kubectl", "--cache-dir=" + os.path.join(directory, "cache"),
                      "--namespace=" + settings.namespace]
 
-    def run(self, arguments, *, data=None, source=None, timeout=90, limited=True):
+    def run(self, arguments, *, data=None, source=None, timeout=90, limited=True, output_limit=None):
         command = self.base + (["--request-timeout=30s"] if limited else []) + arguments
         try:
+            if output_limit is not None:
+                # head inside the Pod is untrusted too. Bound the pipe here,
+                # discard stderr and reap kubectl on overflow or timeout.
+                with subprocess.Popen(command, env=self.environment, stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+                    output = bytearray()
+                    deadline = time.monotonic() + timeout
+                    try:
+                        with selectors.DefaultSelector() as selector:
+                            selector.register(process.stdout, selectors.EVENT_READ)
+                            while len(output) < output_limit:
+                                if not selector.select(max(0, deadline - time.monotonic())):
+                                    raise subprocess.TimeoutExpired(command, timeout)
+                                chunk = os.read(process.stdout.fileno(), output_limit - len(output))
+                                if not chunk:
+                                    break
+                                output.extend(chunk)
+                        if len(output) == output_limit:
+                            process.kill()
+                        process.wait(timeout=max(0, deadline - time.monotonic()))
+                        return subprocess.CompletedProcess(command, process.returncode, bytes(output), b"")
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                        process.wait()
             if source is not None:
                 return subprocess.run(command, env=self.environment, stdin=source, capture_output=True,
                                       timeout=timeout)
@@ -932,9 +960,9 @@ def wait_until_ready(cluster, settings, names, change, archive):
     try:
         watch(cluster, settings, names, change, archive, seen)
     except (Failure, OSError) as failure:
-        if settings.failure_file:
-            failure = Failure(startup_diagnostic(cluster, settings, seen[-1] if seen else None, archive))
         if seen and past_the_last_rules(seen[-1]):
+            if settings.failure_file:
+                failure = Failure(startup_diagnostic(cluster, settings, seen[-1], archive))
             raise failure
         problem = cluster.remove("deployment", names.name)
         raise Failure(str(failure) + ("; the Deployment was removed, as its last rules had not ended with status 0"
@@ -953,7 +981,7 @@ def startup_diagnostic(cluster, settings, pod, archive):
             break
     try:
         done = cluster.run(["exec", pod["metadata"]["name"], "-c", "app", "--", "head", "-c", "1025",
-                            "/src/" + settings.failure_file], timeout=10)
+                            "/src/" + settings.failure_file], timeout=10, output_limit=1025)
         if done.returncode or len(done.stdout) > 1024:
             return fallback
         value = json.loads(done.stdout)
