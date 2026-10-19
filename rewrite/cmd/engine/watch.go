@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/diskusage"
 	"ticket-runner/internal/tracker"
 )
 
@@ -61,7 +62,8 @@ type intakeConfig struct {
 	// StallNoticeMinutes is how long a request may go without completing a step
 	// before the requester is told. Absent means 90 minutes; zero says nothing.
 	StallNoticeMinutes *int `json:"stall_notice_minutes,omitempty"`
-	DiskNoticePercent  int  `json:"disk_notice_percent,omitempty"`
+	// DiskNoticePercent defaults to 85; zero disables capacity notices.
+	DiskNoticePercent *int `json:"disk_notice_percent,omitempty"`
 	// Statuses names, by id, where the issue moves at each turn of the work.
 	Statuses *statusConfig `json:"statuses,omitempty"`
 	// CategoryOnAccept is added to an accepted issue, so the tracker's own
@@ -113,9 +115,6 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 	}
 	if cfg.Intake == nil {
 		return fail(errors.New("watch requires an explicit intake configuration"))
-	}
-	if cfg.Intake.DiskNoticePercent < 0 || cfg.Intake.DiskNoticePercent > 100 {
-		return fail(errors.New("intake.disk_notice_percent must be between 1 and 100, or zero for the default"))
 	}
 	if err := validateStopReporter(*cfg); err != nil {
 		return fail(err)
@@ -331,6 +330,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	// tick and said once per reason, not once per tick.
 	trimTrouble := map[string]string{}
 	removalTrouble := map[string]string{}
+	diskTrouble := ""
 	trim := func(name, directory string, say func(string)) {
 		if err := trimFinished(directory); err != nil {
 			reason := err.Error()
@@ -394,12 +394,28 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 		// One shared model key serves the whole queue, so ask once per tick
 		// rather than once per waiting request.
 		creditLow, creditKnown := modelCreditHold(ctx, cfg, observe)
+		percent := float64(0)
+		if diskThreshold(cfg) > 0 {
+			reading, err := queueDiskPercent(filepath.Dir(jobs))
+			if err != nil {
+				if diskTrouble != err.Error() {
+					observe("queue filesystem measurement failed: " + err.Error())
+				}
+				diskTrouble = err.Error()
+			} else {
+				percent = reading
+				if diskTrouble != "" {
+					observe("queue filesystem measurement recovered")
+				}
+				diskTrouble = ""
+			}
+		}
 		for _, entry := range entries {
 			if ctx.Err() != nil {
 				break
 			}
 			id, err := strconv.ParseInt(entry.Name(), 10, 64)
-			if err != nil || id <= 0 || !entry.IsDir() || active[entry.Name()] {
+			if err != nil || id <= 0 || !entry.IsDir() || (active[entry.Name()] && !diskusage.Over(percent, diskThreshold(cfg))) {
 				continue
 			}
 			directory := filepath.Join(jobs, entry.Name())
@@ -412,6 +428,14 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			issue, err := source.ReadIssue(raw)
 			if err != nil || issue.ID != id {
 				observe("accepted issue record could not be read for its source; no replacement used")
+				continue
+			}
+			if diskusage.Over(percent, diskThreshold(cfg)) {
+				if err := noteQueueDisk(ctx, cfg, requestNotices(cfg, issue, directory), percent); err != nil {
+					say("capacity notice not confirmed: " + err.Error())
+				}
+			}
+			if active[entry.Name()] {
 				continue
 			}
 			if stopped, err := savedStop(source, directory, issue, cfg.Intake.StopUserIDs); err != nil {

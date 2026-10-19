@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/diskusage"
 	"ticket-runner/internal/stagename"
 	"ticket-runner/internal/textclip"
 	"ticket-runner/internal/tracker"
@@ -349,7 +350,10 @@ func kindStart(now time.Time) time.Time {
 // postableKinds are the kinds of notice an engine with this configuration
 // posts.
 func postableKinds(cfg config) []string {
-	kinds := []string{resumeNotice, diskNotice}
+	kinds := []string{resumeNotice}
+	if diskThreshold(cfg) > 0 {
+		kinds = append(kinds, diskNotice)
+	}
 	if cfg.Intake == nil {
 		return kinds
 	}
@@ -501,6 +505,10 @@ func (n notices) sayAs(ctx context.Context, kind, event string, at time.Time, co
 	since, err := kindSince(n.queue, kind, now)
 	if err != nil {
 		return err
+	}
+	// Only capacity is a current condition; other undated events stay old.
+	if kind == diskNotice && at.IsZero() {
+		at = now
 	}
 	if at.Before(since) {
 		// A kind said once is settled by a record that it predates, so no
@@ -1063,6 +1071,9 @@ func validateEndpoint(address string) error {
 func validateNotices(cfg config) error {
 	if cfg.Intake == nil {
 		return nil
+	}
+	if err := diskusage.Validate(cfg.Intake.DiskNoticePercent); err != nil {
+		return err
 	}
 	if cfg.Intake.MinModelCredit < 0 {
 		return errors.New("intake.min_model_credit must not be negative")

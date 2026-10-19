@@ -3,18 +3,29 @@ package diskusage
 
 import (
 	"errors"
-	"syscall"
 )
 
 const DefaultThreshold = 85
 
-func Percent(path string) (float64, error) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
-		return 0, err
-	}
-	if stat.Blocks == 0 || stat.Bavail > stat.Blocks {
+func percentOf(blocks, available uint64) (float64, error) {
+	if blocks == 0 || available > blocks {
 		return 0, errors.New("filesystem capacity is unavailable")
 	}
-	return 100 * (1 - float64(stat.Bavail)/float64(stat.Blocks)), nil
+	return 100 * (1 - float64(available)/float64(blocks)), nil
 }
+
+func Threshold(configured *int) int {
+	if configured == nil {
+		return DefaultThreshold
+	}
+	return *configured
+}
+
+func Validate(configured *int) error {
+	if configured != nil && (*configured < 0 || *configured > 100) {
+		return errors.New("intake.disk_notice_percent must be between 0 and 100 (zero disables warnings)")
+	}
+	return nil
+}
+
+func Over(percent float64, threshold int) bool { return threshold > 0 && percent >= float64(threshold) }

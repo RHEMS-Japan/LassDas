@@ -1720,15 +1720,24 @@ The overview reads and displays usage of the filesystem containing the queue,
 including space unavailable to ordinary processes. This is not the size of the
 queue directory or a claim about a storage provider's separate quota. An
 unavailable reading is shown as unknown, never as zero usage.
-`intake.disk_notice_percent` sets the warning threshold (default 85; an integer
-from 1 to 100, with zero selecting the default). Give status the engine's
-configuration with `--config` to show the same threshold. Above it, the watch
-posts one capacity warning per watched unfinished request (including those
-waiting for an answer or model credit) through the existing notice
+`intake.disk_notice_percent` sets the warning threshold (absent means 85; an
+integer from 1 to 100; zero disables new capacity notices). Give status the engine's
+configuration with `--config` to show the same threshold. At or above it, the
+watch measures once per queue tick and posts one capacity warning per unfinished
+request (including active work, answer waits, model-credit holds and operator
+pauses, but not stopped or finished requests) through the existing notice
 path. Its saved notice prevents resending after a restart or another crossing.
 The warning does not stop work, delete files or change routing. A full disk can
 also prevent saving a notice: that failure is logged and retried, not reported
-as a sent warning. Status reads usage independently and never posts anything.
+as a sent warning. The comment describes the condition when first recorded,
+not a live reading; an unconfirmed submission is retried without rewriting it.
+Measurement errors are logged once per reason until recovery. Status reads
+usage independently and never posts anything. These are block-usage readings,
+not inode usage. Linux and macOS support them; other operating systems show
+usage as unavailable. Disabling warnings skips the watch's measurements and
+does not register the capacity notice; the status reading remains available.
+Previously recorded, unconfirmed notices still follow the existing retry path
+even if the threshold is later set to zero; this setting does not cancel them.
 
 Homes are currently reused per role and process, not created per attempt.
 Their latest contents and the shared checkout remain available for retries;
