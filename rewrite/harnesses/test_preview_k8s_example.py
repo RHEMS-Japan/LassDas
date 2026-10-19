@@ -1130,6 +1130,69 @@ class PreviewExampleTests(unittest.TestCase):
         second = self.tool.write_tar(str(self.checkout), paths, str(self.base / "two.tar"))
         self.assertEqual(first, second)
 
+    # -- PREVIEW_POD_ANNOTATIONS: an installation's own Pod annotations ------
+
+    def template_annotations(self):
+        return self.applied_deployments()[-1]["spec"]["template"]["metadata"]["annotations"]
+
+    def test_without_pod_annotations_the_pod_template_carries_only_the_change(self):
+        changes = []
+        for value in (None, "", "{}"):
+            with self.subTest(value=value):
+                self.reset_cluster()
+                status, output = self.up(PREVIEW_POD_ANNOTATIONS=value)
+                self.assertEqual(status, 0, output)
+                self.assertEqual(sorted(self.template_annotations()), ["preview-change"])
+                changes.append(self.template_annotations()["preview-change"])
+        self.assertEqual(len(changes), 3)
+        self.assertEqual(len(set(changes)), 1, "an empty setting changed the identifier")
+
+    def test_pod_annotations_reach_the_pod_template_and_nothing_else(self):
+        status, output = self.up()
+        self.assertEqual(status, 0, output)
+        without = self.template_annotations()["preview-change"]
+        wanted = {"example.invalid/keep": "true", "note": "two words", "example.invalid/empty": ""}
+        status, output = self.up(PREVIEW_POD_ANNOTATIONS=json.dumps(wanted))
+        self.assertEqual(status, 0, output)
+        deployment = self.applied_deployments()[-1]
+        annotations = self.template_annotations()
+        self.assertEqual({name: annotations.get(name) for name in wanted}, wanted)
+        self.assertEqual(sorted(set(annotations) - set(wanted)), ["preview-change"])
+        self.assertNotEqual(annotations["preview-change"], without, "the annotations are part of the Pod template")
+        self.assertEqual(sorted(deployment["metadata"]["annotations"]), ["preview-expires-at", "preview-issue"])
+        service = [item for document in self.applied() for item in document["items"] if item["kind"] == "Service"][-1]
+        self.assertNotIn("annotations", service["metadata"])
+
+    def test_a_wrong_pod_annotations_setting_ends_1_before_the_cluster(self):
+        for label, value, reason in (
+                ("not JSON", "keep=true", "it is not JSON"),
+                ("a JSON array", '["example.invalid/keep"]', "it is a JSON list"),
+                ("a JSON string", '"example.invalid/keep"', "it is a JSON str"),
+                ("an empty name", '{"": "true"}', "a name is empty"),
+                ("a number for a value", '{"example.invalid/keep": 1}', "is not a string"),
+                ("true for a value", '{"example.invalid/keep": true}', "is not a string"),
+                ("an object for a value", '{"example.invalid/keep": {"a": "b"}}', "is not a string"),
+                ("a name with a space", '{"keep me": "true"}', "is not an annotation name"),
+                ("a name with two /", '{"example.invalid/a/b": "true"}', "is not an annotation name"),
+                ("a name ending in -", '{"keep-": "true"}', "is not an annotation name"),
+                ("a name of 64 characters", '{"%s": "true"}' % ("a" * 64), "is not an annotation name"),
+                ("an upper-case prefix", '{"Example.invalid/keep": "true"}', "is not an annotation name"),
+                ("the change's own name", '{"preview-change": "0"}', "is preview.py's own"),
+                ("the lifetime's name", '{"preview-expires-at": "2100-01-01T00:00:00Z"}', "is preview.py's own"),
+                ("a name given twice", '{"keep": "a", "keep": "b"}', "a name is given twice")):
+            with self.subTest(label):
+                self.reset_cluster()
+                status, output = self.up(PREVIEW_POD_ANNOTATIONS=value)
+                self.assertEqual(status, 1, output)
+                self.assertEqual(self.calls(), [], "the cluster was called")
+                last = output.strip().splitlines()[-1]
+                self.assertIn("PREVIEW_POD_ANNOTATIONS", last)
+                self.assertIn(reason, last)
+
+    def test_down_does_not_read_pod_annotations(self):
+        status, output = self.down(PREVIEW_POD_ANNOTATIONS="not JSON")
+        self.assertEqual(status, 0, output)
+
     # -- PREVIEW_PACK_DIR: one ignored directory instead of the checkout -----
 
     def ignored_dist(self):

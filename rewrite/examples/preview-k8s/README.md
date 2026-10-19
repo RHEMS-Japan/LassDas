@@ -332,6 +332,7 @@ Set in the role's `env`. The engine reads none of them.
 | `PREVIEW_INSTALL_SECONDS` | `240` | no (`240`) | The step's time limit: digits only, 1 to 480, and, when `PREVIEW_INSTALL` is set, at most `PREVIEW_WAIT_SECONDS` − 180 (see Time above). Anything else ends `up` before the cluster is called. |
 | `PREVIEW_ENV_FILE` | `.env.preview` | no | A file in the checkout, relative to it, of `KEY=VALUE` lines for the application's environment. No secrets: the file is in the branch. At most 64 KiB; a line that is not `KEY=VALUE` (blank lines and `#` lines aside) ends `up`. `PORT` is always the script's. |
 | `PREVIEW_PACK_DIR` | `web/dist` | no | A directory of the checkout, relative to it, that git ignores, such as the output a build of the verification stage left there. With it, `up` carries only what is inside it, with the directory as the root (`web/dist/index.html` is `/src/index.html` in the Pod), instead of the checkout's tracked and untracked files. The directory itself has to be ignored, as `dist` or `dist/` in a `.gitignore` ignores it: `dist/*` ignores only what is inside, and git does not count a directory with a tracked file in it as ignored either. One trailing `/` is allowed. `up` ends 1 before the cluster is called when the value starts with `/` or has a doubled `/` or a `.` or `..` part; when the directory, or a directory on its way, is a symbolic link or missing; when git does not ignore the directory itself; when it holds no file or link; and when it holds more than 1 GiB. A link inside is carried as a link. The same contents give the same change identifier, so the same build again only extends the lifetime. |
+| `PREVIEW_POD_ANNOTATIONS` | `{"example.invalid/keep": "true"}` | no | Annotations added to the preview's Pod, as a JSON object of annotation names to string values: what the cluster reads from a Pod, such as the annotation its node autoscaler reads to leave the Pod's node in place (see Limits). Not JSON, not an object, an empty or malformed name, a name given twice, a value that is not a string or one of `preview.py`'s own names (`preview-change`, `preview-expires-at`, `preview-issue`) ends `up` before the cluster is called. They are part of the Pod template, so changing them gives a new change identifier. The policy does not restrict a Pod's annotations. |
 | `PREVIEW_WAIT_SECONDS` | `420` | no (420 for up, 60 for down) | How long to wait for the Pod to be ready (up) or for the objects to be gone (down): 1 to 3600. With `PREVIEW_INSTALL`, at least `PREVIEW_INSTALL_SECONDS` + 180. Above 1800 the cleanup, which removes a Deployment that has had no ready Pod for 30 minutes, may remove the preview while `up` still waits. |
 | `PREVIEW_DOMAIN` | `preview.example.invalid` | yes (up) | The domain under which every preview gets one label: `sample-12.preview.example.invalid`. The same for every installation using the router. |
 | `PREVIEW_NAMESPACE` | `preview-apps` | yes | The preview namespace. |
@@ -471,7 +472,8 @@ The Deployment `up` sends, and nothing else of it varies but the settings:
 - The lifetime (`preview-expires-at`, RFC 3339 in UTC) and the request number
   on the Deployment itself; the change's identifier (`preview-change`) on the
   Pod template, so extending the lifetime does not replace the Pod and a new
-  change does.
+  change does. With `PREVIEW_POD_ANNOTATIONS`, its annotations on the Pod
+  template too.
 - The init containers `net-hold`, `receive`, `net`, or with `PREVIEW_INSTALL`
   `net-hold`, `receive`, `net-install`, `install`, `net`: the running rules
   first and last, the dependency step's rules only around the step. The step
@@ -577,6 +579,7 @@ another namespace no. It exits 0 when every check came out as expected.
 | preview.py's Deployment without the dependency step | Deployment | passes |
 | preview.py's Deployment with the dependency step | Deployment | passes |
 | preview.py's Service | Service | passes |
+| preview.py's Deployment with PREVIEW_POD_ANNOTATIONS | Deployment | passes |
 | a privileged container | Deployment | preview-deployment-shape |
 | a hostPath volume | Deployment | preview-deployment-shape |
 | hostNetwork | Deployment | preview-deployment-shape |
@@ -651,6 +654,7 @@ another namespace no. It exits 0 when every check came out as expected.
 | a Service with an external-dns hostname | Service | preview-service-shape |
 | a Service with a load balancer annotation | Service | preview-service-shape |
 | preview.py's Pod (as a ReplicaSet would create it) | Pod (admin) | passes |
+| preview.py's Pod with PREVIEW_POD_ANNOTATIONS | Pod (admin) | passes |
 | a privileged Pod | Pod (admin) | preview-pod-shape |
 | a Pod with an init container before the rules | Pod (admin) | preview-pod-shape |
 | a Pod without seccompProfile | Pod (admin) | preview-pod-shape |
@@ -858,7 +862,11 @@ fails its check with 403 and the requester gets the question in words.
 
 - The checkout lives in the Pod's emptyDir. A Pod moved to another node (the
   node replaced, a spot node reclaimed) starts empty and never gets ready;
-  the cleanup removes it, and the requester asks for the preview again.
+  the cleanup removes it, and the requester asks for the preview again. An
+  installation whose cluster moves Pods to free an underused node can name,
+  in `PREVIEW_POD_ANNOTATIONS`, the annotation its node autoscaler reads to
+  leave a Pod's node in place; that node then stays as long as the preview
+  does, and a node the provider takes back still moves the Pod.
 - One token for every installation sharing the preview namespace: one
   installation's token can replace or remove another's previews.
 - The time in the result's second line is Japan time.

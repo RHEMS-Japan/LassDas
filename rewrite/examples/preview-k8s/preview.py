@@ -115,8 +115,9 @@ DOMAIN_DESCRIPTION = "a lowercase domain name such as preview.example.invalid"
 
 Settings = collections.namedtuple(
     "Settings", "workspace result issue site start port ready_path lifetime image memory install "
-                "install_seconds env_file domain namespace server ca_file net_image wait_seconds pack_dir",
-    defaults=(None,))
+                "install_seconds env_file domain namespace server ca_file net_image wait_seconds pack_dir "
+                "pod_annotations",
+    defaults=(None, None))
 Names = collections.namedtuple("Names", "name label host url")
 
 
@@ -158,6 +159,42 @@ def matching(environment, name, pattern, description, default=None):
     if value is None or not re.fullmatch(pattern, value):
         raise Failure("%s must be %s (it is %s)" % (name, description, "not set" if value is None else repr(value)))
     return value
+
+
+# An annotation's name, as the API checks it: an optional DNS subdomain and /,
+# then 1 to 63 letters, digits, -, _ and ., starting and ending alphanumeric.
+ANNOTATION_NAME = r"([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?"
+
+
+def pod_annotations_setting(value):
+    """PREVIEW_POD_ANNOTATIONS: a JSON object of annotation names to string
+    values, added to the Pod template; None when it is not set or empty."""
+    if not value:
+        return None
+    wrong = ("PREVIEW_POD_ANNOTATIONS must be a JSON object of annotation names to string values, "
+             "such as {\"example.invalid/keep\": \"true\"}")
+
+    def unique(pairs):
+        names = [name for name, _ in pairs]
+        if len(set(names)) != len(names):
+            raise Failure("%s; a name is given twice" % wrong)
+        return dict(pairs)
+    try:
+        annotations = json.loads(value, object_pairs_hook=unique)
+    except ValueError:
+        raise Failure("%s (it is not JSON)" % wrong) from None
+    if not isinstance(annotations, dict):
+        raise Failure("%s (it is a JSON %s)" % (wrong, type(annotations).__name__))
+    for name, text in annotations.items():
+        if not name:
+            raise Failure("%s; a name is empty" % wrong)
+        if len(name.split("/", 1)[0]) > 253 or not re.fullmatch(ANNOTATION_NAME, name):
+            raise Failure("%s; %r is not an annotation name" % (wrong, name))
+        if name in (CHANGE, EXPIRES, ISSUE):
+            raise Failure("%s; %s is preview.py's own" % (wrong, name))
+        if not isinstance(text, str):
+            raise Failure("%s; the value of %s is not a string" % (wrong, name))
+    return annotations or None
 
 
 def read_settings(environment, command):
@@ -215,9 +252,10 @@ def read_settings(environment, command):
                           "leading or doubled / and no . or .. part (it is %r)" % written)
     net_image = matching(environment, "PREVIEW_NET_IMAGE", r"[^\s@]+@sha256:[0-9a-f]{64}",
                          "the rules image named by its digest (name@sha256:...)")
+    pod_annotations = pod_annotations_setting(environment.get("PREVIEW_POD_ANNOTATIONS"))
     return Settings(workspace, result, issue, site, start, port, ready_path, lifetime, image, memory, install,
                     install_seconds, env_file, domain, namespace, server, ca_file, net_image, wait_seconds,
-                    pack_dir)
+                    pack_dir, pod_annotations)
 
 
 def preview_names(site, issue, domain=None):
@@ -495,7 +533,9 @@ def manifests(settings, names, entries, expires):
                                "annotations": {EXPIRES: stamp(expires), ISSUE: settings.issue}},
                   "spec": {"replicas": 1, "revisionHistoryLimit": 1, "strategy": {"type": "Recreate"},
                            "selector": {"matchLabels": {LABEL: names.name}},
-                           "template": {"metadata": {"labels": dict(labels), "annotations": {}}, "spec": pod}}}
+                           "template": {"metadata": {"labels": dict(labels),
+                                                     "annotations": dict(settings.pod_annotations or {})},
+                                        "spec": pod}}}
     service = {"apiVersion": "v1", "kind": "Service",
                "metadata": {"name": names.name, "namespace": settings.namespace, "labels": dict(labels)},
                "spec": {"type": "ClusterIP", "selector": {LABEL: names.name},
@@ -512,7 +552,7 @@ def install_command(seconds, command):
 def change_identifier(archive_digest, template):
     """The first 12 hex digits of the hash of the checkout's archive and of
     the Pod template (start command, image, port, install step, settings
-    file): a new value for any change of either."""
+    file, PREVIEW_POD_ANNOTATIONS): a new value for any change of either."""
     digest = hashlib.sha256(b"preview change\n" + archive_digest.encode() + b"\n")
     digest.update(json.dumps(template, sort_keys=True, separators=(",", ":")).encode())
     return digest.hexdigest()[:12]
