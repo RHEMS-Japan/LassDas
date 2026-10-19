@@ -23,9 +23,10 @@
 #
 # Requests for <label>.<preview-domain> go to the Service pv-<label> in the
 # preview namespace after two checks, both required: the password (401
-# without it, on every path) and the signed URL (README.md, "The signed URL"):
-# /_preview/open?t=<token> turns a valid token into the cookie __Host-preview,
-# and every other path needs that cookie (403 without it). The Authorization
+# without it, on every path but a relay's) and the signed URL (README.md,
+# "The signed URL"): /_preview/open?t=<token> checks a valid token and sets
+# the cookie __Host-preview, a value of its own and never the token, and
+# every other path needs that cookie (403 without it). The Authorization
 # header and the router's own cookie are removed before forwarding, and a
 # Set-Cookie of the same name from the application is dropped: the
 # application never sees the shared password or the token. The Domain of the
@@ -142,11 +143,16 @@ data:
         location = /_preview/open { error_log stderr crit; js_content preview.open; }
         location = /_preview/check { internal; js_content preview.check; }
         location ^~ /_preview/ { return 404; }
-        # relay: begin. A refusal returns before the password is checked:
-        # "return" answers ahead of auth_basic, with the fixed sentence only,
-        # and nothing is sent to the API.
+        # relay: begin. The relay asks for the signed URL's cookie, not the
+        # password: a page's own code may send an Authorization header of its
+        # own, which auth_basic would read in place of the password the
+        # browser keeps. The cookie is set only after the password and the
+        # signed URL (/_preview/open). A refusal returns before the cookie is
+        # checked: "return" answers ahead of auth_request, with the fixed
+        # sentence only, and nothing is sent to the API.
         location = /_relay/api {
           internal;
+          auth_basic off;
           auth_request /_preview/check;
           error_page 403 = @relay_refused;
           error_page 502 503 504 = @relay_down;

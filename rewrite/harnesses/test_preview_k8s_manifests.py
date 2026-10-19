@@ -9,6 +9,8 @@ read theirs: no YAML library is needed or added.
 import base64
 import contextlib
 import datetime
+import hashlib
+import hmac
 import http.client
 import http.server
 import importlib.util
@@ -514,6 +516,14 @@ def first_changed(token):
     return "%s.%s%s" % (end, "A" if signature[0] != "A" else "B", signature[1:])
 
 
+def cookie_value(key, host, end):
+    """The router's cookie for a host until end, as preview-router.js's open()
+    makes it: <end>.<HMAC-SHA256 over "cookie\n<host>\n<end">, base64url
+    without padding. Never the URL's token."""
+    signature = hmac.new(key.encode(), ("cookie\n%s\n%d" % (host, end)).encode(), hashlib.sha256).digest()
+    return "%d.%s" % (end, base64.urlsafe_b64encode(signature).decode().rstrip("="))
+
+
 def njs_request(host, args=None, cookie=None):
     return ("request(%s, %s, %s)" % (json.dumps(host), json.dumps(args or {}),
                                     "undefined" if cookie is None else json.dumps(cookie)))
@@ -535,6 +545,9 @@ class RouterScriptTests(unittest.TestCase):
 
     def token(self, end, host=None, key=SIGNING_KEY):
         return "%d.%s" % (end, self.preview.sign(key, host or self.HOST, end))
+
+    def cookie(self, end, host=None, key=SIGNING_KEY):
+        return cookie_value(key, host or self.HOST, end)
 
     def run_script(self, body, key=SIGNING_KEY):
         harness = self.base / "harness.js"
@@ -560,6 +573,17 @@ var results = [];
         body = "".join("results.push(preview.sign(%s, %s, %s));\n" % (json.dumps(key), json.dumps(host), json.dumps(end))
                        for key, host, end, _ in SIGNATURES)
         self.assertEqual(self.run_script(body), [entry[3] for entry in SIGNATURES])
+
+    def test_the_cookie_is_signed_apart_from_the_url(self):
+        cases = [(SIGNING_KEY, self.HOST, 1800000000), (SIGNING_KEY, "sample-13.preview.example.invalid", 1800000000),
+                 ("another-signing-key-0123456789abcdefgh", self.HOST, 1700000123)]
+        body = "".join("results.push(preview.signCookie(%s, %s, %s));\n" % (json.dumps(key), json.dumps(host), json.dumps(str(end)))
+                       for key, host, end in cases)
+        made = self.run_script(body)
+        self.assertEqual(["%d.%s" % (end, signature) for (_, _, end), signature in zip(cases, made)],
+                         [cookie_value(*case) for case in cases])
+        for (key, host, end), signature in zip(cases, made):
+            self.assertNotEqual(signature, self.preview.sign(key, host, end), "the cookie would be the URL's token")
 
     def test_open_turns_a_valid_token_into_the_cookie(self):
         now = int(time.time())
@@ -589,7 +613,8 @@ var results = [];
                     cookie = headers.get("Set-Cookie", [])
                     self.assertEqual(len(cookie), 1)
                     attributes = [part.strip() for part in cookie[0].split(";")]
-                    self.assertEqual(attributes[0], "__Host-preview=" + good)
+                    self.assertEqual(attributes[0], "__Host-preview=" + self.cookie(now + 3600))
+                    self.assertNotIn(good[good.index(".") + 1:], cookie[0], "the URL's token became the cookie")
                     self.assertEqual(set(attributes[1:]) - {a for a in attributes[1:] if a.startswith("Max-Age=")},
                                      {"Path=/", "Secure", "HttpOnly", "SameSite=Lax"})
                     age = int(next(a for a in attributes if a.startswith("Max-Age="))[len("Max-Age="):])
@@ -602,14 +627,15 @@ var results = [];
 
     def test_every_other_path_needs_the_cookie_of_this_host(self):
         now = int(time.time())
-        good = self.token(now + 3600)
+        good = self.cookie(now + 3600)
         cases = [
             ("no cookie", njs_request(self.HOST), 403),
             ("the cookie", njs_request(self.HOST, cookie="__Host-preview=" + good), 204),
             ("the cookie among others", njs_request(self.HOST, cookie="a=1; __Host-preview=%s; b=2" % good), 204),
-            ("another host's cookie", njs_request(self.HOST, cookie="__Host-preview=" + self.token(
+            ("the URL's token as the cookie", njs_request(self.HOST, cookie="__Host-preview=" + self.token(now + 3600)), 403),
+            ("another host's cookie", njs_request(self.HOST, cookie="__Host-preview=" + self.cookie(
                 now + 3600, "sample-13.preview.example.invalid")), 403),
-            ("an ended cookie", njs_request(self.HOST, cookie="__Host-preview=" + self.token(now - 1)), 403),
+            ("an ended cookie", njs_request(self.HOST, cookie="__Host-preview=" + self.cookie(now - 1)), 403),
             ("a cookie whose signature's first character changed",
              njs_request(self.HOST, cookie="__Host-preview=" + first_changed(good)), 403),
             ("two cookies of the name", njs_request(self.HOST, cookie="__Host-preview=%s; __Host-preview=x" % good), 403),
@@ -626,8 +652,9 @@ var results = [];
         for key in (None, "", "short-key"):
             with self.subTest(key=key):
                 token = self.token(now + 3600, key=key or "x")
+                cookie = self.cookie(now + 3600, key=key or "x")
                 body = ("var a = %s; preview.open(a); var b = %s; preview.check(b); results.push([a.status, b.status]);"
-                        % (njs_request(self.HOST, {"t": token}), njs_request(self.HOST, cookie="__Host-preview=" + token)))
+                        % (njs_request(self.HOST, {"t": token}), njs_request(self.HOST, cookie="__Host-preview=" + cookie)))
                 self.assertEqual(self.run_script(body, key=key), [[403, 403]])
 
     def test_the_application_never_sees_or_sets_the_router_cookie(self):
@@ -798,6 +825,18 @@ class RelayTemplateTests(unittest.TestCase):
         self.assertIn("add_header Content-Security-Policy $relay_csp always;", self.config)
         self.assertIn("""map $relay_label $relay_csp { default ""; 1 "connect-src 'self'"; }""", self.config)
 
+    def test_the_relay_asks_for_the_cookie_alone(self):
+        location = self.relay_location()
+        self.assertIn("auth_basic off;", location, "a page's own Authorization would fail the password")
+        self.assertIn("auth_request /_preview/check;", location, "the signed URL's cookie stays required")
+        server = self.config[self.config.index("server_name *.<preview-domain>;"):]
+        self.assertEqual(server.count("auth_basic off;"), 3, "the two pages and the relay, nothing else")
+        self.assertNotIn("auth_basic off;", server[server.index("    location / {"):])
+        self.assertNotIn("satisfy any", self.config)
+        bare = without_relay(self.config)
+        self.assertEqual(bare[bare.index("server_name *.<preview-domain>;"):].count("auth_basic off;"), 2,
+                         "without the relay, the password guards every path but the router's own pages")
+
     def test_the_key_is_the_router_s_alone(self):
         self.assertIn("env PREVIEW_RELAY_KEY;", self.config)
         self.assertIn("js_set $relay_key preview.relayKey;", self.config)
@@ -960,7 +999,7 @@ class RelayNginxTests(unittest.TestCase):
         if password:
             sent["Authorization"] = "Basic " + base64.b64encode(("requester:" + self.PASSWORD).encode()).decode()
         if cookie:
-            sent["Cookie"] = "__Host-preview=%s; app=1" % self.token(host)
+            sent["Cookie"] = "__Host-preview=%s; app=1" % cookie_value(SIGNING_KEY, host, int(time.time()) + 3600)
         sent.update(headers or {})
         for name, value in sent.items():
             connection.putheader(name, value)
@@ -978,10 +1017,13 @@ class RelayNginxTests(unittest.TestCase):
 
     def test_sign_in_keeps_the_public_origin_behind_tls_termination(self):
         self.start()
-        code, _, _, headers = self.ask("GET", "/_preview/open?t=" + self.token(self.HOST), cookie=False)
+        token = self.token(self.HOST)
+        code, _, _, headers = self.ask("GET", "/_preview/open?t=" + token, cookie=False)
         self.assertEqual(code, 302)
         self.assertEqual(headers["location"], "/", "the internal HTTP listener must not become the browser's destination")
         cookie = headers["set-cookie"].split(";", 1)[0]
+        self.assertTrue(cookie.startswith("__Host-preview="), cookie)
+        self.assertNotIn(token[token.index(".") + 1:], cookie, "the URL's token became the cookie")
         code, _, body, _ = self.ask("GET", headers["location"], cookie=False, headers={"Cookie": cookie})
         self.assertEqual(code, 200, body)
         self.assertEqual(json.loads(body)["from"], "pod")
@@ -1008,6 +1050,80 @@ class RelayNginxTests(unittest.TestCase):
             self.assertIn(line, written)
         for word in ("/_relay/api", "owner=", "page=", RELAY_KEY, self.PASSWORD):
             self.assertNotIn(word, written)
+
+    def test_the_relay_asks_for_the_cookie_and_not_the_password(self):
+        """A page's own code may write Authorization (a token of its own): the
+        relay's paths need the signed URL's cookie alone, and the pages and
+        the signed URL still need the password."""
+        self.start()
+        for headers in (None, {"Authorization": "Bearer page-token"}):
+            with self.subTest(headers=headers):
+                code, kind, body, _ = self.ask("GET", "/api/items/7", password=False, headers=headers)
+                self.assertEqual((code, kind), (200, "application/json"), body)
+                self.assertEqual(json.loads(body)["from"], "api")
+                received = self.api.received[-1]["headers"]
+                self.assertNotIn("authorization", received, "the page's Authorization reached the API")
+                self.assertEqual(received.get("x-example-key"), RELAY_KEY)
+        sent = len(self.api.received)
+        self.refused(self.ask("GET", "/api/items/7", cookie=False), COOKIE_SENTENCE)
+        self.refused(self.ask("GET", "/api/items/7", password=False, cookie=False), COOKIE_SENTENCE)
+        self.refused(self.ask("GET", "/api/items/7", password=False, cookie=False,
+                              headers={"Authorization": "Bearer page-token"}), COOKIE_SENTENCE)
+        # Whoever reads the URL can send its token as the cookie: refused.
+        token = "__Host-preview=" + self.token(self.HOST)
+        for password in (False, True):
+            with self.subTest(token_as_cookie_with_password=password):
+                self.refused(self.ask("GET", "/api/items/7", password=password, cookie=False, headers={"Cookie": token}),
+                             COOKIE_SENTENCE)
+        self.assertEqual(self.ask("GET", "/index.html", cookie=False, headers={"Cookie": token})[0], 403)
+        self.assertEqual(len(self.api.received), sent, "a request without the cookie reached the API")
+        for headers in (None, {"Authorization": "Bearer page-token"}):
+            with self.subTest(page=headers):
+                self.assertEqual(self.ask("GET", "/index.html", password=False, headers=headers)[0], 401)
+        self.assertEqual(self.ask("GET", "/_preview/open?t=" + self.token(self.HOST), password=False, cookie=False)[0], 401)
+        self.assertEqual(self.ask("GET", "/api/items/7", host="sample-stg-example-12.preview.example.invalid",
+                                  password=False)[0], 401, "a label that is not relayed keeps the password")
+        # The cookie /_preview/open returned, alone, reads the relayed API.
+        code, _, _, headers = self.ask("GET", "/_preview/open?t=" + self.token(self.HOST), cookie=False)
+        self.assertEqual(code, 302)
+        opened = headers["set-cookie"].split(";", 1)[0]
+        code, kind, body, _ = self.ask("GET", "/api/items/7", password=False, cookie=False, headers={"Cookie": opened})
+        self.assertEqual((code, kind), (200, "application/json"), body)
+        self.assertEqual(self.pod.received, [])
+        self.assertNotIn("page-token", self.access_log())
+
+    def test_only_this_preview_s_live_cookie_opens_the_relay(self):
+        """Without the password the cookie is the relay's only guard: an ended
+        cookie, another host's, one signed wrongly or with another key, one of
+        another shape, the URL's token and two of the name are refused, with
+        or without the password, and nothing reaches the API."""
+        self.start()
+        now = int(time.time())
+        good = cookie_value(SIGNING_KEY, self.HOST, now + 3600)
+        refused = (
+            ("an ended cookie", cookie_value(SIGNING_KEY, self.HOST, now - 1)),
+            ("another relayed host's cookie", cookie_value(SIGNING_KEY, "sample-example-13.preview.example.invalid", now + 3600)),
+            ("a changed signature", first_changed(good)),
+            ("another key", cookie_value("another-signing-key-0123456789abcdefgh", self.HOST, now + 3600)),
+            ("padding", good + "="),
+            ("an end with a leading zero", "0" + good),
+            ("no end", good[good.index("."):]),
+            ("the URL's token", self.token(self.HOST)),
+        )
+        for label, value in refused:
+            for password in (False, True):
+                with self.subTest(label, password=password):
+                    self.refused(self.ask("GET", "/api/items/7", password=password, cookie=False,
+                                          headers={"Cookie": "__Host-preview=" + value}), COOKIE_SENTENCE)
+        for password in (False, True):
+            with self.subTest("two cookies of the name", password=password):
+                self.refused(self.ask("GET", "/api/items/7", password=password, cookie=False,
+                                      headers={"Cookie": "__Host-preview=%s; __Host-preview=%s" % (good, good)}),
+                             COOKIE_SENTENCE)
+        self.assertEqual(self.api.received, [])
+        # The control: the same request with this preview's cookie goes through.
+        code, _, body, _ = self.ask("GET", "/api/items/7", password=False, cookie=False, headers={"Cookie": "__Host-preview=" + good})
+        self.assertEqual(code, 200, body)
 
     def test_what_is_not_allowed_is_refused_before_anything_is_sent(self):
         self.start()
@@ -1144,7 +1260,7 @@ class RelayNginxTests(unittest.TestCase):
         self.start()
         self.refused(self.ask("GET", "/api/items/7", cookie=False), COOKIE_SENTENCE)
         self.refused(self.ask("GET", "/api/other", password=False, cookie=False), REFUSED_SENTENCE)
-        self.assertEqual(self.ask("GET", "/api/items/7", password=False)[0], 401)
+        self.refused(self.ask("GET", "/api/items/7", password=False, cookie=False), COOKIE_SENTENCE)
         code, kind, body, _ = self.ask("GET", "/api/status/401")
         self.assertEqual((code, kind, json.loads(body)["from"]), (401, "application/json", "api"))
         self.assertEqual(self.ask("GET", "/api/status/503")[:2], (503, "application/json"))
@@ -1189,6 +1305,31 @@ class RelayNginxTests(unittest.TestCase):
         self.assertEqual((config.count(needs), config.count(empty)), (1, 1))
         self.start(config.replace(needs, "").replace(empty, empty + needs))
         self.assertEqual(self.ask("GET", "/api/projects/3/items")[0], 200)
+        # The pages keep the password: auth_basic off in the location / or on
+        # the server lets a page through without it.
+        page_off = config.replace("    location / {\n", "    location / {\n      auth_basic off;\n")
+        server_off = config.replace('    auth_basic "preview";\n', "    auth_basic off;\n")
+        self.assertEqual((config.count("    location / {\n"), config.count('    auth_basic "preview";\n')), (1, 1))
+        for name, changed in (("location /", page_off), ("server", server_off)):
+            with self.subTest(auth_basic_off_in=name):
+                self.start(changed)
+                self.assertEqual(self.ask("GET", "/index.html", password=False)[0], 200)
+        # Without the relay's auth_request, a request with the password and
+        # no cookie reaches the API.
+        start = config.index("    location = /_relay/api {")
+        check = "      auth_request /_preview/check;\n"
+        at = config.index(check, start)
+        self.assertLess(at, config.index("    location / {", start))
+        self.start(config[:at] + config[at + len(check):])
+        code, _, body, _ = self.ask("GET", "/api/items/7", cookie=False)
+        self.assertEqual(code, 200, body)
+        # Without the relay's "auth_basic off;", a page's own Authorization,
+        # or none, answers 401 on the relay's paths.
+        off = "      auth_basic off;\n"
+        self.assertEqual(config.count(off), 1)
+        self.start(config.replace(off, ""))
+        self.assertEqual(self.ask("GET", "/api/items/7", password=False, headers={"Authorization": "Bearer page-token"})[0], 401)
+        self.assertEqual(self.ask("GET", "/api/items/7", password=False)[0], 401)
 
 
 if __name__ == "__main__":

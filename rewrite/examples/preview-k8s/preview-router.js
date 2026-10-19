@@ -3,10 +3,13 @@
 //   js_import preview from preview-router.js;
 // and calls:
 //   open           /_preview/open?t=<end>.<signature>: after the password
-//                  check, a valid token becomes the cookie __Host-preview and
-//                  a 302 to /; anything else is 403.
+//                  check, a valid token makes the cookie __Host-preview and
+//                  a 302 to /; anything else is 403. The cookie's value is
+//                  <end>.<the cookie's own signature>, never the URL's token:
+//                  whoever reads the URL still needs the password to hold one.
 //   check          the auth_request of every other path: 204 when the cookie
-//                  holds a valid token for this host, 403 otherwise.
+//                  holds a valid cookie value for this host, 403 otherwise
+//                  (the URL's token sent as the cookie included).
 //   otherCookies   the Cookie header without this router's cookie, for the
 //                  application: it never sees the token.
 //   filterCookies  removes from the application's answer every Set-Cookie of
@@ -39,6 +42,12 @@ function sign(secret, host, end) {
     return crypto.createHmac('sha256', secret).update(host + '\n' + end).digest('base64url');
 }
 
+// The cookie's own signature: the same, over "cookie\n<host>\n<end>". Only
+// open() makes it, after the password and a valid token.
+function signCookie(secret, host, end) {
+    return crypto.createHmac('sha256', secret).update('cookie\n' + host + '\n' + end).digest('base64url');
+}
+
 // Compares two strings without stopping at the first difference.
 function same(a, b) {
     if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) {
@@ -51,21 +60,31 @@ function same(a, b) {
     return difference === 0;
 }
 
-// The end of a token that is valid for this host now, or 0. The signature is
-// made again from the host the request names ($host: lowercase, no port)
-// and the end as written, then compared; only then is the end read as a
-// number.
-function valid(token, host, now) {
+// The end of a value that is valid for this host now, or 0. The signature
+// is made again (by signer) from the host the request names ($host:
+// lowercase, no port) and the end as written, then compared; only then is
+// the end read as a number.
+function checked(signer, value, host, now) {
     var secret = key();
-    if (!secret || typeof token !== 'string' || typeof host !== 'string' || !host) {
+    if (!secret || typeof value !== 'string' || typeof host !== 'string' || !host) {
         return 0;
     }
-    var parts = TOKEN.exec(token);
-    if (!parts || !same(sign(secret, host, parts[1]), parts[2])) {
+    var parts = TOKEN.exec(value);
+    if (!parts || !same(signer(secret, host, parts[1]), parts[2])) {
         return 0;
     }
     var end = Number(parts[1]);
     return end > now ? end : 0;
+}
+
+// A URL's token.
+function valid(token, host, now) {
+    return checked(sign, token, host, now);
+}
+
+// A cookie's value.
+function validCookie(value, host, now) {
+    return checked(signCookie, value, host, now);
 }
 
 function now() {
@@ -100,7 +119,8 @@ function open(r) {
         r.return(403);
         return;
     }
-    r.headersOut['Set-Cookie'] = [COOKIE + '=' + token + '; Path=/; Max-Age=' + (end - moment)
+    var value = end + '.' + signCookie(key(), r.variables.host, String(end));
+    r.headersOut['Set-Cookie'] = [COOKIE + '=' + value + '; Path=/; Max-Age=' + (end - moment)
         + '; Secure; HttpOnly; SameSite=Lax'];
     r.headersOut['Referrer-Policy'] = 'no-referrer';
     r.headersOut['Cache-Control'] = 'no-store';
@@ -108,7 +128,7 @@ function open(r) {
 }
 
 function check(r) {
-    r.return(valid(cookieToken(r), r.variables.host, now()) ? 204 : 403);
+    r.return(validCookie(cookieToken(r), r.variables.host, now()) ? 204 : 403);
 }
 
 function otherCookies(r) {
@@ -160,4 +180,4 @@ function relayKey(r) {
     return process.env.PREVIEW_RELAY_KEY || '';
 }
 
-export default {open, check, otherCookies, filterCookies, relayKey, sign, valid, same};
+export default {open, check, otherCookies, filterCookies, relayKey, sign, signCookie, valid, validCookie, same};
