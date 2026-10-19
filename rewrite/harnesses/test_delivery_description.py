@@ -1,5 +1,7 @@
 """Full explanation transport through real Git and the local service fixture."""
 import json
+import subprocess
+import sys
 import unittest
 
 import test_adversarial_review as review_fixture
@@ -85,6 +87,16 @@ class DescriptionTests(unittest.TestCase):
                 self.assertIn(reason, result.stderr)
                 self.assertEqual(self.fixture.state["pulls"], [])
                 self.assertNotIn("refs/heads/ticket/TICKET-41", self.fixture.remote_branches())
+
+    def test_unclosed_summary_is_recorded_absent_without_publishing_private_notes(self):
+        self.explain("## Summary\nVerified\n\x60\x60\x60\ncode\n## Private\nprivate notes")
+        result = self.deliver(PR_DESCRIPTION_SECTION="Summary")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.fixture.receipt()["description_section_absent"])
+        self.assertIn("section was absent or empty", result.stdout)
+        body = self.fixture.state["pulls"][0]["body"]
+        self.assertNotIn("private notes", body)
+        self.assertNotIn("Verified", body)
 
     def test_next_round_updates_the_same_pull_request_without_shortening(self):
         self.explain("First explanation\n")
@@ -251,16 +263,36 @@ class DescriptionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith(text))
 
-    def test_empty_or_failed_report_goes_back_without_publishing(self):
-        for history in (b'{"history":[]}',
-                        json.dumps({"history": [{"role": "work", "speaker": "writer",
-                                                "output": "", "error": "process failed"}]}).encode()):
-            with self.subTest(history=history):
-                self.history.write_bytes(history)
-                result = self.deliver()
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(self.fixture.state["pulls"], [])
-                self.assertNotIn("refs/heads/ticket/TICKET-41", self.fixture.remote_branches())
+    def test_empty_full_report_goes_back_without_publishing(self):
+        self.explain("")
+        result = self.deliver()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.fixture.state["pulls"], [])
+        self.assertNotIn("refs/heads/ticket/TICKET-41", self.fixture.remote_branches())
+
+    def test_description_setting_holds_before_staging_or_publication(self):
+        self.explain("Explanation")
+        before = self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout
+        for settings in ({"PR_DESCRIPTION_SECTION": "Summary"},
+                         {"PR_DESCRIPTION_ROLE": "misspelled-role"},
+                         {"PR_DESCRIPTION_ROLE": "work", "PR_DESCRIPTION_SECTION": " "}):
+            with self.subTest(settings=settings):
+                env = self.fixture.environment(TASK_HISTORY=str(self.history), DELIVERY_MERGE_METHOD="none", **settings)
+                with subprocess.Popen([sys.executable, "-B", str(delivery_fixture.SCRIPT)], stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                      cwd=self.fixture.workspace, env=env) as process:
+                    try:
+                        output, errors = process.communicate(timeout=1)
+                        self.fail("Setting returned instead of holding: " + output + errors)
+                    except subprocess.TimeoutExpired:
+                        process.terminate()
+                        output, errors = process.communicate(timeout=5)
+                self.assertIn("held before staging", output + errors)
+                self.assertIn("fix the setting and restart", output + errors)
+                self.assertEqual(self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout, before)
+                self.assertEqual(self.fixture.git(self.fixture.workspace, "diff", "--cached", "--name-only").stdout, "")
+                self.assertEqual(self.fixture.state["requests"], [])
+                self.assertEqual(self.fixture.receipt(), {})
 
     def test_review_uses_the_delivered_bodys_byte_limit(self):
         self.explain("変更と検証の説明。")

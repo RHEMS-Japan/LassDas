@@ -79,7 +79,7 @@ def markdown_section(text, title):
     """Select one ATX/Setext section; fenced examples are never headings."""
     normalize = lambda value: value.strip().rstrip(":：").strip().casefold()
     lines = text.splitlines(keepends=True)
-    start, level, fence = None, None, None
+    start, level, fence, paragraph = None, None, None, None
     i = 0
     while i < len(lines):
         line = lines[i].rstrip("\r\n")
@@ -89,42 +89,52 @@ def markdown_section(text, title):
             i += 1
             continue
         opening = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-        if opening:
+        if opening and not (opening[1][0] == "`" and "`" in line[opening.end():]):
             fence = opening[1]
+            paragraph = None
             i += 1
             continue
         heading = re.match(r"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$", line)
-        size, label, consumed = 0, "", 1
+        underline = re.fullmatch(r" {0,3}(=+|-+)[ \t]*", line)
+        size, label, beginning = 0, "", i
         if heading:
             size = len(heading[1])
             label = re.sub(r"[ \t]+#+[ \t]*$", "", heading[2])
-        elif line.strip() and not line.startswith(("    ", "\t")) and i + 1 < len(lines):
-            underline = re.fullmatch(r" {0,3}(=+|-+)[ \t]*", lines[i + 1].rstrip("\r\n"))
-            if underline:
-                size, label, consumed = (1 if underline[1][0] == "=" else 2), line, 2
+        elif underline and paragraph is not None:
+            size = 1 if underline[1][0] == "=" else 2
+            beginning = paragraph
+            label = " ".join(part.strip() for part in lines[paragraph:i])
         if size:
             if start is not None and size <= level:
-                return "".join(lines[start:i]).strip()
+                return "".join(lines[start:beginning]).strip("\r\n")
             if start is None and normalize(label) == normalize(title):
-                start, level = i + consumed, size
-        i += consumed
-    return "".join(lines[start:]).strip() if start is not None else None
+                start, level = i + 1, size
+            paragraph = None
+        elif (not line.strip() or underline or line.startswith(("    ", "\t"))
+              or re.match(r"^ {0,3}(?:[-*+]\s|\d+[.)]\s|[>|<])", line)):
+            paragraph = None
+        elif paragraph is None:
+            paragraph = i
+        i += 1
+    return "".join(lines[start:]).strip("\r\n") if start is not None and fence is None else None
 
 
 def description_report():
     """The chosen role's latest reports, from this run's existing checkpoint."""
     role = os.environ.get("PR_DESCRIPTION_ROLE", "")
     section = os.environ.get("PR_DESCRIPTION_SECTION", "").strip()
+    if "PR_DESCRIPTION_SECTION" in os.environ and not section:
+        raise DescriptionSettingError("PR_DESCRIPTION_SECTION must be nonblank when set")
     if section and not role:
         raise DescriptionSettingError("PR_DESCRIPTION_SECTION requires PR_DESCRIPTION_ROLE")
     if not role:
         return "", "", False
     path = os.environ.get("TASK_HISTORY")
     if not path:
-        raise DescriptionSettingError("TASK_HISTORY is unset; use a runtime that supplies it to review and delivery")
+        raise DescriptionSettingError("TASK_HISTORY is unset; use a runtime that supplies it to this command")
     issue = os.environ.get("TASK_ISSUE")
     if not issue:
-        raise DescriptionSettingError("TASK_ISSUE is unset; use the assigned request in both review and delivery")
+        raise DescriptionSettingError("TASK_ISSUE is unset; supply the assigned request to this command")
     prefix = default_pull_request_body(issue, setting("DELIVERY_MERGE_METHOD", "merge")) + "\n\n"
     try:
         description_size(prefix + "x", "The required introduction and a one-byte report")
@@ -140,7 +150,7 @@ def description_report():
         history = json.loads(raw.decode("utf-8"))["history"]
         if not isinstance(history, list):
             raise ValueError("checkpoint history is not a list")
-        selected = []
+        selected, seen_role = [], False
         for record in reversed(history):
             name, speaker = record["role"], record["speaker"]
             if not isinstance(name, str) or not isinstance(speaker, str):
@@ -148,6 +158,7 @@ def description_report():
             if speaker in {"requester", "runtime"}:
                 continue
             if name == role:
+                seen_role = True
                 if section and record.get("error"):
                     continue
                 text = record.get("output", "")
@@ -156,7 +167,7 @@ def description_report():
                 selected.append(text)
                 if section:
                     break
-            elif selected:
+            elif seen_role:
                 break
         text = "\n\n".join(reversed(selected))
         text.encode("utf-8")
@@ -169,13 +180,15 @@ def description_report():
             raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES cannot fit the explanation omission notice: " + str(error)) from error
         return "", note, False
     if not selected:
+        if section and seen_role:
+            return "", "", True
         raise DescriptionSettingError("PR_DESCRIPTION_ROLE=%r has no usable recorded report; choose a role that has "
                                       "already reported before this command, not a process name" % role)
     if not section and not text.strip():
         raise DeliveryError("The latest report of role %s is empty; return to the worker for an explanation" % role)
     if section:
         text = markdown_section(text, section)
-        if not text:
+        if text is None or not text.strip():
             return "", "", True
         text = "## " + section + "\n\n" + text
     label = "section %r of role %s" % (section, role) if section else "latest report of role %s" % role

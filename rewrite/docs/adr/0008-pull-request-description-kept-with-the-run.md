@@ -15,6 +15,11 @@ consumer repository. The earlier option that took the description from a
 document in the repository, `DELIVERY_PR_BODY_FILE`, was removed with no
 compatibility path.
 
+Section selection is delivery-only. It does not reach back across other roles
+to a previous attempt, and an unclosed code fence is treated as an absent
+section. Delivery checks description settings before staging; a setting only
+the operator can correct holds the process instead of requesting model rework.
+
 ## Alternatives compared
 
 A document in the consumer repository, committed with the change and used as

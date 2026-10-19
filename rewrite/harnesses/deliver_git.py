@@ -463,15 +463,25 @@ def pull_request_body(issue, method):
     text, note, absent = support.description_report()
     if not os.environ.get("PR_DESCRIPTION_ROLE"):
         return body, note, absent
+    section = os.environ.get("PR_DESCRIPTION_SECTION", "").strip()
+    source = ("section %r of role %s" % (section, os.environ["PR_DESCRIPTION_ROLE"]) if section else
+              "report of role %s" % os.environ["PR_DESCRIPTION_ROLE"])
+    parts = ((body, "introduction"), (text, source), (note, "omission notice"))
     if text or note:
         body += "\n\n" + (text or note)
     try:
         refuse_forbidden_text([(None, body)])
     except DeliveryError as error:
-        label = "the pull request description"
-        if os.environ.get("PR_DESCRIPTION_SECTION"):
-            label += " (section %r of role %s)" % (os.environ["PR_DESCRIPTION_SECTION"], os.environ.get("PR_DESCRIPTION_ROLE", ""))
-        raise DeliveryError(str(error).replace("the staged change", label)) from error
+        label = "complete description"
+        for part, origin in parts:
+            if not part:
+                continue
+            try:
+                refuse_forbidden_text([(None, part)])
+            except DeliveryError:
+                label = origin
+                break
+        raise DeliveryError(str(error).replace("the staged change", "the pull request description (" + label + ")")) from error
     return body, note, absent
 
 
@@ -894,6 +904,18 @@ def deliver(arguments):
     url = support.remote_url(owner, name)
     if dry:
         return check_only(workspace, owner, name, base, branch, method, url, allowed, unchanged, branch_only)
+    if not branch_only:
+        try:
+            support.description_report()
+        except support.DescriptionSettingError as error:
+            print("Delivery held before staging: %s. Nothing was committed or published by this attempt; "
+                  "fix the setting and restart the engine." % support.scrub(str(error)), flush=True)
+            while True:
+                time.sleep(900)
+                print("Delivery still held at %s; the setting error is above." % support.timestamp(), flush=True)
+        except DeliveryError:
+            # Content problems follow the normal delivery failure route below.
+            pass
     try:
         if branch_only:
             return publish_only(workspace, issue, owner, name, base, branch, url, allowed, unchanged)
