@@ -182,6 +182,11 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
    The router starts without that Secret too (its reference is optional);
    the relay then answers 503 and sends nothing.
 
+   For disposable APIs, also create `preview-relay-full` (key `key`) from a
+   new disposable value, never from the read-only key or a real API key.
+   The optional full relay answers 503 until that Secret exists. See
+   [Relaying a disposable API](#relaying-a-disposable-api).
+
    Otherwise delete every block between `relay: begin` and `relay: end` in
    the copy of [router.yaml.example](router.yaml.example): what is left is
    the router without a relay.
@@ -252,6 +257,11 @@ once, a lifetime of 72 hours, 3 GiB of memory in all.
 | `<relay-service>` | router, relay | The API's Service as `<name>.<namespace>`, answering on port 80, for example `api.example-dev`. |
 | `<relay-header>` | router, relay | The header the API reads the key from, for example `X-Example-Key`. |
 | `<relay-cleared-header>` | router, relay | A header a browser can send that the API acts on (one that changes whom a request acts as, for example `X-Act-As`); the relay sends it empty. One line for each, or delete the line. |
+| `<full-relay-label-pattern>` | router, disposable API relay | Whole labels for previews with their own API, disjoint from the read-only relay, for example `samplefull-example-[0-9]+`. |
+| `<full-relay-path-prefix>` | router, disposable API relay | Normalized API path prefix, for example `/api/`. |
+| `<full-relay-refused-path>` | router, disposable API relay | Refused path prefix pattern, for example `/api/auth/`. |
+| `<full-relay-header>` | router, disposable API relay | API key header, for example `X-Example-Key`. |
+| `<full-relay-cleared-header>` | router, disposable API relay | A browser header the API acts on, for example `X-Act-As`. Repeat this line for each header to remove. |
 | `<region>` | step 1 only | The region of the load balancer. |
 | `<api-server>` | `PREVIEW_K8S_SERVER` | The address of the cluster's API server. The engine's Pod has to reach it. |
 
@@ -471,7 +481,8 @@ one. Nothing of the checkout is read through one:
   inside it are opened the same way. The directory being a link, or a link
   on its way, ends `up`; a link inside is packed as a link.
 - In the Pod, a link is unpacked as a link. Following it there finds only
-  the preview Pod's own files, which hold no credential.
+  the preview Pod's own files. These can hold private inputs and disposable
+  credentials when optional settings supply them; never real credentials.
 
 ## The shape the cluster accepts
 
@@ -766,7 +777,7 @@ goes into the Secret `preview-relay` (key `key`), which the router reads as
 `PREVIEW_RELAY_KEY` when it starts: it never reaches a preview's Pod, the
 engine or the browser. The Service has to answer on port 80, the only port
 the router's egress allows in the Service range. To relay the API of a
-second name, copy every block between the markers and give the copy's
+second read-only name, copy every non-full block between the markers and give the copy's
 variables, location and key other names.
 
 The example the tests run, as its lines read once filled in:
@@ -808,6 +819,45 @@ check sees the relay's pieces taken out. That run was nginx 1.28.0 with
 njs 1.0.1 on macOS, and CI runs it with nginx 1.30.6 and njs 1.0.2 from
 nginx.org's packages; the router's image and the real Service are checked on
 the cluster (see [Checking a running preview](#checking-a-running-preview)).
+
+## Relaying a disposable API
+
+The optional `relay: begin full` blocks route an API prefix to that preview's
+own Service, never the read-only relay's Service. Remove all full blocks when
+unused; remove all relay blocks when neither mode is used. Without full
+blocks the old configuration is byte-identical. Fill the full-relay
+placeholders separately. Label patterns must not overlap.
+
+The router reads `PREVIEW_FULL_RELAY_KEY` from a separate optional Secret
+`preview-relay-full` (key `key`). Missing key means 503, never fallback to the
+read-only key. Cookie authentication still applies, including when a browser
+sends its own Authorization header. Every method except GET/HEAD requires
+an exact `Origin: https://<this-preview-host>`; absent, foreign or duplicate
+origins are refused. The refused path is checked after path normalization;
+paths containing characters outside `A-Za-z0-9/._~-` are also refused (for
+example `@`, `:`, `+` and `,`). Queries are not subject to that character rule.
+Authorization, Cookie and each configured `<full-relay-cleared-header>` are removed, the chosen
+API key is set, and upstream Set-Cookie is discarded. Both kinds of preview
+page carry `connect-src 'self'`; this does not stop exfiltration through
+images or navigation and does not make unreviewed code safe.
+
+The full relay ignores upstream `X-Accel-Redirect`, and its internal location
+checks the full label again. Request code cannot use that response header to
+select the read-only relay, nor can a page preview select the full relay.
+Refusal logs retain the normalized API path without its query. A missing
+cookie asks the reader to open the URL posted on the request.
+
+For the disposable API the router sets X-Preview-Relay to lowercase hex
+HMAC-SHA256(signing key, `relay:` + preview label), without a newline.
+The operator supplies the same derived value to the page proxy, which must
+reject a missing or different value with 403 and remove that header before
+forwarding to the API. It must expose only static files, not snapshots or
+logs. Direct API ingress must be blocked separately by the operator; this
+example does not change cluster rules. A bearer token is not an ingress rule.
+
+The local router tests exercise separate synthetic keys, cookie/Origin
+checks, a page POST refusal and a rejecting page-proxy stand-in. They do not
+prove cluster ingress isolation or a real application's authentication.
 
 ## Checking a running preview
 
@@ -889,6 +939,9 @@ fails its check with 403 and the requester gets the question in words.
 
 ## Limits
 
+- The disposable API key is shared by all full previews and reaches each
+  request's own API on every relayed call. Never put a real API key in
+  `preview-relay-full`; use a disposable value that grants no real access.
 - The checkout lives in the Pod's emptyDir. A Pod moved to another node (the
   node replaced, a spot node reclaimed) starts empty and never gets ready;
   the cleanup removes it, and the requester asks for the preview again. An
@@ -951,11 +1004,11 @@ fails its check with 403 and the requester gets the question in words.
   allowed path or query that the API does not check against the key.
 - The API's answers are served from the preview's host as they are: an API
   that answers with HTML has it shown there.
-- Nothing stops other Pods of the cluster from connecting to a preview: the
-  cluster's NetworkPolicy may not be enforced, and a preview holds no
-  credential to take.
+- Other Pods may connect to a preview unless the operator enforces ingress
+  isolation. Extra containers or private input files can hold sensitive
+  data; do not assume that a preview holds nothing worth reading.
 - `kubectl exec` can still run anything in a preview Pod; the policy cannot
-  shape it. Only the preview identity may, and the Pod holds nothing secret.
+  shape it. The preview identity can read everything carried into the Pod.
 - Not yet tried on a real cluster, only on a local API server and in the
   tests: that the chosen nginx image has the njs and auth_request modules,
   that the rules image loads the rules inside a Pod with its own user

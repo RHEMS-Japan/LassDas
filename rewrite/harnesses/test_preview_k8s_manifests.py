@@ -214,7 +214,7 @@ class ManifestTests(unittest.TestCase):
         router = (EXAMPLE / "router.yaml.example").read_text()
         config = router[router.index("  nginx.conf: |"):router.index("  ended.html: |")]
         formats = dict(re.findall(r"log_format (\S+) ((?:'[^']*'\s*)+);", config))
-        self.assertEqual(sorted(formats), ["preview", "preview_relay"])
+        self.assertEqual(sorted(formats), ["preview", "preview_full_relay", "preview_relay"])
         self.assertIn("$uri", formats["preview"])
         self.assertIn("$relay_path", formats["preview_relay"], "the relay's line names the path it decided on")
         for written in formats.values():
@@ -732,13 +732,15 @@ def router_config():
 def without_relay(text):
     """The text with every relay block deleted, as the README says to when no
     preview's page reads an API."""
-    return re.sub(r"(?ms)^[ \t]*# relay: begin.*?# relay: end\n", "", text)
+    return re.sub(r"(?ms)^[ \t]*# relay: begin[^\n]*\n.*?^[ \t]*# relay: end(?: full)?\n", "", text)
 
 
 def fill_relay(config, allowed=RELAY_ALLOWED, refused=RELAY_REFUSED, queries=RELAY_QUERIES,
-               id_query_paths=RELAY_ID_QUERY_PATHS, values=None):
+               id_query_paths=RELAY_ID_QUERY_PATHS, values=None, full=False):
     """The relay's placeholders filled: one line for each path and each query."""
     values = dict(RELAY_VALUES, **(values or {}))
+    if not full:
+        config = without_full_relay(config)
     lines = []
     for line in config.splitlines():
         if "<relay-id-query-path>" in line:
@@ -757,12 +759,25 @@ def fill_relay(config, allowed=RELAY_ALLOWED, refused=RELAY_REFUSED, queries=REL
     return "\n".join(lines) + "\n"
 
 
+def without_full_relay(text):
+    return re.sub(r"(?ms)^[ \t]*# relay: begin full.*?# relay: end full\n", "", text)
+
+
+def fill_full_relay(config):
+    return fill_relay(config, full=True, values={
+        "full-relay-label-pattern": "samplefull-example-[0-9]+",
+        "full-relay-path-prefix": "/api/",
+        "full-relay-refused-path": "/api/auth/",
+        "full-relay-cleared-header": "X-Act-As",
+        "full-relay-header": "X-Example-Key"})
+
+
 class RelayTemplateTests(unittest.TestCase):
     """The relay's place in router.yaml.example, read as text."""
 
     def setUp(self):
         self.router = (EXAMPLE / "router.yaml.example").read_text()
-        self.config = router_config()
+        self.config = without_full_relay(router_config())
 
     def relay_location(self):
         start = self.config.index("location = /_relay/api {")
@@ -778,6 +793,22 @@ class RelayTemplateTests(unittest.TestCase):
                      "secretKeyRef: { name: preview-router-signing, key: key }"):
             self.assertIn(kept, removed)
         self.assertEqual(self.router.count("# relay: begin"), self.router.count("# relay: end"))
+
+    def test_without_full_relay_the_existing_template_is_byte_identical(self):
+        self.assertEqual(hashlib.sha256(without_full_relay(self.router).encode()).hexdigest(),
+                         'd684c2bb4781746fb5df1fb6eecad2f47d574f4e018b0514f704ad0296642160')
+
+    def test_full_key_wiring_and_service_destination(self):
+        blocks = re.findall(r'(?ms)^ *# relay: begin full[^\n]*\n(.*?)^ *# relay: end full\n', self.router)
+        full = '\n'.join(blocks)
+        self.assertIn('env PREVIEW_FULL_RELAY_KEY;', full)
+        self.assertIn('- name: PREVIEW_FULL_RELAY_KEY\n              valueFrom:\n'
+                      '                secretKeyRef: { name: preview-relay-full, key: key, optional: true }', full)
+        self.assertNotIn('name: preview-relay,', full)
+        destination = 'http://pv-$preview_label.' + '<preview-namespace>' + '.svc.cluster.' + 'local'
+        self.assertIn('proxy_pass ' + destination + '$full_relay_uri;', full,
+                      'use the request Service on default port 80, never an API Service')
+        self.assertIn('proxy_set_header <full-relay-cleared-header> "";', full)
 
     def test_the_relay_decides_on_the_path_saved_before_the_rewrite(self):
         location = self.config[self.config.index("    location / {"):]
@@ -887,6 +918,9 @@ class StandIn(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json" if self.server.role == "api" else "text/html")
         self.send_header("Set-Cookie", "session=from-%s; Path=/" % self.server.role)
         self.send_header("Content-Length", str(len(body)))
+        redirect = getattr(self.server, "redirects", {}).get(self.path)
+        if redirect:
+            self.send_header("X-Accel-Redirect", redirect)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -927,8 +961,9 @@ class RelayNginxTests(unittest.TestCase):
     def setUp(self):
         self.api.received.clear()
         self.pod.received.clear()
+        self.pod.redirects = {}
 
-    def start(self, config=None, key=RELAY_KEY, api_port=None):
+    def start(self, config=None, key=RELAY_KEY, api_port=None, full_key=None):
         """nginx with this configuration (by default the filled example),
         on a free port; it is stopped when the test ends."""
         temporary = tempfile.TemporaryDirectory(prefix="preview-relay-")
@@ -962,6 +997,8 @@ class RelayNginxTests(unittest.TestCase):
         environment = {"PREVIEW_SIGNING_KEY": SIGNING_KEY}
         if key is not None:
             environment["PREVIEW_RELAY_KEY"] = key
+        if full_key is not None:
+            environment["PREVIEW_FULL_RELAY_KEY"] = full_key
         log = open(base / "nginx.stderr", "w")
         self.addCleanup(log.close)
         process = subprocess.Popen([NGINX, "-p", str(base), "-e", str(base / "error.log"), "-c",
@@ -1014,6 +1051,145 @@ class RelayNginxTests(unittest.TestCase):
         code, kind, body, _ = answer
         self.assertEqual((code, kind), (status, "application/json"), body)
         self.assertEqual(json.loads(body), {"error": sentence})
+
+    def test_full_relay_uses_only_its_own_key_and_host_bound_token(self):
+        self.start(config=fill_full_relay(router_config()), full_key="disposable-test-value")
+        host = "samplefull-example-12.preview.example.invalid"
+        answer = self.ask("POST", "/api/items", host=host, password=False,
+                          headers={"Origin": "https://" + host, "Authorization": "Bearer browser-value",
+                                   "X-Act-As": "untrusted", "X-Preview-Relay": "client-supplied"})
+        self.assertEqual(answer[0], 200, answer)
+        self.assertEqual(self.api.received, [], "the development API must receive nothing")
+        received = self.pod.received[-1]
+        self.assertEqual(received["method"], "POST")
+        self.assertEqual(received["target"], "/api/items")
+        self.assertEqual(received["headers"].get("x-example-key"), "disposable-test-value")
+        expected = hmac.new(SIGNING_KEY.encode(), b"relay:samplefull-example-12", hashlib.sha256).hexdigest()
+        self.assertEqual(received["headers"].get("x-preview-relay"), expected)
+        for name in ("authorization", "cookie", "x-act-as"):
+            self.assertNotIn(name, received["headers"])
+        self.assertNotIn(RELAY_KEY, str(received))
+        self.assertNotIn("set-cookie", answer[3])
+        self.assertEqual(answer[3].get("content-security-policy"), "connect-src 'self'")
+        self.assertEqual(self.ask("GET", "/", host=host)[3].get("content-security-policy"), "connect-src 'self'")
+
+    def test_full_relay_ignores_upstream_internal_redirect(self):
+        self.pod.redirects = {"/": "/api/items", "/api/items": "/_relay/api"}
+        self.start(config=fill_full_relay(router_config()), full_key="disposable-test-value")
+        for path in ("/", "/api/items"):
+            with self.subTest(path=path):
+                self.pod.received.clear()
+                answer = self.ask("GET", path, host="samplefull-example-12.preview.example.invalid")
+                self.assertEqual(self.api.received, [], "upstream must not redirect into the read-only relay")
+                self.assertEqual(answer[0], 200, answer)
+                self.assertEqual(json.loads(answer[2])["from"], "pod")
+                self.assertEqual(len(self.pod.received), 1)
+
+    def test_page_cannot_redirect_into_full_relay(self):
+        self.pod.redirects = {"/": "/_relay/full"}
+        self.start(config=fill_full_relay(router_config()), full_key="disposable-test-value")
+        self.assertEqual(self.ask("GET", "/")[0], 200)
+        self.assertEqual(self.api.received, [])
+        self.assertEqual(len(self.pod.received), 1, "page must never receive the full relay credential")
+        self.assertNotIn("x-example-key", self.pod.received[0]["headers"])
+
+    def test_full_internal_location_checks_label_even_without_redirect_filter(self):
+        self.pod.redirects = {"/": "/_relay/full"}
+        # Exercise the second guard independently; the first would mask it.
+        config = fill_full_relay(router_config()).replace("proxy_ignore_headers X-Accel-Redirect;", "")
+        self.start(config=config, full_key="disposable-test-value")
+        answer = self.ask("GET", "/")
+        for received in self.pod.received:
+            self.assertNotIn("x-example-key", received["headers"], "the page received the full relay key")
+        self.assertEqual(answer[0], 403)
+        self.assertEqual(len(self.pod.received), 1)
+        self.assertNotIn("x-example-key", self.pod.received[0]["headers"])
+        self.assertEqual(self.api.received, [])
+
+    def test_page_and_neighbour_labels_with_full_relay_present(self):
+        self.start(config=fill_full_relay(router_config()), full_key="disposable-test-value")
+        answer = self.ask("GET", "/api/items")
+        self.assertEqual(answer[0], 200)
+        self.assertEqual(self.api.received[-1]["headers"].get("x-example-key"), RELAY_KEY)
+        self.assertNotIn("disposable-test-value", str(self.api.received))
+        self.assertEqual(self.ask("POST", "/api/items")[0], 403)
+        self.assertEqual(len(self.api.received), 1)
+        self.assertEqual(self.pod.received, [])
+        for label in ("samplefull-example-12x", "xsamplefull-example-12", "samplefull-example-", "samplefull-example-12-3"):
+            with self.subTest(label=label):
+                answer = self.ask("GET", "/api/items", host=label + ".preview.example.invalid")
+                self.assertEqual(answer[0], 200)
+                self.assertNotIn("x-example-key", self.pod.received[-1]["headers"])
+                self.assertNotIn("x-preview-relay", self.pod.received[-1]["headers"])
+        self.assertEqual(len(self.api.received), 1)
+
+    def test_full_relay_path_refusals_keep_path_not_query_in_log(self):
+        self.start(config=fill_full_relay(router_config()), full_key="disposable-test-value")
+        host = "samplefull-example-12.preview.example.invalid"
+        for character in ("@", ":", "+", ","):
+            self.refused(self.ask("GET", "/api/a" + character + "b?private=value", host=host), REFUSED_SENTENCE)
+        self.refused(self.ask("GET", "/api/items?private=value", host=host, cookie=False), COOKIE_SENTENCE)
+        self.assertEqual(self.pod.received, [])
+        written = self.access_log()
+        self.assertIn('"GET /api/a+b HTTP/1.1" 403', written)
+        self.assertNotIn("private=", written)
+        self.assertNotIn("/_relay/full", written)
+
+    def test_full_relay_refuses_foreign_missing_origin_cookie_and_auth_path(self):
+        self.start(config=fill_full_relay(router_config()), full_key="disposable-test-value")
+        host = "samplefull-example-12.preview.example.invalid"
+        for headers in ({}, {"Origin": "null"}, {"Origin": "https://other.preview.example.invalid"},
+                        {"Origin": "https://" + host + ".invalid"},
+                        {"Origin": "https://" + host, "origin": "https://" + host}):
+            self.assertEqual(self.ask("POST", "/api/items", host=host, headers=headers)[0], 403)
+        self.assertEqual(self.ask("POST", "/api/items")[0], 403, "page remains read-only")
+        self.assertEqual(self.ask("GET", "/api/items", host=host, cookie=False)[0], 403)
+        self.assertEqual(self.ask("GET", "/api/auth/login", host=host)[0], 403)
+        self.assertEqual(self.pod.received, [])
+        self.assertEqual(self.api.received, [])
+
+    def test_full_relay_missing_key_never_falls_back_to_read_only_key(self):
+        self.start(config=fill_full_relay(router_config()))
+        self.assertEqual(self.ask("GET", "/api/items", host="samplefull-example-12.preview.example.invalid")[0], 503)
+        self.assertEqual(self.pod.received, [])
+        self.assertEqual(self.api.received, [])
+
+    def test_full_relay_page_proxy_refuses_wrong_token_and_strips_valid_one(self):
+        host = "samplefull-example-12.preview.example.invalid"
+        expected = hmac.new(SIGNING_KEY.encode(), b"relay:samplefull-example-12", hashlib.sha256).hexdigest()
+        with socket.socket() as probe:
+            probe.bind(("localhost", 0))
+            proxy_port = probe.getsockname()[1]
+        config = fill_full_relay(router_config()).replace(
+            "http://pv-$preview_label.<preview-namespace>.svc.cluster.local$full_relay_uri",
+            "http://%s:%d$full_relay_uri" % (socket.gethostbyname("localhost"), proxy_port))
+        page_proxy = '''
+  server {
+    listen localhost:%d;
+    location /api/ {
+      if ($http_x_preview_relay != "%s") { return 403; }
+      proxy_set_header X-Preview-Relay "";
+      proxy_pass http://localhost:%d;
+    }
+  }
+''' % (proxy_port, expected, self.api.server_address[1])
+        at = config.rfind("\n}")
+        config = config[:at] + page_proxy + config[at:]
+        # Literal localhost upstream: no resolver or cluster service is used.
+        self.start(config=config, full_key="disposable-test-value")
+        self.assertEqual(self.ask("POST", "/api/items", host=host,
+                                  headers={"Origin": "https://" + host})[0], 200)
+        self.assertNotIn("x-preview-relay", self.api.received[-1]["headers"])
+        self.assertEqual(self.api.received[-1]["headers"]["x-example-key"], "disposable-test-value")
+        self.api.received.clear()
+        router_port, self.port = self.port, proxy_port
+        try:
+            for token in ("", "wrong", expected + "x"):
+                self.assertEqual(self.ask("POST", "/api/items", host=host, password=False,
+                                          cookie=False, headers={"X-Preview-Relay": token})[0], 403)
+            self.assertEqual(self.api.received, [])
+        finally:
+            self.port = router_port
 
     def test_sign_in_keeps_the_public_origin_behind_tls_termination(self):
         self.start()
