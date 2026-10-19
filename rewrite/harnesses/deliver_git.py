@@ -460,16 +460,19 @@ def find_pull_request(owner, name, branch, base):
 def pull_request_body(issue, method):
     """Ordinary report text from the run, never committed into the target."""
     body = support.default_pull_request_body(issue, method)
+    text, note, absent = support.description_report()
     if not os.environ.get("PR_DESCRIPTION_ROLE"):
-        return body, ""
-    text, note = support.description_report()
+        return body, note, absent
     if text or note:
         body += "\n\n" + (text or note)
     try:
         refuse_forbidden_text([(None, body)])
     except DeliveryError as error:
-        raise DeliveryError(str(error).replace("the staged change", "the pull request description")) from error
-    return body, note
+        label = "the pull request description"
+        if os.environ.get("PR_DESCRIPTION_SECTION"):
+            label += " (section %r of role %s)" % (os.environ["PR_DESCRIPTION_SECTION"], os.environ.get("PR_DESCRIPTION_ROLE", ""))
+        raise DeliveryError(str(error).replace("the staged change", label)) from error
+    return body, note, absent
 
 
 class DescriptionNotSettled(DeliveryError):
@@ -478,7 +481,11 @@ class DescriptionNotSettled(DeliveryError):
 
 def delivery_description(workspace, commit, issue, method, receipt):
     try:
-        body, note = pull_request_body(issue, method)
+        body, note, absent = pull_request_body(issue, method)
+        if absent:
+            receipt["description_section_absent"] = True
+        else:
+            receipt.pop("description_section_absent", None)
         if note:
             receipt["description_omitted"] = note
         else:
@@ -710,6 +717,8 @@ def open_summary(receipt, pushed, committed):
 
 def description_summary(receipt):
     lines = [receipt["description_omitted"]] if receipt.get("description_omitted") else []
+    if receipt.get("description_section_absent"):
+        lines.append("The selected description section was absent or empty; only the introduction was used.")
     if not receipt.get("description_path"):
         return lines
     return lines + [("The service's different pull request description was retained without another replacement. "

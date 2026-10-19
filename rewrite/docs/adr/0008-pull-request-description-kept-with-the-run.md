@@ -4,7 +4,10 @@
 
 The explanation in a pull request comes from a configured role's report in the
 run's history (`PR_DESCRIPTION_ROLE`, read through the read-only `TASK_HISTORY`
-reference). The review receives it with the diff and must check it, and the
+reference). When review and delivery select the same pre-review role, review
+receives it with the diff and must check it. Alternatively delivery alone can
+select a later confirmation role's optional `PR_DESCRIPTION_SECTION`; this
+summary is published without the earlier code review checking it. In both setups
 delivery checks the whole description for `DELIVERY_FORBIDDEN_TEXT` and its
 credential before any publication. The generated text is kept in the delivery
 process's `TASK_HOME`, outside the checkout, and is never committed to the
@@ -19,8 +22,8 @@ the description. That was the removed option.
 
 ## Reason
 
-The review and the delivery check the explanation without it being committed,
-so committing it adds no check. A committed document would remain in the
+The configured explanation checks do not require committing a document;
+committing it adds no review of a later confirmation summary. A document would remain in the
 consumer's history after the merge, and because requests run side by side and
 merge into the same integration branch, a document at one path would be changed
 by each of them. The engine keeps its other records outside the workspace in the

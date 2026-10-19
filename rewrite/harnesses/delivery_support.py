@@ -75,11 +75,50 @@ def description_size(text, source="The pull request description"):
                             % (source, size, limit))
 
 
+def markdown_section(text, title):
+    """Select one ATX/Setext section; fenced examples are never headings."""
+    normalize = lambda value: value.strip().rstrip(":：").strip().casefold()
+    lines = text.splitlines(keepends=True)
+    start, level, fence = None, None, None
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip("\r\n")
+        if fence:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*", line):
+                fence = None
+            i += 1
+            continue
+        opening = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if opening:
+            fence = opening[1]
+            i += 1
+            continue
+        heading = re.match(r"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$", line)
+        size, label, consumed = 0, "", 1
+        if heading:
+            size = len(heading[1])
+            label = re.sub(r"[ \t]+#+[ \t]*$", "", heading[2])
+        elif line.strip() and not line.startswith(("    ", "\t")) and i + 1 < len(lines):
+            underline = re.fullmatch(r" {0,3}(=+|-+)[ \t]*", lines[i + 1].rstrip("\r\n"))
+            if underline:
+                size, label, consumed = (1 if underline[1][0] == "=" else 2), line, 2
+        if size:
+            if start is not None and size <= level:
+                return "".join(lines[start:i]).strip()
+            if start is None and normalize(label) == normalize(title):
+                start, level = i + consumed, size
+        i += consumed
+    return "".join(lines[start:]).strip() if start is not None else None
+
+
 def description_report():
     """The chosen role's latest reports, from this run's existing checkpoint."""
     role = os.environ.get("PR_DESCRIPTION_ROLE", "")
+    section = os.environ.get("PR_DESCRIPTION_SECTION", "").strip()
+    if section and not role:
+        raise DescriptionSettingError("PR_DESCRIPTION_SECTION requires PR_DESCRIPTION_ROLE")
     if not role:
-        return "", ""
+        return "", "", False
     path = os.environ.get("TASK_HISTORY")
     if not path:
         raise DescriptionSettingError("TASK_HISTORY is unset; use a runtime that supplies it to review and delivery")
@@ -109,10 +148,14 @@ def description_report():
             if speaker in {"requester", "runtime"}:
                 continue
             if name == role:
+                if section and record.get("error"):
+                    continue
                 text = record.get("output", "")
                 if not isinstance(text, str):
                     raise ValueError("checkpoint has a malformed report body")
                 selected.append(text)
+                if section:
+                    break
             elif selected:
                 break
         text = "\n\n".join(reversed(selected))
@@ -124,26 +167,20 @@ def description_report():
             description_size(prefix + note)
         except DeliveryError as error:
             raise DescriptionSettingError("PR_DESCRIPTION_MAX_BYTES cannot fit the explanation omission notice: " + str(error)) from error
-        return "", note
+        return "", note, False
     if not selected:
-        raise DescriptionSettingError("PR_DESCRIPTION_ROLE=%r has no recorded report; choose a role that reports "
-                                      "before review, not a process name or a later reporting role" % role)
-    if not text.strip():
+        raise DescriptionSettingError("PR_DESCRIPTION_ROLE=%r has no usable recorded report; choose a role that has "
+                                      "already reported before this command, not a process name" % role)
+    if not section and not text.strip():
         raise DeliveryError("The latest report of role %s is empty; return to the worker for an explanation" % role)
-    section = os.environ.get("PR_DESCRIPTION_SECTION", "")
     if section:
-        # A section is optional. Do not fall back to an older report or publish
-        # the surrounding observations when this report has no summary.
-        heading = re.search(r"(?m)^(#{1,6})[ \t]+" + re.escape(section) + r"[ \t]*\r?$", text)
-        if not heading:
-            return "", ""
-        text = text[heading.end():]
-        following = re.search(r"(?m)^#{1," + str(len(heading.group(1))) + r"}[ \t]+", text)
-        text = text[:following.start()] if following else text
-        text = text.strip()
-    description_size(prefix + text, "The complete description (latest report of role %s: %d bytes)"
-                     % (role, len(text.encode("utf-8"))))
-    return text, ""
+        text = markdown_section(text, section)
+        if not text:
+            return "", "", True
+        text = "## " + section + "\n\n" + text
+    label = "section %r of role %s" % (section, role) if section else "latest report of role %s" % role
+    description_size(prefix + text, "The complete description (%s: %d bytes)" % (label, len(text.encode("utf-8"))))
+    return text, "", False
 
 
 class TransientError(DeliveryError):

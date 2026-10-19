@@ -238,7 +238,7 @@ class AdversarialReviewTests(unittest.TestCase):
                         self.assertNotIn("cannot fit the required introduction", stderr.read_text())
                     if setting == "PR_DESCRIPTION_ROLE":
                         self.assertIn("report", stderr.read_text())
-                        self.assertIn("role that reports before review, not a process name", stderr.read_text())
+                        self.assertIn("role that has already reported before this command, not a process name", stderr.read_text())
                 finally:
                     process.kill()
                     process.wait(timeout=5)

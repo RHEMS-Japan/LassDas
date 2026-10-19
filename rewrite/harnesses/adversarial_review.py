@@ -419,7 +419,7 @@ def prepare():
     # A model outage may be bypassed, but cannot repair a description setting.
     description, note, description_error = "", "", ""
     try:
-        description, note = delivery_support.description_report()
+        description, note, _ = delivery_support.description_report()
     except delivery_support.DescriptionSettingError:
         raise
     except delivery_support.DeliveryError as error:

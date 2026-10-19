@@ -49,26 +49,27 @@ class DescriptionTests(unittest.TestCase):
 
     def test_confirmation_summary_is_optional_and_uses_only_the_latest_report(self):
         settings = dict(PR_DESCRIPTION_ROLE="confirm_change", PR_DESCRIPTION_SECTION="Pull request summary")
-        for summary in ("Home display unverified. Open the home page to check.", "Updated checking instructions.", ""):
-            with self.subTest(summary=summary):
-                output = "Read the change.\n"
-                if summary:
-                    output += "## Pull request summary\n" + summary + "\n## Private observations\nDo not publish this."
-                self.history.write_text(json.dumps({"history": [
-                    {"role": "confirm_change", "speaker": "reader", "output": "## Pull request summary\nOld text"},
-                    {"role": "work", "speaker": "writer", "output": "Revised the change"},
-                    {"role": "confirm_change", "speaker": "reader", "output": output},
-                ]}))
-                result = self.deliver(**settings)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                body = self.fixture.state["pulls"][0]["body"]
-                self.assertNotIn("Old text", body)
-                self.assertNotIn("Private observations", body)
-                self.assertNotIn("Read the change", body)
-                if summary:
-                    self.assertTrue(body.endswith(summary), body)
-                else:
-                    self.assertTrue(body.endswith("Merging it is left to a person."), body)
+        summary = "Home display unverified. Open the home page to check."
+        self.history.write_text(json.dumps({"history": [
+            {"role": "confirm_change", "speaker": "reader", "output": "## Pull request summary\nOld text"},
+            {"role": "confirm_change", "speaker": "runtime", "output": "Attempt finished"},
+            {"role": "confirm_change", "speaker": "reader", "output": "Read the change.\n## Pull request summary\n" + summary + "\n## Private observations\nDo not publish this."},
+        ]}))
+        result = self.deliver(**settings)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        body = self.fixture.state["pulls"][0]["body"]
+        for private in ("Old text", "Private observations", "Read the change"):
+            self.assertNotIn(private, body)
+        self.assertTrue(body.endswith("## Pull request summary\n\n" + summary), body)
+
+    def test_absent_summary_is_recorded_but_not_added_to_the_body(self):
+        self.history.write_text(json.dumps({"history": [
+            {"role": "confirm_change", "speaker": "reader", "output": "No summary in this attempt"}]}))
+        result = self.deliver(PR_DESCRIPTION_ROLE="confirm_change", PR_DESCRIPTION_SECTION="Pull request summary")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.fixture.receipt()["description_section_absent"])
+        self.assertIn("section was absent or empty", result.stdout)
+        self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith("Merging it is left to a person."))
 
     def test_confirmation_summary_refuses_oversize_and_forbidden_text_before_push(self):
         for summary, settings, reason in (
