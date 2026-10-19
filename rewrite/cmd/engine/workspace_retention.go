@@ -253,8 +253,8 @@ func reclaimStoppedWorkspace(cfg config, issue sourceIssue, directory string, no
 			return false, err
 		}
 	}
-	remaining := 512
-	if err := removeWorkspaceEntries(workspace, mount, &remaining); err != nil {
+	remaining, removed := 512, 0
+	if err := removeWorkspaceEntries(workspace, mount, &remaining, &removed); err != nil {
 		return false, err
 	}
 	current, err := job.Lstat("workspace")
@@ -329,7 +329,7 @@ func retainWorkspaceEvidence(job, workspace *os.Root, directory, mount string) e
 
 var errRemovalYield = errors.New("workspace removal will continue on the next tick")
 
-func removeWorkspaceEntries(root *os.Root, mount string, remaining *int) error {
+func removeWorkspaceEntries(root *os.Root, mount string, remaining, removed *int) error {
 	file, err := root.Open(".")
 	if err != nil {
 		return err
@@ -353,7 +353,7 @@ func removeWorkspaceEntries(root *os.Root, mount string, remaining *int) error {
 				if err != nil {
 					return err
 				}
-				err = removeWorkspaceEntries(child, mount, remaining)
+				err = removeWorkspaceEntries(child, mount, remaining, removed)
 				child.Close()
 				if err != nil {
 					return err
@@ -364,6 +364,7 @@ func removeWorkspaceEntries(root *os.Root, mount string, remaining *int) error {
 			if err := root.Remove(entry.Name()); err != nil {
 				return err
 			}
+			*removed++
 		}
 		if errors.Is(err, io.EOF) {
 			return nil

@@ -33,6 +33,8 @@ type intakeConfig struct {
 	StoppedWorkspaceRetentionHours int     `json:"stopped_workspace_retention_hours,omitempty"`
 	QuestionRole                   string  `json:"question_role,omitempty"`
 	QuestionNoPostLimit            *int    `json:"question_no_post_limit,omitempty"`
+	// TrimInstallDirs names regenerable directories; absent means no extra cleanup.
+	TrimInstallDirs []string `json:"trim_install_dirs,omitempty"`
 	// QuestionReminderMinutes is how long a request may wait for the
 	// requester's answer before the wait is said again, and again after each
 	// further interval. Absent or zero says nothing.
@@ -115,6 +117,9 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 	}
 	if cfg.Intake == nil {
 		return fail(errors.New("watch requires an explicit intake configuration"))
+	}
+	if err := validateInstallTrim(*cfg); err != nil {
+		return fail(err)
 	}
 	if err := validateStopReporter(*cfg); err != nil {
 		return fail(err)
@@ -326,9 +331,10 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
 	observe := func(message string) { fmt.Fprintln(log, message) }
-	// A finished request whose caches could not be removed is retried each
-	// tick and said once per reason, not once per tick.
+	// Legacy cache cleanup retries each tick. Install cleanup remembers held
+	// paths separately; both report once per reason, not once per tick.
 	trimTrouble := map[string]string{}
+	installHolds := map[string]*installTrimMemory{}
 	removalTrouble := map[string]string{}
 	diskTrouble := ""
 	diskSaid := map[string]bool{}
@@ -349,17 +355,38 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 		}
 	}
 	trim := func(name, directory string, say func(string)) {
-		if err := trimFinished(directory); err != nil {
+		var installErr error
+		if len(cfg.Intake.TrimInstallDirs) != 0 {
+			if installHolds[name] == nil {
+				installHolds[name] = &installTrimMemory{}
+			}
+			installErr = trimFinishedInstalls(ctx, directory, cfg.Intake.TrimInstallDirs, installHolds[name])
+			if errors.Is(installErr, context.Canceled) || errors.Is(installErr, context.DeadlineExceeded) {
+				say("finished workspace cleanup stopped")
+				return
+			}
+		} else {
+			delete(installHolds, name)
+		}
+		if err := errors.Join(installErr, trimFinished(directory)); err != nil {
 			reason := err.Error()
 			if reason == "" {
 				reason = "(no reason given)"
 			}
 			if trimTrouble[name] != reason {
-				say("finished caches not removed, retried each tick: " + reason)
+				label := "finished caches not removed, retried each tick: "
+				if installErr != nil {
+					label = "finished workspace cleanup incomplete: "
+				}
+				say(label + reason)
 				trimTrouble[name] = reason
 			}
 		} else if trimTrouble[name] != "" {
-			say("finished caches removed")
+			if len(cfg.Intake.TrimInstallDirs) != 0 {
+				say("finished cleanup complete")
+			} else {
+				say("finished caches removed")
+			}
 			delete(trimTrouble, name)
 		}
 	}

@@ -346,6 +346,98 @@ directories under `queue/jobs/<id>/homes/` are removed, since they are most of a
 request's footprint and nobody reads them; the record, the request, the
 notices, the workspace and each home's logs and files stay.
 
+#### Opt-in removal of regenerated install directories
+
+`intake.trim_install_dirs` is an exact list of directories relative to each
+role process's home and, separately, the request workspace. It defaults to
+`[]`: no extra inspection, deletion or launch wrapper. For example:
+
+```json
+"trim_install_dirs": [".cache/go-build", "client/node_modules"]
+```
+
+After all processes of a role have returned and their results have been saved,
+the runtime removes only those directories in that role's homes immediately
+before a different role starts, except when that role asks the requester.
+It keeps them on a same-role retry, when entering a question and while waiting
+for the reply. After the answer, it compares the next role with the last actual
+non-question role in history: returning to that role keeps its home; moving to
+another role cleans that previous role's home, not the questioner's home.
+This also applies when a failed role hands work back to
+another role: the recorded output and logs stay. No workspace directory is
+removed at a stage transition. After delivery or stop, the same list applies
+to the workspace at the existing cleanup point, after stop reporting and the
+preview-down wait (or its configured hold expiry). Existing final home-cache
+cleanup is unchanged. Before workspace cleanup, receipts are also checked
+against that request's saved configuration, not only today's watch settings.
+If a listed workspace path remains, a missing or unreadable saved configuration
+holds cleanup. Once none remain, the saved configuration is not read again.
+Git-tracked files beneath a listed workspace path hold only that named deletion,
+including unpushed work in a stopped request. Non-Git workspaces need no Git
+repository; a parent's repository is not used. Cleanup errors are logged;
+they do not fail delivery. Workspace cleanup visits at most 512 entries per
+tick across the list. A full-budget pass that removes nothing stops and reports why. The
+queue remembers held request/path/reason combinations in memory and does not
+inspect them again until restart or a change to the listed paths. Other names
+still progress; if a held deep tree used the budget, they continue next tick.
+A pass that made progress but used its budget also continues next tick.
+Cancellation is stopped work, not a remembered hold. A Git check's own timeout
+holds cleanup; it is not mistaken for queue cancellation. Very deep trees can remain
+for the operator to remove. Home cleanup repeats only after actual progress.
+
+This setting is permission to remove declared regenerable directories, not an
+installer. **Enable it only when every affected role's operator command always
+prepares its dependencies before running and checks preparation's exit status.**
+Keep its own download cache, manifests, tools, source, logs and receipts outside
+the list. Model instructions alone do not guarantee preparation. With the same
+lock and a populated private cache, an operator can reinstall offline; a changed
+lock, missing module/toolchain, native build or install script can still require
+more inputs. Such failure stays a real command failure. Network rights do not
+change. The engine neither detects a package manager nor shares caches/hardlinks
+between roles.
+
+The example reclaims compiled Go results and the finished workspace's installed
+client dependencies. It deliberately leaves `go/pkg/mod` and `.npm/_cacache`
+out: those are download caches needed for offline preparation. Further savings
+from sharing those caches between roles are outside this feature. Set GOCACHE
+and GOMODCACHE to distinct private locations and test the actual commands before
+opting in; removing build output means compiling it again, not instant recovery.
+
+Path components use ASCII `[A-Za-z0-9._@+-]` only, without globbing or searching
+nested directories. `node_modules`
+does not mean `client/node_modules`. Empty/root/dot/parent paths, Git metadata,
+logs, runtime records and overlap with a configured receipt are rejected
+without regard to letter case, including Unicode simple-case aliases in receipt
+components on case-insensitive filesystems.
+Full-fold aliases such as `ß`/`ss` or `ﬁ`/`fi` on APFS are not detected by this
+simple-case comparison. Do not select paths with those aliases to protected
+files; this filesystem-alias limitation does not apply to ordinary Linux paths.
+Intermediate or target symlinks, special files and different mounts are not
+followed; symlinks inside a selected directory are removed only as links.
+Encountering a special file stops that removal; earlier entries may already
+have been removed, so the selected directory can remain partly removed.
+Choosing an untracked source directory by another name is still destructive: the operator
+must name only regenerable install output, not a broad source root.
+
+Use the shipped PID-isolating launcher or an operator command that terminates
+all of its children before returning. A detached background process's absence
+cannot be inferred from its parent's exit. Do not opt in for homes used by a
+long-lived service. The shipped preview example copies its files into a Pod's
+own storage; arbitrary preview commands need not do that, so the existing
+preview lifetime is preserved. A hold expiry is not proof of successful
+teardown. A crash at the transition can defer early home cleanup until a later
+transition or final cleanup; no additional cleanup journal is introduced.
+The next role's pending record and start log precede cleanup: cleanup time counts
+toward that launch, and an interruption during cleanup records that next role
+as interrupted even if its command has not started. Real Linux bind mounts were
+not exercised by the cleanup tests; mount-identity rejection is tested with a
+substituted identity. npm offline regeneration and Go rebuild measurements were
+manual experiments outside the committed test suite; its preparation fixture
+copies a retained file and is not an actual package-manager test.
+
+The decision and alternatives are in
+[ADR 0013](docs/adr/0013-remove-only-declared-regenerable-directories.md).
+
 One process owns a queue directory. Graceful cancellation waits for its active
 children to stop before releasing ownership. Restarting the same queue reuses
 original requests, pending histories and workspaces; the existing engine tells
