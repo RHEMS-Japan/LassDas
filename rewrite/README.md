@@ -1594,6 +1594,13 @@ page is not confirmed taken down, which is said once and kept in
 `preview.json.gave-up` beside it, so neither a restart nor the record opening
 again reaches that page.
 
+The Kubernetes example's optional container and private-input settings are
+documented in [its README](examples/preview-k8s/README.md#optional-containers-and-private-input-files).
+They can place a request's API and disposable data beside its page without
+changing the engine. With no options, the template and change identifier
+remain unchanged. This does not configure or verify a real database preview;
+its isolation and data lifecycle still need the operator's installation check.
+
 ### A pull request description from the run's reports
 
 Two setups use `PR_DESCRIPTION_ROLE`, always a role name, not a process name.

@@ -574,6 +574,126 @@ class PreviewExampleTests(unittest.TestCase):
                 found.append(path)
         return found
 
+    def test_optional_containers_resources_env_and_mounts(self):
+        options = {
+            "env": [{"name": "MODE", "value": "preview"}, {"name": "PORT", "value": "8888"}],
+            "resources": {"requests": {"memory": "256Mi"}, "limits": {"memory": "1Gi"}},
+            "volumes": [{"name": "database", "emptyDir": {"sizeLimit": "512Mi"}}],
+            "containers": [
+                {"name": "page", "image": "example/page:1", "command": ["serve"],
+                 "ports": [{"containerPort": 8080}],
+                 "readinessProbe": {"httpGet": {"path": "/healthz", "port": 8080}},
+                 "volumeMounts": [{"name": "src", "mountPath": "/page", "subPath": "site", "readOnly": True}]},
+                {"name": "database", "image": "example/database:1", "args": ["--local"],
+                 "env": [{"name": "DATABASE", "value": "preview"}],
+                 "volumeMounts": [{"name": "database", "mountPath": "/data"}]}]}
+        status, output = self.up(PREVIEW_POD_OPTIONS=json.dumps(options))
+        self.assertEqual(status, 0, output)
+        pod = self.applied_deployments()[-1]["spec"]["template"]["spec"]
+        app, page, database = pod["containers"]
+        self.assertEqual(app["resources"]["requests"]["memory"], "256Mi")
+        self.assertEqual(app["resources"]["limits"]["memory"], "1Gi")
+        self.assertIn({"name": "MODE", "value": "preview"}, app["env"])
+        self.assertIn({"name": "PORT", "value": "8888"}, app["env"])
+        self.assertEqual(app["readinessProbe"]["httpGet"]["port"], 8080)
+        self.assertEqual(page["volumeMounts"][0]["subPath"], "site")
+        self.assertTrue(page["volumeMounts"][0]["readOnly"])
+        self.assertNotIn("command", database)
+        self.assertNotIn("readinessProbe", database)
+        self.assertIn(options["volumes"][0], pod["volumes"])
+        for container in (page, database):
+            self.assertEqual(container["securityContext"], app["securityContext"])
+        first = self.applied_deployments()[-1]["spec"]["template"]["metadata"]["annotations"]["preview-change"]
+        status, output = self.up(PREVIEW_POD_OPTIONS=json.dumps(options))
+        self.assertEqual(status, 0, output)
+        self.assertEqual(len(self.applied_deployments()), 1)
+        options["containers"][1]["args"].append("--changed")
+        self.assertEqual(self.up(PREVIEW_POD_OPTIONS=json.dumps(options))[0], 0)
+        self.assertNotEqual(first, self.applied_deployments()[-1]["spec"]["template"]["metadata"]["annotations"]["preview-change"])
+
+    def test_no_options_preserves_the_existing_template_and_change_identifier(self):
+        settings = self.tool.Settings('/unused', '/unused', '12', 'sample', 'serve', 8080, '/', 72,
+                                      'example/app:1', '512Mi', None, 240, None, 'preview.example.invalid',
+                                      'preview-apps', 'https://unused', '/unused',
+                                      'example/net@sha256:' + 'a' * 64, 420)
+        deployment, _ = self.tool.manifests(settings, self.tool.preview_names('sample', '12', 'preview.example.invalid'),
+                                           [], datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc))
+        template = deployment['spec']['template']
+        # Captured from the unchanged template before optional fields were added.
+        self.assertEqual(hashlib.sha256(json.dumps(template, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                         '5eb8dabd94d2399f8c2b955f9f1f4893d6e043be72d9660173b9124f0d19a6a4')
+        self.assertEqual(self.tool.change_identifier('a' * 64, template), '6f4d14228084')
+
+    def test_startup_diagnostics_use_only_packed_migration_and_fixed_fields(self):
+        from unittest.mock import patch
+        (self.checkout / 'migrations').mkdir()
+        (self.checkout / 'migrations' / '001_example.up.sql').write_text('synthetic migration')
+        self.scenario({'pod': 'crash'})
+        original = self.tool.Cluster.run
+        supplied = {'stage': 'migration', 'container': 'app', 'file': '001_example.up.sql', 'code': '1050'}
+        def run(cluster, arguments, **kwargs):
+            if arguments[:1] == ['exec'] and 'head' in arguments:
+                return subprocess.CompletedProcess(arguments, 0, json.dumps(supplied).encode(), b'private-error-value')
+            return original(cluster, arguments, **kwargs)
+        with patch.object(self.tool.Cluster, 'run', run):
+            status, output = self.up(PREVIEW_FAILURE_FILE='preview-state/failed', PREVIEW_WAIT_SECONDS='1')
+        self.assertEqual(status, 1, output)
+        self.assertEqual(output.strip().splitlines()[-1], 'app: migration failed (001_example.up.sql, error 1050)')
+        for changed in ({'file': 'unpacked.up.sql'}, {'code': '1050: private-error-value'},
+                        {'stage': 'private-error-value'}, {'message': 'private-error-value'}):
+            supplied.update(changed)
+            self.reset_cluster()
+            with patch.object(self.tool.Cluster, 'run', run):
+                status, output = self.up(PREVIEW_FAILURE_FILE='preview-state/failed', PREVIEW_WAIT_SECONDS='1')
+            self.assertEqual(status, 1, output)
+            self.assertEqual(output.strip().splitlines()[-1], 'application did not start (app: CrashLoopBackOff)')
+            self.assertNotIn('private-error-value', output)
+            supplied = {'stage': 'migration', 'container': 'app', 'file': '001_example.up.sql', 'code': '1050'}
+
+    def test_optional_settings_refuse_secret_refs_and_privilege_before_cluster(self):
+        bad = [
+            {"env": [{"name": "MODE", "valueFrom": {"secretKeyRef": {"name": "unread", "key": "key"}}}]},
+            {"containers": [{"name": "page", "image": "example/page:1", "securityContext": {"privileged": True}}]},
+            {"containers": [{"name": "app", "image": "example/page:1"}]},
+            {"volumes": [{"name": "database", "hostPath": {"path": "/"}}]},
+            {"containers": [{"name": "page", "image": "example/page:1", "volumeMounts": [{"name": "policy", "mountPath": "/rules"}]}]}]
+        for options in bad:
+            with self.subTest(options=options):
+                status, output = self.up(PREVIEW_POD_OPTIONS=json.dumps(options))
+                self.assertEqual(status, 1, output)
+                self.assertEqual(self.calls(), [])
+
+    def test_private_files_are_only_in_archive_and_change_its_identifier(self):
+        snapshot = self.outside / "snapshot.sql"
+        snapshot.write_text("synthetic snapshot one")
+        options = {"snapshot.sql": str(snapshot)}
+        status, output = self.up(PREVIEW_EXTRA_FILES=json.dumps(options),
+                                 PREVIEW_RESULT_LINES=json.dumps(["専用データでの確認です"]))
+        self.assertEqual(status, 0, output)
+        with tarfile.open(self.streams()[-1]) as archive:
+            self.assertEqual(archive.extractfile("snapshot.sql").read(), b"synthetic snapshot one")
+        self.assertFalse((self.checkout / "snapshot.sql").exists())
+        self.assertTrue(snapshot.exists(), "the wrapper, not this command, owns the original")
+        self.assertEqual((self.home / "task-preview.txt").read_text().splitlines()[-1], "専用データでの確認です")
+        self.assertEqual(self.up(PREVIEW_EXTRA_FILES=json.dumps(options))[0], 0)
+        self.assertEqual(len(self.streams()), 1)
+        snapshot.write_text("synthetic snapshot two")
+        self.assertEqual(self.up(PREVIEW_EXTRA_FILES=json.dumps(options))[0], 0)
+        self.assertEqual(len(self.streams()), 2)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_private_files_refuse_collisions_links_and_paths_in_checkout(self):
+        source = self.outside / "snapshot.sql"
+        source.write_text("synthetic snapshot")
+        link = self.outside / "link.sql"
+        link.symlink_to(source)
+        for files in ({"site": str(source)}, {"../snapshot.sql": str(source)},
+                      {"snapshot.sql": str(link)}, {"snapshot.sql": str(self.checkout / ".env.preview")}):
+            with self.subTest(files=files):
+                status, output = self.up(PREVIEW_EXTRA_FILES=json.dumps(files))
+                self.assertEqual(status, 1, output)
+                self.assertEqual(self.calls(), [])
+
     # -- names -----------------------------------------------------------
 
     def test_names_come_from_the_site_and_the_request_number(self):

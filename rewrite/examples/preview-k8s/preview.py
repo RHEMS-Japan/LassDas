@@ -116,8 +116,8 @@ DOMAIN_DESCRIPTION = "a lowercase domain name such as preview.example.invalid"
 Settings = collections.namedtuple(
     "Settings", "workspace result issue site start port ready_path lifetime image memory install "
                 "install_seconds env_file domain namespace server ca_file net_image wait_seconds pack_dir "
-                "pod_annotations",
-    defaults=(None, None))
+                "pod_annotations pod_options extra_files result_lines failure_file",
+    defaults=(None,) * 6)
 Names = collections.namedtuple("Names", "name label host url")
 
 
@@ -222,6 +222,112 @@ def pod_annotations_setting(value):
     return annotations or None
 
 
+def option_json(environment, name, expected, default):
+    text = environment.get(name)
+    if not text:
+        return default
+    try:
+        value = json.loads(text)
+    except (ValueError, RecursionError):
+        raise Failure("%s is not readable JSON" % name) from None
+    if not isinstance(value, expected):
+        raise Failure("%s has the wrong JSON type" % name)
+    return value
+
+
+def plain_path(value, absolute=False):
+    return (isinstance(value, str) and bool(value) and "\0" not in value
+            and value.startswith("/") == absolute
+            and all(part not in ("", ".", "..") for part in value.lstrip("/").split("/")))
+
+
+def pod_options(environment):
+    options = option_json(environment, "PREVIEW_POD_OPTIONS", dict, {})
+
+    def require(ok):
+        if not ok:
+            raise Failure("PREVIEW_POD_OPTIONS has an unsupported field or value; see the optional containers settings")
+
+    def fields(value, allowed):
+        require(isinstance(value, dict) and not value.keys() - set(allowed))
+
+    def env(entries):
+        require(isinstance(entries, list))
+        names = set()
+        for entry in entries:
+            fields(entry, ("name", "value"))
+            name = entry.get("name")
+            require(isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+                    and name not in names and isinstance(entry.get("value"), str) and "\0" not in entry["value"])
+            names.add(name)
+
+    def resources(value):
+        fields(value, ("requests", "limits"))
+        for quantities in value.values():
+            fields(quantities, ("cpu", "memory", "ephemeral-storage"))
+            for name, quantity in quantities.items():
+                pattern = r"[1-9][0-9]*(m|[.]\d+)?" if name == "cpu" else r"[1-9][0-9]*(Ki|Mi|Gi)"
+                require(isinstance(quantity, str) and re.fullmatch(pattern, quantity))
+
+    fields(options, ("containers", "volumes", "resources", "env"))
+    env(options.get("env", []))
+    resources(options.get("resources", {}))
+    volumes = options.get("volumes", [])
+    require(isinstance(volumes, list))
+    mountable = {"src"}
+    for volume in volumes:
+        fields(volume, ("name", "emptyDir"))
+        name = volume.get("name")
+        require(isinstance(name, str) and re.fullmatch(DNS_LABEL, name) and name not in
+                mountable | {"policy", "signal", "xtables"})
+        empty = volume.get("emptyDir")
+        fields(empty, ("sizeLimit", "medium"))
+        require(isinstance(empty.get("sizeLimit"), str) and re.fullmatch(r"[1-9][0-9]*(Mi|Gi)", empty["sizeLimit"]))
+        require(empty.get("medium", "") in ("", "Memory"))
+        mountable.add(name)
+    containers = options.get("containers", [])
+    require(isinstance(containers, list))
+    names = {"app", "receive", "install", *NET_COMMANDS}
+    for container in containers:
+        fields(container, ("name", "image", "command", "args", "ports", "env", "resources", "volumeMounts", "readinessProbe"))
+        name = container.get("name")
+        require(isinstance(name, str) and re.fullmatch(DNS_LABEL, name) and name not in names)
+        names.add(name)
+        require(isinstance(container.get("image"), str) and re.fullmatch(r"\S+", container["image"]))
+        for field in ("command", "args"):
+            if field in container:
+                require(isinstance(container[field], list) and
+                        all(isinstance(s, str) and "\0" not in s for s in container[field]))
+        env(container.get("env", []))
+        resources(container.get("resources", {}))
+        ports = container.get("ports", [])
+        require(isinstance(ports, list))
+        for port in ports:
+            fields(port, ("name", "containerPort", "protocol"))
+            require(type(port.get("containerPort")) is int and 1 <= port["containerPort"] <= 65535)
+            require(port.get("protocol", "TCP") in ("TCP", "UDP"))
+        mounts = container.get("volumeMounts", [])
+        require(isinstance(mounts, list))
+        for mount in mounts:
+            fields(mount, ("name", "mountPath", "subPath", "readOnly"))
+            require(isinstance(mount.get("name"), str) and mount["name"] in mountable and plain_path(mount.get("mountPath"), True))
+            require("subPath" not in mount or plain_path(mount["subPath"]))
+            require("readOnly" not in mount or type(mount["readOnly"]) is bool)
+        if "readinessProbe" in container:
+            probe = container["readinessProbe"]
+            fields(probe, ("httpGet", "tcpSocket", "initialDelaySeconds", "periodSeconds", "timeoutSeconds", "failureThreshold", "successThreshold"))
+            require(("httpGet" in probe) != ("tcpSocket" in probe))
+            for key, value in probe.items():
+                if key in ("httpGet", "tcpSocket"):
+                    fields(value, ("path", "port") if key == "httpGet" else ("port",))
+                    require(type(value.get("port")) is int and 1 <= value["port"] <= 65535)
+                    if key == "httpGet":
+                        require(isinstance(value.get("path"), str) and re.fullmatch(r"/[\x21-\x7e]*", value["path"]))
+                else:
+                    require(type(value) is int and value >= (0 if key == "initialDelaySeconds" else 1))
+    return options or None
+
+
 def read_settings(environment, command):
     """The settings either command reads, checked before anything runs."""
     workspace = required(environment, "TASK_WORKSPACE")
@@ -278,9 +384,24 @@ def read_settings(environment, command):
     net_image = matching(environment, "PREVIEW_NET_IMAGE", r"[^\s@]+@sha256:[0-9a-f]{64}",
                          "the rules image named by its digest (name@sha256:...)")
     pod_annotations = pod_annotations_setting(environment.get("PREVIEW_POD_ANNOTATIONS"))
+    options = pod_options(environment)
+    extra = option_json(environment, "PREVIEW_EXTRA_FILES", dict, {})
+    for name, source in extra.items():
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) or not plain_path(source, True):
+            raise Failure("PREVIEW_EXTRA_FILES must map plain file names to absolute file paths")
+        if os.path.commonpath((os.path.realpath(workspace), os.path.realpath(source))) == os.path.realpath(workspace):
+            raise Failure("PREVIEW_EXTRA_FILES must be outside the checkout")
+    lines = option_json(environment, "PREVIEW_RESULT_LINES", list, [])
+    if (not all(isinstance(line, str) and not any(ord(c) < 32 or 127 <= ord(c) < 160 or
+            0x202a <= ord(c) <= 0x202e or 0x2066 <= ord(c) <= 0x2069 for c in line) for line in lines)
+            or len("\n".join(lines).encode()) > 8192):
+        raise Failure("PREVIEW_RESULT_LINES must be plain text lines totaling at most 8 KiB")
+    failure_file = environment.get("PREVIEW_FAILURE_FILE") or None
+    if failure_file and not plain_path(failure_file):
+        raise Failure("PREVIEW_FAILURE_FILE must be a plain path relative to /src")
     return Settings(workspace, result, issue, site, start, port, ready_path, lifetime, image, memory, install,
                     install_seconds, env_file, domain, namespace, server, ca_file, net_image, wait_seconds,
-                    pack_dir, pod_annotations)
+                    pack_dir, pod_annotations, options, extra or None, lines or None, failure_file)
 
 
 def preview_names(site, issue, domain=None):
@@ -454,7 +575,7 @@ def pack_paths(root, relative, environment):
     return found
 
 
-def write_tar(root, paths, destination, inside=None):
+def write_tar(root, paths, destination, inside=None, extra_files=None):
     """The checkout as a tar file at destination, the same bytes for the same
     files: links stay links, regular files are read through lookup, anything
     else and anything under a linked directory is left out. With inside (a
@@ -480,6 +601,19 @@ def write_tar(root, paths, destination, inside=None):
                 total += info.size
                 if total > ARCHIVE_LIMIT:
                     raise Failure("%s holds more than the preview's 1 GiB" % what)
+                archive.addfile(info, handle)
+        for name, source in sorted((extra_files or {}).items()):
+            if os.path.lexists(os.path.join(root, inside or "", name)):
+                raise Failure("PREVIEW_EXTRA_FILES collides with a source path")
+            kind, found = lookup("/", source[1:])
+            if kind != "file":
+                raise Failure("PREVIEW_EXTRA_FILES must name regular files without symbolic links")
+            with os.fdopen(found, "rb") as handle:
+                info = tarfile.TarInfo(name)
+                info.size, info.mode = os.fstat(handle.fileno()).st_size, 0o600
+                total += info.size
+                if total > ARCHIVE_LIMIT:
+                    raise Failure("the source and PREVIEW_EXTRA_FILES together exceed 1 GiB")
                 archive.addfile(info, handle)
     digest = hashlib.sha256()
     with open(destination, "rb") as handle:
@@ -540,6 +674,16 @@ def manifests(settings, names, entries, expires):
                    "readinessProbe": {"httpGet": {"path": settings.ready_path, "port": settings.port},
                                       "periodSeconds": 5, "timeoutSeconds": 3, "failureThreshold": 3},
                    "securityContext": unprivileged(False), "resources": working, "volumeMounts": [source]}
+    options = settings.pod_options or {}
+    if options.get("env"):
+        app_values = dict(values)
+        app_values.update((entry["name"], entry["value"]) for entry in options["env"])
+        application["env"] = [{"name": key, "value": value} for key, value in app_values.items()]
+    if options.get("resources"):
+        application["resources"] = {kind: dict(quantities, **options["resources"].get(kind, {}))
+                                    for kind, quantities in working.items()}
+    extra_containers = [dict(container, securityContext=unprivileged(False))
+                        for container in options.get("containers", [])]
     # No preemptionPolicy and no priority: the cluster's Priority admission
     # refuses a Pod that names a preemptionPolicy other than its class's, and
     # without a class a Pod has priority 0, below nothing that runs.
@@ -548,11 +692,11 @@ def manifests(settings, names, entries, expires):
            "nodeSelector": {"kubernetes.io/arch": "amd64"},
            "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000,
                                "seccompProfile": {"type": "RuntimeDefault"}},
-           "initContainers": initial, "containers": [application],
+           "initContainers": initial, "containers": [application] + extra_containers,
            "volumes": [{"name": "src", "emptyDir": {"sizeLimit": "1Gi"}},
                        {"name": "signal", "emptyDir": {"sizeLimit": "1Mi"}},
                        {"name": "xtables", "emptyDir": {"sizeLimit": "1Mi"}},
-                       {"name": "policy", "configMap": {"name": EGRESS_CONFIGMAP}}]}
+                       {"name": "policy", "configMap": {"name": EGRESS_CONFIGMAP}}] + options.get("volumes", [])}
     deployment = {"apiVersion": "apps/v1", "kind": "Deployment",
                   "metadata": {"name": names.name, "namespace": settings.namespace, "labels": labels,
                                "annotations": {EXPIRES: stamp(expires), ISSUE: settings.issue}},
@@ -788,11 +932,53 @@ def wait_until_ready(cluster, settings, names, change, archive):
     try:
         watch(cluster, settings, names, change, archive, seen)
     except (Failure, OSError) as failure:
+        if settings.failure_file:
+            failure = Failure(startup_diagnostic(cluster, settings, seen[-1] if seen else None, archive))
         if seen and past_the_last_rules(seen[-1]):
-            raise
+            raise failure
         problem = cluster.remove("deployment", names.name)
         raise Failure(str(failure) + ("; the Deployment was removed, as its last rules had not ended with status 0"
                                       if problem is None else "; removing the Deployment failed: " + problem)) from None
+
+
+def startup_diagnostic(cluster, settings, pod, archive):
+    fallback = "application did not start"
+    if pod is None or not past_the_last_rules(pod):
+        return fallback
+    names = {"app"} | {c["name"] for c in (settings.pod_options or {}).get("containers", [])}
+    for name, entry in statuses(pod, "containerStatuses").items():
+        reason = (entry.get("state", {}).get("waiting") or {}).get("reason")
+        if name in names and reason in STUCK:
+            fallback += " (%s: %s)" % (name, reason)
+            break
+    try:
+        done = cluster.run(["exec", pod["metadata"]["name"], "-c", "app", "--", "head", "-c", "1025",
+                            "/src/" + settings.failure_file], timeout=10)
+        if done.returncode or len(done.stdout) > 1024:
+            return fallback
+        value = json.loads(done.stdout)
+        if not isinstance(value, dict) or value.keys() - {"stage", "container", "file", "code"}:
+            return fallback
+        stage, container = value.get("stage"), value.get("container")
+        if stage not in ("snapshot", "migration", "seed", "start") or not isinstance(container, str) or container not in names:
+            return fallback
+        message = "%s: %s failed" % (container, stage)
+        if stage == "migration":
+            filename, code = value.get("file"), value.get("code")
+            if not isinstance(filename, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+[.]up[.]sql", filename):
+                return fallback
+            if not isinstance(code, str) or not re.fullmatch(r"[0-9]{4,5}", code):
+                return fallback
+            with tarfile.open(archive) as packed:
+                member = packed.getmember("migrations/" + filename)
+                if not member.isfile():
+                    return fallback
+            message += " (%s, error %s)" % (filename, code)
+        elif "file" in value or "code" in value:
+            return fallback
+        return message if len(message) <= 300 else fallback
+    except (Failure, OSError, ValueError, KeyError, tarfile.TarError):
+        return fallback
 
 
 def watch(cluster, settings, names, change, archive, seen):
@@ -1011,7 +1197,7 @@ def up(environment, credentials, *, check=None):
         else:
             paths = checkout_paths(settings.workspace, environment)
         archive = os.path.join(directory, "checkout.tar")
-        archive_digest = write_tar(settings.workspace, paths, archive, settings.pack_dir)
+        archive_digest = write_tar(settings.workspace, paths, archive, settings.pack_dir, settings.extra_files)
         expires = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0) + \
             datetime.timedelta(hours=settings.lifetime)
         deployment, service = manifests(settings, names, entries, expires)
@@ -1036,7 +1222,7 @@ def up(environment, credentials, *, check=None):
         write_result(settings.result, [
             opening,
             "この画面は %s (日本時間) まで開けます" % expires.astimezone(JAPAN).strftime("%Y-%m-%d %H:%M"),
-            "動いている変更の識別子: %s" % change])
+            "動いている変更の識別子: %s" % change] + (settings.result_lines or []))
         say(redact("preview up: %s" % observed))
         return 0
     except Failure as failure:
