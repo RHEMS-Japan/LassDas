@@ -12,7 +12,8 @@ With --kubeconfig, the identity of the preview commands (the token of
 preview-operator) sends, one at a time:
 
   - the Deployment and the Service preview.py builds, with and without the
-    dependency step: these have to pass, or the policy is written wrong;
+    dependency step and with PREVIEW_POD_ANNOTATIONS: these have to pass, or
+    the policy is written wrong;
   - every shape the policy has to refuse (the list below): each has to be
     refused, and refused by the named policy. A refusal for another reason
     (RBAC, the API's own validation, the quota) did not test the policy and
@@ -55,7 +56,10 @@ DEPLOYMENT_POLICY = "preview-deployment-shape"
 POD_POLICY = "preview-pod-shape"
 SERVICE_POLICY = "preview-service-shape"
 
-Case = collections.namedtuple("Case", "label kind install change policy message")
+Case = collections.namedtuple("Case", "label kind install change policy message annotations", defaults=(None,))
+# What PREVIEW_POD_ANNOTATIONS adds in the cases that use it: the policy has
+# to let an installation's own Pod annotations through.
+POD_ANNOTATIONS = {"example.invalid/keep": "true"}
 
 
 def load_preview():
@@ -65,13 +69,14 @@ def load_preview():
     return module
 
 
-def built(preview, namespace, net_image, install):
+def built(preview, namespace, net_image, install, annotations=None):
     """The Deployment and the Service preview.py sends, for a made-up request."""
     settings = preview.Settings(
         workspace="/unused", result="/unused", issue="1", site="dry-run", start="sleep 3600", port=8080,
         ready_path="/", lifetime=1, image="registry.example.com/app:1", memory="64Mi",
         install="true" if install else None, install_seconds=60, env_file=None, domain="preview.example.invalid",
-        namespace=namespace, server="https://unused", ca_file="/unused", net_image=net_image, wait_seconds=60)
+        namespace=namespace, server="https://unused", ca_file="/unused", net_image=net_image, wait_seconds=60,
+        pod_annotations=annotations)
     names = preview.preview_names("dry-run", "1", "preview.example.invalid")
     expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
     deployment, service = preview.manifests(settings, names, [], expires)
@@ -181,6 +186,8 @@ def cases():
         Case("preview.py's Deployment without the dependency step", "deployment", False, None, None, None),
         Case("preview.py's Deployment with the dependency step", "deployment", True, None, None, None),
         Case("preview.py's Service", "service", False, None, None, None),
+        Case("preview.py's Deployment with PREVIEW_POD_ANNOTATIONS", "deployment", False, None, None, None,
+             POD_ANNOTATIONS),
         Case("a privileged container", "deployment", False, change(privileged), D, "privileged"),
         Case("a hostPath volume", "deployment", False,
              change(lambda s: s["volumes"].append({"name": "host", "hostPath": {"path": "/"}})), D, "volumes"),
@@ -333,6 +340,7 @@ def cases():
              lambda item: item["metadata"].update(annotations={
                  "service.beta.kubernetes.io/aws-load-balancer-scheme": "internet-facing"}), S, "annotations"),
         Case("preview.py's Pod (as a ReplicaSet would create it)", "pod", False, None, None, None),
+        Case("preview.py's Pod with PREVIEW_POD_ANNOTATIONS", "pod", False, None, None, None, POD_ANNOTATIONS),
         Case("a privileged Pod", "pod", False, change(privileged), POD_POLICY, "privileged"),
         Case("a Pod with an init container before the rules", "pod", False, insert_init(0, "early"), POD_POLICY,
              "init containers"),
@@ -343,7 +351,7 @@ def cases():
 
 
 def obj(preview, case, namespace, net_image):
-    deployment, service = built(preview, namespace, net_image, case.install)
+    deployment, service = built(preview, namespace, net_image, case.install, case.annotations)
     if case.kind == "service":
         item = service
     elif case.kind == "pod":

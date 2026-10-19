@@ -156,6 +156,17 @@ class ManifestTests(unittest.TestCase):
             self.assertIn("validationActions: [Deny]", part)
             self.assertIn("kubernetes.io/metadata.name: <preview-namespace>", part)
 
+    def test_the_pod_and_deployment_policies_leave_the_pod_s_annotations_alone(self):
+        """PREVIEW_POD_ANNOTATIONS adds annotations to the Pod template: no
+        validation of the Deployment or the Pod policy reads annotations, so
+        none refuses them (the Service policy does, for its own)."""
+        policies = {name_of(part): part for part in documents(EXAMPLE / "admission-policy.yaml.example")
+                    if kind_of(part) == "ValidatingAdmissionPolicy"}
+        for name in ("preview-deployment-shape", "preview-pod-shape"):
+            self.assertNotIn("annotation", policies[name].lower(), name)
+        self.assertIn("object.metadata.annotations", policies["preview-service-shape"],
+                      "the control: the Service policy reads annotations, so the search can find them")
+
     def test_only_the_quota_the_limits_the_rules_and_the_role_are_put_in_the_preview_namespace(self):
         found = []
         for path in MANIFESTS:
@@ -426,10 +437,12 @@ class DryRunToolTests(unittest.TestCase):
             item.get("metadata", {}).get("annotations", {}).pop("preview-expires-at", None)
             return json.dumps(item, sort_keys=True)
 
-        unchanged = [timeless(self.tool.obj(preview, self.tool.Case("", kind, install, None, None, None),
+        unchanged = [timeless(self.tool.obj(preview, self.tool.Case("", kind, install, None, None, None, annotations),
                                             "preview-apps", NET_IMAGE))
-                     for kind, install in (("deployment", False), ("deployment", True), ("service", False),
-                                           ("pod", False))]
+                     for kind, install, annotations in (
+                         ("deployment", False, None), ("deployment", True, None), ("service", False, None),
+                         ("pod", False, None), ("deployment", False, self.tool.POD_ANNOTATIONS),
+                         ("pod", False, self.tool.POD_ANNOTATIONS))]
         for path in written:
             entry = json.loads(path.read_text())
             text = timeless(entry["object"])

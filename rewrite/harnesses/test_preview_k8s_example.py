@@ -415,6 +415,12 @@ def load_tool(path=TOOL, name="preview_k8s_example"):
     return module
 
 
+# A DNS subdomain of 253 characters, the longest an annotation name's prefix
+# may be: three labels of 63 and one of 61, joined by dots.
+PREFIX_253 = ".".join(["a" * 63] * 3 + ["b" * 61])
+assert len(PREFIX_253) == 253
+
+
 class PreviewExampleTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="preview-k8s-")
@@ -1129,6 +1135,104 @@ class PreviewExampleTests(unittest.TestCase):
         os.utime(self.checkout / "site" / "index.html")
         second = self.tool.write_tar(str(self.checkout), paths, str(self.base / "two.tar"))
         self.assertEqual(first, second)
+
+    # -- PREVIEW_POD_ANNOTATIONS: an installation's own Pod annotations ------
+
+    def template_annotations(self):
+        return self.applied_deployments()[-1]["spec"]["template"]["metadata"]["annotations"]
+
+    def test_without_pod_annotations_the_pod_template_carries_only_the_change(self):
+        changes = []
+        for value in (None, "", "{}"):
+            with self.subTest(value=value):
+                self.reset_cluster()
+                status, output = self.up(PREVIEW_POD_ANNOTATIONS=value)
+                self.assertEqual(status, 0, output)
+                self.assertEqual(sorted(self.template_annotations()), ["preview-change"])
+                changes.append(self.template_annotations()["preview-change"])
+        self.assertEqual(len(changes), 3)
+        self.assertEqual(len(set(changes)), 1, "an empty setting changed the identifier")
+
+    def test_pod_annotations_reach_the_pod_template_and_nothing_else(self):
+        status, output = self.up()
+        self.assertEqual(status, 0, output)
+        without = self.template_annotations()["preview-change"]
+        wanted = {"example.invalid/keep": "true", "note": "two words", "example.invalid/empty": ""}
+        status, output = self.up(PREVIEW_POD_ANNOTATIONS=json.dumps(wanted))
+        self.assertEqual(status, 0, output)
+        deployment = self.applied_deployments()[-1]
+        annotations = self.template_annotations()
+        self.assertEqual({name: annotations.get(name) for name in wanted}, wanted)
+        self.assertEqual(sorted(set(annotations) - set(wanted)), ["preview-change"])
+        self.assertNotEqual(annotations["preview-change"], without, "the annotations are part of the Pod template")
+        self.assertEqual(sorted(deployment["metadata"]["annotations"]), ["preview-expires-at", "preview-issue"])
+        service = [item for document in self.applied() for item in document["items"] if item["kind"] == "Service"][-1]
+        self.assertNotIn("annotations", service["metadata"])
+
+    def test_a_wrong_pod_annotations_setting_ends_1_before_the_cluster(self):
+        for label, value, reason in (
+                ("not JSON", "keep=true", "it is not JSON"),
+                ("a JSON array", '["example.invalid/keep"]', "it is a JSON array"),
+                ("a JSON string", '"example.invalid/keep"', "it is a JSON string"),
+                ("a JSON number", "1", "it is a JSON number"),
+                ("JSON null", "null", "it is a JSON null"),
+                ("arrays nested too deeply", "[" * 100000 + "]" * 100000, "it is nested too deeply to read"),
+                ("objects nested too deeply", '{"a":' * 100000 + '"b"' + "}" * 100000,
+                 "it is nested too deeply to read"),
+                ("an empty name", '{"": "true"}', "a name is empty"),
+                ("a number for a value", '{"example.invalid/keep": 1}', "is a JSON number, not a string"),
+                ("true for a value", '{"example.invalid/keep": true}', "is a JSON boolean, not a string"),
+                ("null for a value", '{"example.invalid/keep": null}', "is a JSON null, not a string"),
+                ("an object for a value", '{"example.invalid/keep": {"a": "b"}}', "is a JSON object, not a string"),
+                ("an array for a value", '{"example.invalid/keep": ["a"]}', "is a JSON array, not a string"),
+                ("a name with a space", '{"keep me": "true"}', "is not an annotation name"),
+                ("a name with two /", '{"example.invalid/a/b": "true"}', "is not an annotation name"),
+                ("a name ending in -", '{"keep-": "true"}', "is not an annotation name"),
+                ("a name of 64 characters", '{"%s": "true"}' % ("a" * 64), "is not an annotation name"),
+                ("an upper-case prefix", '{"Example.invalid/keep": "true"}', "is not an annotation name"),
+                ("the change's own name", '{"preview-change": "0"}', "is preview.py's own"),
+                ("the lifetime's name", '{"preview-expires-at": "2100-01-01T00:00:00Z"}', "is preview.py's own"),
+                ("the request number's name", '{"preview-issue": "1"}', "is preview.py's own"),
+                ("a prefix of 254 characters", json.dumps({PREFIX_253 + "a/keep": "true"}), "is not an annotation name"),
+                ("a name given twice", '{"keep": "a", "keep": "b"}', "a name is given twice")):
+            with self.subTest(label):
+                self.reset_cluster()
+                status, output = self.up(PREVIEW_POD_ANNOTATIONS=value)
+                self.assertEqual(status, 1, output)
+                self.assertEqual(self.calls(), [], "the cluster was called")
+                last = output.strip().splitlines()[-1]
+                self.assertIn("PREVIEW_POD_ANNOTATIONS", last)
+                self.assertIn(reason, last)
+
+    def test_the_limits_of_a_name_and_of_the_annotations_together(self):
+        """A prefix of 253 characters passes (254 is refused above); the names
+        and values together, with preview-change's 14 + 12 bytes, may reach the
+        API's 262144 bytes but not pass it, counted in bytes."""
+        status, output = self.up(PREVIEW_POD_ANNOTATIONS=json.dumps({PREFIX_253 + "/keep": "true"}))
+        self.assertEqual(status, 0, output)
+        self.assertEqual(self.template_annotations().get(PREFIX_253 + "/keep"), "true")
+        name = "example.invalid/keep"
+        at_limit = 262144 - len("preview-change") - 12 - len(name)
+        for label, value, passes in (("at the limit", "x" * at_limit, True),
+                                     ("one byte over", "x" * (at_limit + 1), False),
+                                     ("under in characters, over in bytes", "あ" * (at_limit // 3 + 1), False)):
+            with self.subTest(label):
+                self.reset_cluster()
+                status, output = self.up(PREVIEW_POD_ANNOTATIONS=json.dumps({name: value}, ensure_ascii=False))
+                if passes:
+                    self.assertEqual(status, 0, output)
+                    annotations = self.template_annotations()
+                    self.assertEqual(sum(len(k.encode()) + len(v.encode()) for k, v in annotations.items()), 262144)
+                else:
+                    self.assertEqual(status, 1, output)
+                    self.assertEqual(self.calls(), [], "the cluster was called")
+                    last = output.strip().splitlines()[-1]
+                    self.assertIn("PREVIEW_POD_ANNOTATIONS holds", last)
+                    self.assertIn("262144 bytes", last)
+
+    def test_down_does_not_read_pod_annotations(self):
+        status, output = self.down(PREVIEW_POD_ANNOTATIONS="not JSON")
+        self.assertEqual(status, 0, output)
 
     # -- PREVIEW_PACK_DIR: one ignored directory instead of the checkout -----
 
