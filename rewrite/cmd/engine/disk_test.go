@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -129,21 +130,23 @@ func TestQueueDiskPollCoversWaitingPausedHeldAndActive(t *testing.T) {
 				return nil, fmt.Errorf("unexpected request")
 			})
 			original := queueDiskPercent
-			calls := 0
+			var calls atomic.Int32
 			queueDiskPercent = func(path string) (float64, error) {
-				calls++
+				count := calls.Add(1)
 				if path != root {
 					t.Errorf("measured %s", path)
 				}
-				if calls == 1 {
+				if count == 1 {
 					return 10, nil
 				}
 				return 100, nil
 			}
 			defer func() { queueDiskPercent = original }()
 			finish := startStopQueue(t, cfg, root, 20*time.Millisecond, io.Discard)
-			if mode == "done" || mode == "stopped" || mode == "off" {
-				time.Sleep(80 * time.Millisecond)
+			if mode == "done" || mode == "stopped" {
+				waitFor(t, func() bool { return calls.Load() >= 2 })
+			} else if mode == "off" {
+				waitFor(t, func() bool { _, err := os.Stat(filepath.Join(directory, "workspace", "active.txt")); return err == nil })
 			} else {
 				waitFor(t, func() bool {
 					tracker.mu.Lock()
@@ -173,13 +176,69 @@ func TestQueueDiskPollCoversWaitingPausedHeldAndActive(t *testing.T) {
 			if warnings != want {
 				t.Fatalf("warnings=%d want=%d", warnings, want)
 			}
-			if mode == "off" && calls != 0 {
+			if mode == "off" && calls.Load() != 0 {
 				t.Fatal("off still measured")
 			}
 			if mode == "off" && slices.Contains(postableKinds(cfg), diskNotice) {
 				t.Fatal("off still registers capacity notice")
 			}
 		})
+	}
+}
+
+func TestRecordedCapacityDoesNotReadHistoryOrFlushOtherPendingNotices(t *testing.T) {
+	cfg := watchConfiguration(t)
+	_, directory := noticeJob(t, chain.State{})
+	n := requestNotices(cfg, announcedIssue(), directory)
+	now := time.Now()
+	if err := n.save(noticeLog{Notices: []noticeRecord{
+		{Kind: diskNotice, Text: "already said", PostedAt: &now},
+		{Kind: resumeNotice, Text: "another pending notice"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "run", "history.json"), []byte("broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := noteQueueDisk(context.Background(), cfg, n, 100); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestActiveCapacityOnlyRecordsWithoutWaitingForNoticeTraffic(t *testing.T) {
+	cfg := watchConfiguration(t)
+	_, directory := noticeJob(t, chain.State{})
+	tracker := &noticeTracker{}
+	tracker.install(t, func(r *http.Request) (*http.Response, error) { return nil, fmt.Errorf("unexpected tracker call") })
+	n := requestNotices(cfg, announcedIssue(), directory)
+	n.recordOnly = true
+	if err := n.save(noticeLog{Notices: []noticeRecord{{Kind: resumeNotice, Text: "pending"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := noteQueueDisk(context.Background(), cfg, n, 100); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := n.load()
+	if err != nil || len(saved.Notices) != 2 || len(tracker.posted) != 0 {
+		t.Fatalf("record-only: %+v %v", saved, err)
+	}
+	// Remove only the fixture's capacity entry so this call must try the lock.
+	if err := n.save(noticeLog{Notices: saved.Notices[:1]}); err != nil {
+		t.Fatal(err)
+	}
+	unlock := n.hold()
+	done := make(chan error, 1)
+	go func() { done <- noteQueueDisk(context.Background(), cfg, n, 100) }()
+	select {
+	case err := <-done:
+		unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		unlock()
+		<-done
+		t.Fatal("queue waited for another notice's network operation")
 	}
 }
 

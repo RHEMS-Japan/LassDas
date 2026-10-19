@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"ticket-runner/internal/diskusage"
 )
@@ -25,7 +26,7 @@ func (s *server) readDisk() (*diskReading, error) {
 		return nil, fmt.Errorf("capacity warning configuration: %w", err)
 	}
 	if err := diskusage.Validate(intake.DiskNoticePercent); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("capacity warning configuration: %w", err)
 	}
 	measure := s.diskPercent
 	if measure == nil {
@@ -36,5 +37,5 @@ func (s *server) readDisk() (*diskReading, error) {
 		return nil, err
 	}
 	threshold := diskusage.Threshold(intake.DiskNoticePercent)
-	return &diskReading{Usage: fmt.Sprintf("%.1f%%", percent), Threshold: threshold, Warning: diskusage.Over(percent, threshold)}, nil
+	return &diskReading{Usage: fmt.Sprintf("%.1f%%", math.Floor(percent*10)/10), Threshold: threshold, Warning: diskusage.Over(percent, threshold)}, nil
 }

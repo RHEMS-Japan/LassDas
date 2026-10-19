@@ -68,3 +68,25 @@ func TestDiskThresholdIsTypedAndZeroDisablesWarning(t *testing.T) {
 	// A server built directly still has a safe measurement function.
 	_, _ = (&server{runDir: t.TempDir()}).readDisk()
 }
+
+func TestDisplayedCapacityDoesNotRoundUpAcrossTheThreshold(t *testing.T) {
+	s, err := newServer(t.TempDir(), "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.diskPercent = func(string) (float64, error) { return 84.96, nil }
+	reading, err := s.readDisk()
+	if err != nil || reading.Warning || reading.Usage != "84.9%" {
+		t.Fatalf("%+v %v", reading, err)
+	}
+	s.config = map[string]any{"intake": map[string]any{"disk_notice_percent": 101}}
+	_, err = s.readDisk()
+	if err == nil || !strings.Contains(err.Error(), "configuration") {
+		t.Fatalf("missing configuration diagnosis: %v", err)
+	}
+	w := httptest.NewRecorder()
+	s.overview(w, httptest.NewRequest("GET", "/", nil))
+	if strings.Contains(w.Body.String(), "usage is unknown") || !strings.Contains(w.Body.String(), "configuration") {
+		t.Fatal("configuration error presented as a failed measurement")
+	}
+}

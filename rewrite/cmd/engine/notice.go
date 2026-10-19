@@ -195,6 +195,9 @@ type notices struct {
 	// queue keeps when each kind of notice began; a request's directory is
 	// the queue's jobs/<id>.
 	queue string
+	// recordOnly lets the queue compose a notice without joining a watcher's
+	// tracker traffic. A busy lock is retried on a later queue tick.
+	recordOnly bool
 }
 
 func requestNotices(cfg config, issue sourceIssue, directory string) notices {
@@ -209,9 +212,13 @@ func (n notices) path() string { return filepath.Join(n.directory, "notices.json
 // posts whole, so neither submits a notice the other is submitting.
 var noticeLocks sync.Map
 
-func (n notices) hold() func() {
+func (n notices) mutex() *sync.Mutex {
 	lock, _ := noticeLocks.LoadOrStore(filepath.Clean(n.directory), &sync.Mutex{})
-	mutex := lock.(*sync.Mutex)
+	return lock.(*sync.Mutex)
+}
+
+func (n notices) hold() func() {
+	mutex := n.mutex()
 	mutex.Lock()
 	return mutex.Unlock
 }
@@ -484,12 +491,20 @@ func (n notices) say(ctx context.Context, kind, text, models string, at time.Tim
 // earlier unconfirmed notice is settled, and gives the notice to record, and
 // whether it speaks at all.
 func (n notices) sayAs(ctx context.Context, kind, event string, at time.Time, compose func(noticeLog, time.Time) (noticeRecord, bool)) error {
-	defer n.hold()()
+	if n.recordOnly {
+		mutex := n.mutex()
+		if !mutex.TryLock() {
+			return nil
+		}
+		defer mutex.Unlock()
+	} else {
+		defer n.hold()()
+	}
 	log, err := n.load()
 	if err != nil {
 		return err
 	}
-	if i := pendingNotice(log); i >= 0 {
+	if i := pendingNotice(log); i >= 0 && !n.recordOnly {
 		if err := n.settle(ctx, &log, i, false); err != nil {
 			return err
 		}
@@ -528,6 +543,9 @@ func (n notices) sayAs(ctx context.Context, kind, event string, at time.Time, co
 	log.Notices = append(log.Notices, record)
 	if err := n.save(log); err != nil {
 		return err
+	}
+	if n.recordOnly {
+		return nil
 	}
 	return n.settle(ctx, &log, len(log.Notices)-1, true)
 }

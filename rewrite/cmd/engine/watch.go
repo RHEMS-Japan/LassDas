@@ -331,6 +331,8 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	trimTrouble := map[string]string{}
 	removalTrouble := map[string]string{}
 	diskTrouble := ""
+	diskSaid := map[string]bool{}
+	diskSendTrouble := map[string]string{}
 	trim := func(name, directory string, say func(string)) {
 		if err := trimFinished(directory); err != nil {
 			reason := err.Error()
@@ -415,11 +417,24 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				break
 			}
 			id, err := strconv.ParseInt(entry.Name(), 10, 64)
-			if err != nil || id <= 0 || !entry.IsDir() || (active[entry.Name()] && !diskusage.Over(percent, diskThreshold(cfg))) {
+			if err != nil || id <= 0 || !entry.IsDir() {
 				continue
 			}
 			directory := filepath.Join(jobs, entry.Name())
 			say := func(message string) { observe("request " + entry.Name() + ": " + message) }
+			diskNeeded := diskusage.Over(percent, diskThreshold(cfg)) && !diskSaid[entry.Name()]
+			if diskNeeded {
+				needed, confirmed, err := capacityNoticeNeeded(notices{directory: directory}, active[entry.Name()])
+				diskSaid[entry.Name()] = confirmed
+				diskNeeded = needed && err == nil
+				if err != nil && diskSendTrouble[entry.Name()] != err.Error() {
+					say("capacity notice record unavailable: " + err.Error())
+					diskSendTrouble[entry.Name()] = err.Error()
+				}
+			}
+			if active[entry.Name()] && !diskNeeded {
+				continue
+			}
 			raw, err := os.ReadFile(filepath.Join(directory, "issue.json"))
 			if err != nil {
 				observe("reading accepted issue: " + err.Error())
@@ -430,9 +445,16 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				observe("accepted issue record could not be read for its source; no replacement used")
 				continue
 			}
-			if diskusage.Over(percent, diskThreshold(cfg)) {
-				if err := noteQueueDisk(ctx, cfg, requestNotices(cfg, issue, directory), percent); err != nil {
-					say("capacity notice not confirmed: " + err.Error())
+			if diskNeeded {
+				notice := requestNotices(cfg, issue, directory)
+				notice.recordOnly = active[entry.Name()]
+				if err := noteQueueDisk(ctx, cfg, notice, percent); err != nil {
+					if diskSendTrouble[entry.Name()] != err.Error() {
+						say("capacity notice not confirmed: " + err.Error())
+						diskSendTrouble[entry.Name()] = err.Error()
+					}
+				} else {
+					delete(diskSendTrouble, entry.Name())
 				}
 			}
 			if active[entry.Name()] {

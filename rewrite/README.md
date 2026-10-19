@@ -1738,6 +1738,16 @@ usage as unavailable. Disabling warnings skips the watch's measurements and
 does not register the capacity notice; the status reading remains available.
 Previously recorded, unconfirmed notices still follow the existing retry path
 even if the threshold is later set to zero; this setting does not cancel them.
+The collector skips confirmed capacity notices before reading request history.
+For active requests it only records the new notice, without waiting for a busy
+notice lock or calling the tracker; the request's watcher submits it. Inactive
+requests retry an unconfirmed submission, logging each failure reason once.
+Capacity can be recorded before the acceptance receipt when a request first
+arrives with storage already high. A stop not yet observed by the controller
+can still be followed by this notice; it does not cancel the stop request.
+The displayed percentage is rounded down to one decimal so a value below the
+threshold is not displayed as equal to it. Invalid threshold settings are shown
+as configuration errors, distinct from an unavailable filesystem reading.
 
 Homes are currently reused per role and process, not created per attempt.
 Their latest contents and the shared checkout remain available for retries;

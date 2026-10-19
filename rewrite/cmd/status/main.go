@@ -1608,7 +1608,7 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	data := page{Lang: language(r), Now: s.formatTime(now), RunDir: s.runDir, Config: s.configRaw != nil}
 	if reading, err := s.readDisk(); err != nil {
-		data.Notes = append(data.Notes, "Queue filesystem usage is unknown: "+err.Error())
+		data.Notes = append(data.Notes, "Queue filesystem: "+err.Error())
 	} else {
 		data.Disk = reading
 	}
