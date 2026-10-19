@@ -986,11 +986,11 @@ fails its check with 403 and the requester gets the question in words.
   allowed path or query that the API does not check against the key.
 - The API's answers are served from the preview's host as they are: an API
   that answers with HTML has it shown there.
-- Nothing stops other Pods of the cluster from connecting to a preview: the
-  cluster's NetworkPolicy may not be enforced, and a preview holds no
-  credential to take.
+- Other Pods may connect to a preview unless the operator enforces ingress
+  isolation. Extra containers or private input files can hold sensitive
+  data; do not assume that a preview holds nothing worth reading.
 - `kubectl exec` can still run anything in a preview Pod; the policy cannot
-  shape it. Only the preview identity may, and the Pod holds nothing secret.
+  shape it. The preview identity can read everything carried into the Pod.
 - Not yet tried on a real cluster, only on a local API server and in the
   tests: that the chosen nginx image has the njs and auth_request modules,
   that the rules image loads the rules inside a Pod with its own user
