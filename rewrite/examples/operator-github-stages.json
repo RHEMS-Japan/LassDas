@@ -57,6 +57,11 @@
         "on_failure": "elicit"
       },
       {
+        "name": "verify_added",
+        "kind": "command",
+        "on_failure": "elicit"
+      },
+      {
         "name": "review",
         "kind": "command",
         "on_failure": "elicit"
@@ -286,6 +291,40 @@
       ]
     },
     {
+      "name": "verify_added",
+      "purpose": "Run tests added by this request after the aggregate checks finish, or report why they were not run.",
+      "processes": [
+        {
+          "name": "added-tests",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/ticket-automation/operator",
+            "--network",
+            "inherit",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/added_tests.py"
+          ],
+          "instructions": "Run test files added by this request with the configured single-file command, or report that they were not run. Do not replace the operator's aggregate tests.",
+          "env": {
+            "ADDED_TEST_COMMAND": "",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
+            "TASK_BRANCH": "example-integration-branch"
+          }
+        }
+      ]
+    },
+    {
       "name": "review",
       "purpose": "Adversarial review of the change by a model from a different publisher than the worker, run as the operator's own command: its structured verdict decides the exit status, only a real blocking verdict sends the work back, and only that is read.",
       "processes": [
@@ -448,6 +487,7 @@
             "TASK_BRANCH": "example-integration-branch",
             "DELIVERY_REPOSITORY": "example-owner/example-repository",
             "DELIVERY_BASE_BRANCH": "example-integration-branch",
+            "ADDED_TEST_COMMAND": "",
             "VERIFY_COMMANDS": "/opt/ticket-automation/operator/build\n/opt/ticket-automation/operator/test"
           },
           "secrets": {

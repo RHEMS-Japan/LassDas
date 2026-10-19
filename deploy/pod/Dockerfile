@@ -136,7 +136,7 @@ RUN { test "$(uname -m)" = "aarch64" || { echo "deploy/pod/Dockerfile builds lin
 # may run which of them.
 COPY --from=bundle /out/bundle /opt/ticket-automation/bundle
 COPY rewrite/harnesses/delivery_support.py rewrite/harnesses/deliver_git.py \
-     rewrite/harnesses/verify_merged.py rewrite/harnesses/mirror_loop.py \
+     rewrite/harnesses/verify_merged.py rewrite/harnesses/added_tests.py rewrite/harnesses/mirror_loop.py \
      /opt/ticket-automation/scripts/
 COPY rewrite/runtime-policy/compile_role_seccomp.py \
      rewrite/runtime-policy/role_bwrap_policy.py \

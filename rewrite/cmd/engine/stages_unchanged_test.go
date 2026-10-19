@@ -54,7 +54,7 @@ func TestUnchangedStagesRoleHelper(t *testing.T) {
 		fmt.Print(stagesClaim)
 	}
 	switch action {
-	case "elicit", "work", "verify":
+	case "elicit", "work", "verify", "verify_added":
 		if text, err := os.ReadFile("src/greeting.txt"); err != nil || string(text) != stagesArtifact {
 			t.Fatalf("the prepared checkout is not the target's: %q %v", text, err)
 		}
@@ -422,9 +422,9 @@ func TestAnOrderedRunFinishesARequestThatNeedsNoChange(t *testing.T) {
 
 			// Each launch ends on the runtime's own record, so those records
 			// are the order the stages ran in.
-			want := []string{"elicit", "work", "verify", "review"}
+			want := []string{"elicit", "work", "verify", "verify_added", "review"}
 			for range objections {
-				want = append(want, "elicit", "work", "verify", "review")
+				want = append(want, "elicit", "work", "verify", "verify_added", "review")
 			}
 			want = append(want, "confirm_change", "deliver", "verify_merged", "report", "confirm_report")
 			var ran, reviewed []string
@@ -629,7 +629,7 @@ func TestALostWorkspaceSendsTheRunBackToWorkInsteadOfEndingUnchanged(t *testing.
 			lost++
 		}
 	}
-	want := []string{"elicit", "work", "verify", "review", "confirm_change", "deliver", "elicit", "work", "verify", "review", "confirm_change", "deliver", "verify_merged", "report", "confirm_report"}
+	want := []string{"elicit", "work", "verify", "verify_added", "review", "confirm_change", "deliver", "elicit", "work", "verify", "verify_added", "review", "confirm_change", "deliver", "verify_merged", "report", "confirm_report"}
 	if !slices.Equal(ran, want) || lost != 1 {
 		t.Fatalf("the stages ran as %v (lost workspace said %d times), not %v", ran, lost, want)
 	}
@@ -684,7 +684,7 @@ func TestARequestWhosePullRequestAPersonClosedEndsAndSaysSo(t *testing.T) {
 			nothingToCheck++
 		}
 	}
-	want := []string{"elicit", "work", "verify", "review", "confirm_change", "deliver", "verify_merged", "elicit", "work", "verify", "review",
+	want := []string{"elicit", "work", "verify", "verify_added", "review", "confirm_change", "deliver", "verify_merged", "elicit", "work", "verify", "verify_added", "review",
 		"confirm_change", "deliver", "verify_merged", "report", "confirm_report"}
 	if !slices.Equal(ran, want) || closed != 1 || nothingToCheck != 1 {
 		t.Fatalf("the stages ran as %v (closed said %d times, nothing to check %d times), not %v", ran, closed, nothingToCheck, want)

@@ -637,6 +637,7 @@ runtime, not a model, decides what runs next.
     { "name": "elicit", "kind": "model" },
     { "name": "work", "kind": "model" },
     { "name": "verify", "kind": "command", "on_failure": "elicit" },
+    { "name": "verify_added", "kind": "command", "on_failure": "elicit" },
     { "name": "review", "kind": "command", "on_failure": "elicit" },
     { "name": "confirm_change", "kind": "model", "confirm": true },
     { "name": "deliver", "kind": "command", "on_failure": "elicit" },
@@ -884,6 +885,7 @@ requests are what the person merging relies on, the stage can be left out:
     { "name": "elicit", "kind": "model" },
     { "name": "work", "kind": "model" },
     { "name": "verify", "kind": "command", "on_failure": "elicit" },
+    { "name": "verify_added", "kind": "command", "on_failure": "elicit" },
     { "name": "review", "kind": "command", "on_failure": "elicit" },
     { "name": "confirm_change", "kind": "model", "confirm": true },
     { "name": "deliver", "kind": "command", "on_failure": "elicit" },
@@ -1633,6 +1635,66 @@ read and an update can race with that update. Coordinate direct edits with
 automation rather than treating its saved body as a lock. This option does
 not change ticket comments or establish production delivery. The report role
 must still describe what actually reached the requested destination.
+
+### Running newly added tests explicitly
+
+The staged examples keep the `project-tests` command and environment unchanged
+and run `added-tests` in a separate `verify_added` command stage after `verify`
+has finished. These two test runs do not compete for the same ports or services.
+Failure returns to `elicit`. Its bundled `harnesses/added_tests.py` and the image's
+`verify_merged.py` share detection and execution. The aggregate commands keep
+their original launcher, output, environment and timeout; post-delivery checks
+run the aggregate commands before the additional tests. For the aggregate
+commands only, `TMPDIR` is set in the fetched clone's private parent directory,
+not the sandbox's memory-backed `/tmp`; individually added tests do not receive
+this override.
+
+Before delivery, additions are measured against the integration-side commit
+already contained in the checkout or currently being merged, including staged
+and untracked regular files. A conflicting catch-up uses the integration side
+of that merge, not its old common ancestor. Delivery fetches retain that tip in a local Git ref because
+`FETCH_HEAD` can be replaced by an unrelated fetch. The launcher also supplies
+the prepared commit as `TASK_BASE_COMMIT` (updated after a pre-work refresh,
+or the empty tree for a new repository). When it is an ancestor of HEAD, it
+participates in selecting the newest basis. A standalone `ADDED_TEST_BASE` is used only when that launcher
+value and an integration ref are unavailable. Neither overrides a newer
+integration-side basis.
+
+The delivery receipt records `integration_base` for its current published
+head, not a previous round. After merge/squash, detection compares the merge
+commit with its first parent. For a person's merge, rebase, pending and branch-only deliveries,
+it compares that recorded base with the original request head, so concurrent
+integration changes and multiple rebased commits are not confused. Unchanged
+receipts have no added tests. Tests run in the fetched verification checkout;
+a delivered test subsequently removed by a person is reported as absent and
+**not run**, without sending the request back to repair. If the necessary
+commits cannot be read, the report says detection is unavailable, not that
+there were no additions. This does not prevent aggregate verification.
+
+Environment for both additional-test entry points (operator settings only):
+set these in each process's `env` block (`verify_added` and `verify_merged`);
+the engine does not inherit arbitrary operator environment variables.
+
+| Setting | Meaning |
+| --- | --- |
+| `ADDED_TEST_PATTERNS` | Newline-separated basename globs. Defaults select Go `*_test.go`, Python `test_*.py`/`*_test.py`, JavaScript/TypeScript `*.test.js`/`*.test.jsx`/`*.test.ts`/`*.test.tsx` and corresponding `*.spec.*` source files, and Java `*Test.java`. Data files, snapshots and source maps are not selected. A directory prefix such as `tests/` is opt-in and selects every regular file under it. |
+| `ADDED_TEST_COMMAND` | Optional single-file command with `{file}` or `{package}` (`{pkg}` also means package). Examples: `node --test {file}`, `go test {package}`. |
+| `ADDED_TEST_MAX_COMMANDS` | Positive limit on distinct invocations, default 100. Excess commands are explicitly reported as not run, including their count in the summary; exceeding the limit does not itself fail the stage or send the request around again. |
+| `TASK_BASE_COMMIT` | Prepared-checkout basis supplied by `git_workspace.py`, including an empty tree for an initially empty repository. |
+| `ADDED_TEST_BASE` | Standalone basis when no launcher/integration basis is known. |
+| `VERIFY_TIMEOUT_SECONDS` | Per additional invocation limit, default 1200 seconds. |
+
+Arguments are split and validated before detection, then placeholders are
+replaced without a shell. A filename with spaces stays one argument; package
+means its relative parent directory. Identical commands run once. Symlinks
+and submodules are not tests. Invalid settings are reported even with no
+matching files. With no command, additions are explicitly **not executed
+individually** and do not fail the stage. Reports distinguish aggregate and
+additional failures and quote unusual paths. Each completed command block is
+flushed before the next command starts; interruption cannot erase earlier
+completed blocks. These filename rules do not
+recognize every language; use an installation-specific command for mixed
+languages. Existing tests remain the aggregate command's responsibility.
 
 ### A live check the installation supplies
 

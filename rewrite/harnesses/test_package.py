@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -70,7 +71,7 @@ class PackageTests(unittest.TestCase):
                         "examples/operator-github-stages.json",
                         "harnesses/hermes.py", "harnesses/raven.py", "harnesses/git_workspace.py",
                         "harnesses/linux_role.py", "harnesses/adversarial_review.py",
-                        "harnesses/delivery_support.py"]
+                        "harnesses/delivery_support.py", "harnesses/added_tests.py"]
             self.assertEqual(sorted(str(p.relative_to(bundle)) for p in bundle.rglob("*") if p.is_file()), sorted(expected))
             for relative in expected:
                 if not relative.startswith("bin/"):
@@ -80,6 +81,36 @@ class PackageTests(unittest.TestCase):
                                        "import sys; sys.path.insert(0, sys.argv[1]); import adversarial_review",
                                        str(bundle / "harnesses")], cwd=root, capture_output=True, text=True, timeout=10)
             self.assertEqual(imported.returncode, 0, imported.stderr)
+            imported_added = subprocess.run([sys.executable, "-B", "-c",
+                                             "import sys; sys.path.insert(0, sys.argv[1]); import added_tests",
+                                             str(bundle / "harnesses")], cwd=root, capture_output=True, text=True, timeout=10)
+            self.assertEqual(imported_added.returncode, 0, imported_added.stderr)
+            dockerfile = (SOURCE.parent / "deploy/pod/Dockerfile").read_text()
+            scripts = set(re.findall(r"rewrite/harnesses/([a-z_]+[.]py)", dockerfile))
+            operator = (SOURCE.parent / "deploy/ticket-engine/operator-scripts-configmap.yaml.example").read_text()
+            for example in ("operator-stages", "operator-github-stages"):
+                roles = json.loads((bundle / "examples" / (example + ".json")).read_text())["roles"]
+                verify = next(role for role in roles if role["name"] == "verify")["processes"]
+                self.assertEqual(verify[1]["command"], verify[0]["command"][:-1] + ["/opt/ticket-automation/operator/test"])
+                added = next(role for role in roles if role["name"] == "verify_added")["processes"]
+                self.assertEqual([process["name"] for process in added], ["added-tests"])
+                for role in roles:
+                    for process in role["processes"]:
+                        argv = process["command"]
+                        runtimes = [argv[i + 1] for i, value in enumerate(argv) if value == "--runtime"]
+                        boundary = max((i for i, value in enumerate(argv) if value == "--"), default=-1)
+                        for i, value in enumerate(argv):
+                            if not value.startswith("/opt/ticket-automation/"):
+                                continue
+                            if value.startswith("/opt/ticket-automation/bundle/"):
+                                self.assertTrue((bundle / value.split("/bundle/", 1)[1]).exists(), value)
+                            elif value.startswith("/opt/ticket-automation/scripts/"):
+                                self.assertIn(Path(value).name, scripts, value)
+                                self.assertTrue((SOURCE / "harnesses" / Path(value).name).is_file(), value)
+                            elif value.startswith("/opt/ticket-automation/operator/"):
+                                self.assertIn("  " + Path(value).name + ": |", operator, value)
+                            if i > boundary:
+                                self.assertTrue(any(value == root or value.startswith(root + "/") for root in runtimes), value)
             before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle.rglob("*") if p.is_file()}
             refused = subprocess.run(["sh", str(SOURCE / "package.sh"), str(bundle)],
                                      cwd=root, capture_output=True, text=True, timeout=10)

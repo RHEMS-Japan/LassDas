@@ -104,6 +104,18 @@ os.execv(os.environ['TEST_REAL_GIT'], [os.environ['TEST_REAL_GIT'], *sys.argv[1:
         self.assertIn("Cloning into", err)
         self.assertFalse(list(workspace.parent.glob(".source-*")))
 
+    def test_verification_base_remains_the_prepared_commit_after_local_work(self):
+        workspace = self.workspace("verification-base")
+        self.assertEqual(self.run_launcher(workspace)[0], 0)
+        (workspace / "entry.txt").write_text("local commit\n")
+        self.git(workspace, "add", ".")
+        self.git(workspace, "commit", "-m", "Local work")
+        child = self.start(workspace, {"TASK_BASE_COMMIT": "not-authoritative"},
+                           child_code="import os; print(os.environ['TASK_BASE_COMMIT'])")
+        out, err = child.communicate("", timeout=15)
+        self.assertEqual(child.returncode, 0, err)
+        self.assertEqual(out.strip(), self.original_head)
+
     def test_restart_preserves_dirty_work_local_commit_and_untracked_files(self):
         workspace = self.workspace("resume")
         self.assertEqual(self.run_launcher(workspace)[0], 0)
@@ -133,6 +145,14 @@ os.execv(os.environ['TEST_REAL_GIT'], [os.environ['TEST_REAL_GIT'], *sys.argv[1:
         self.assertEqual(child.returncode, 0, err)
         self.assertEqual(out, "Create the initial project.\n")
         self.assertEqual((workspace / "entry.txt").read_text(), "first implementation")
+        self.git(workspace, "add", ".")
+        self.git(workspace, "commit", "-m", "Initial work")
+        child = self.start(workspace, {"TASK_REPOSITORY": str(source)},
+                           "import os; print(os.environ['TASK_BASE_COMMIT'])")
+        out, err = child.communicate("", timeout=15)
+        self.assertEqual(child.returncode, 0, err)
+        names = self.git(workspace, "diff", "--name-only", out.strip(), "HEAD").stdout.splitlines()
+        self.assertEqual(names, ["entry.txt"])
 
     def answered_history(self, workspace, worked=False):
         path = workspace.parent / "history.json"

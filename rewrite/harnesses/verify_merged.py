@@ -42,6 +42,7 @@ Environment (all from the operator, never from a role):
   DELIVERY_REPOSITORY        owner/name of the delivery target
   DELIVERY_BASE_BRANCH       integration branch to check
   VERIFY_COMMANDS            newline-separated commands, each run without a shell
+  ADDED_TEST_COMMAND, ADDED_TEST_PATTERNS, ADDED_TEST_MAX_COMMANDS: added_tests.py
   DELIVERY_REMOTE_URL        optional Git URL override (default: github.com)
   VERIFY_TIMEOUT_SECONDS, VERIFY_CLONE_TIMEOUT_SECONDS: optional
 
@@ -53,16 +54,16 @@ import os
 from pathlib import Path
 import re
 import shlex
-import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import delivery_support as support
+import added_tests
+from added_tests import run_commands as run_verification
 from delivery_support import DeliveryError
 
 COMMIT = re.compile(r"\A[0-9a-f]{40}\Z")
-LIMIT = 4000
 
 
 def receipt_fields(workspace):
@@ -142,35 +143,32 @@ def verify_commands():
     return commands
 
 
-def run_verification(source, commands, report):
-    """Run every configured command; a failure does not stop the report."""
-    environment = support.git_environment(with_credential=False)
-    temporary = Path(source).parent / "tmp"
-    temporary.mkdir(exist_ok=True)
-    environment["TMPDIR"] = str(temporary)
-    failures = 0
-    for command in commands:
-        try:
-            status, output, diagnostics = support.run(
-                command, cwd=str(source), check=False, environment=environment,
-                timeout=support.number("VERIFY_TIMEOUT_SECONDS", 1200))
-        except FileNotFoundError:
-            status, output, diagnostics = 127, "", "The configured verification command is not installed"
-        except subprocess.TimeoutExpired:
-            status, output, diagnostics = 124, "", "The configured verification command ran out of time"
-        text = (output + diagnostics).strip()
-        if len(text) > LIMIT:
-            text = "… " + text[-LIMIT:]
-        report.append("Command: %s\nExit status: %d\n%s" % (shlex.join(command), status, text or "(no output)"))
-        if status != 0:
-            failures += 1
-    return failures
+def delivered_paths(source, workspace, receipt, merge):
+    """Attribute additions to this receipt, not to the prepared checkout."""
+    if (receipt.get("merge_sha") and not receipt.get("merge_left_to_person")
+            and receipt.get("merge_method") in {"merge", "squash"}):
+        return added_tests.detect(source, merge + "^1", merge)
+    base, head = receipt.get("integration_base"), receipt.get("head")
+    if not base or not head:
+        raise DeliveryError("the delivery does not record its integration basis and request head")
+    # A deleted ticket branch can make the original (pre-rebase) commits
+    # unavailable in the fresh clone. The receipt's original workspace is
+    # also a source of those exact objects, never of its current dirty tree.
+    try:
+        return added_tests.detect(source, base, head)
+    except DeliveryError:
+        return added_tests.detect(workspace, base, head)
 
 
 def verify(arguments):
     dry = arguments == ["--dry-run"]
     if arguments and not dry:
         raise DeliveryError("This verification process takes no arguments except --dry-run")
+    configuration, configuration_error = None, ""
+    try:
+        configuration = added_tests.settings()
+    except DeliveryError as error:
+        configuration_error = str(error)
     support.discard_prompt()
     workspace = os.environ.get("TASK_WORKSPACE") or os.getcwd()
     home = os.environ.get("TASK_HOME") or tempfile.gettempdir()
@@ -243,7 +241,8 @@ def verify(arguments):
             "be read from here."]), flush=True)
         raise
     _, tip, _ = support.run(support.git("-C", str(source), "rev-parse", "HEAD"))
-    report = ["Fetched %s of %s/%s at commit %s." % (fetched, owner, name, tip.strip())]
+    report = added_tests.Report()
+    report.append("Fetched %s of %s/%s at commit %s." % (fetched, owner, name, tip.strip()))
     if dry:
         report.append("This was a check of the configured commands against the branch as it is, "
                       "with no delivery to verify, so it ends non-zero on purpose.")
@@ -291,12 +290,25 @@ def verify(arguments):
             report.append("The configured commands ran with commit %s checked out%s."
                           % (merge, "" if merge == tip.strip() else
                              "; %s has moved on to %s since" % (fetched, tip.strip())))
-        failures = run_verification(source, commands, report)
+        failures = run_verification(source, commands, report, temporary=Path(source).parent / "tmp")
         report.append("%d of %d configured verification commands failed." % (failures, len(commands)))
+        if configuration_error:
+            report.append("Added tests not run: " + configuration_error)
+            failures += 1
+        elif unchanged:
+            report.append("Unchanged delivery: no added tests.")
+        elif dry:
+            report.append("Added tests not run: this dry run has no delivery to attribute additions to.")
+        else:
+            try:
+                paths = delivered_paths(source, workspace, receipt, merge)
+            except DeliveryError as error:
+                report.append("Added tests not executed individually: detection unavailable (%s)." % error)
+            else:
+                failures += added_tests.run(source, paths, report, configuration)
     else:
         report.append("The configured verification commands were not run: %s, so there is nothing verified "
                       "to check." % absent)
-    print("\n\n".join(report))
     if dry:
         return 3
     return 1 if failures or not contained else 0

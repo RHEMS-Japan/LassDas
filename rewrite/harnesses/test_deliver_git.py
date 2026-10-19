@@ -408,6 +408,7 @@ class DeliveryTests(unittest.TestCase):
 
     def test_a_moved_integration_branch_is_merged_before_publishing(self):
         self.advance_integration_branch("library/run.go", "package library\n\nfunc Other() {}\n")
+        integration = self.git(self.remote, "rev-parse", "master").stdout.strip()
         self.change("main.go", "package main\n\nfunc main() {}\n")
         done = self.deliver()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -416,6 +417,28 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("Other", merged)
         self.assertIn("func main", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
         self.assertIn("created a commit", done.stdout)
+        self.assertEqual(self.receipt()["integration_base"], integration)
+        self.assertEqual(self.git(self.workspace, "rev-parse", "refs/ticket-engine/integration").stdout.strip(), integration)
+
+    def test_added_test_basis_survives_retry_but_changes_for_a_new_round(self):
+        self.advance_integration_branch("library/test_other.py", "raise SystemExit(19)\n")
+        first_base = self.git(self.remote, "rev-parse", "master").stdout.strip()
+        self.change("library/test_first.py", "print('FIRST')\n")
+        self.assertEqual(self.deliver().returncode, 0)
+        first = self.receipt()
+        self.assertEqual(first["integration_base"], first_base)
+        self.assertEqual(self.deliver().returncode, 0)
+        self.assertEqual(self.receipt()["integration_base"], first_base)
+        self.advance_integration_branch("library/test_other_next.py", "raise SystemExit(20)\n")
+        second_base = self.git(self.remote, "rev-parse", "master").stdout.strip()
+        self.change("library/test_second.py", "print('SECOND')\n")
+        self.assertEqual(self.deliver().returncode, 0)
+        second = self.receipt()
+        self.assertEqual(second["integration_base"], second_base)
+        self.assertEqual(second["previous"][0]["integration_base"], first_base)
+        import added_tests
+        self.assertEqual(added_tests.detect(self.workspace, second["integration_base"], second["head"]),
+                         ["library/test_second.py"])
 
     def test_a_conflict_with_the_integration_branch_waits_for_the_next_round(self):
         self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
@@ -559,11 +582,13 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("func main", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
 
     def test_a_squashing_service_gets_no_catch_up(self):
+        original = self.git(self.workspace, "rev-parse", "HEAD").stdout.strip()
         self.advance_integration_branch("library/run.go", "package library\n\nfunc Other() {}\n")
         self.change("main.go", "package main\n\nfunc main() {}\n")
         done = self.deliver(DELIVERY_MERGE_METHOD="squash")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(len(self.parents(self.workspace)), 1, "the branch was caught up under the squash method")
+        self.assertEqual(self.receipt()["integration_base"], original)
     def remove_on_integration_branch(self, relative, message="Codex: another delivery removes a path"):
         other = self.root / ("other-remove-" + relative.replace("/", "-"))
         self.git(self.root, "clone", "--no-local", str(self.remote), str(other))
