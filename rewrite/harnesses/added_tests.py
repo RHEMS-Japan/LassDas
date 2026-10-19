@@ -18,8 +18,16 @@ import delivery_support as support
 from delivery_support import DeliveryError
 
 INTEGRATION_REF = "refs/ticket-engine/integration"
-DEFAULT_PATTERNS = "*_test.*\ntest_*\n*.test.*\n*.spec.*\n*Test.java\ntests/"
+DEFAULT_PATTERNS = "\n".join(["*_test.go", "test_*.py", "*_test.py", "*Test.java"] +
+                             ["*." + kind + "." + extension for kind in ("test", "spec")
+                              for extension in ("js", "jsx", "ts", "tsx")])
 PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
+
+
+class Report:
+    """Keep each completed observation if a later command is interrupted."""
+    def append(self, text):
+        print(text + "\n", flush=True)
 
 
 def git(source, *arguments, check=True):
@@ -38,19 +46,35 @@ def workspace_base(source):
         return empty_tree(source)
     branch = os.environ.get("TASK_BRANCH") or os.environ.get("DELIVERY_BASE_BRANCH")
     refs = [INTEGRATION_REF] + (["refs/remotes/origin/" + branch] if branch else [])
-    latest = ""
+    candidates = []
     for ref in refs:
         code, value, _ = support.run(support.git("-C", str(source), "rev-parse", "--verify", ref), check=False)
         if code == 0:
             candidate = git(source, "merge-base", "HEAD", value.strip())
-            if latest:
-                code, _, _ = support.run(support.git("-C", str(source), "merge-base", "--is-ancestor", latest, candidate), check=False)
+            if ref == INTEGRATION_REF:
+                code, merge, _ = support.run(support.git("-C", str(source), "rev-parse", "--verify", "MERGE_HEAD"), check=False)
+                if code == 0:
+                    code, _, _ = support.run(support.git("-C", str(source), "merge-base", "--is-ancestor", value.strip(), merge.strip()), check=False)
+                    if code == 0:
+                        # The incoming files are already in this tree, even
+                        # while a conflict prevents the merge commit.
+                        candidate = value.strip()
+            candidates.append(candidate)
+    prepared = os.environ.get("TASK_BASE_COMMIT")
+    if prepared:
+        code, _, _ = support.run(support.git("-C", str(source), "merge-base", "--is-ancestor", prepared, "HEAD"), check=False)
+        if code == 0:
+            candidates.append(git(source, "rev-parse", "--verify", "--end-of-options", prepared + "^{commit}"))
+    latest = ""
+    for candidate in candidates:
+        if latest:
+            code, _, _ = support.run(support.git("-C", str(source), "merge-base", "--is-ancestor", latest, candidate), check=False)
+            if code:
+                code, _, _ = support.run(support.git("-C", str(source), "merge-base", "--is-ancestor", candidate, latest), check=False)
                 if code:
-                    code, _, _ = support.run(support.git("-C", str(source), "merge-base", "--is-ancestor", candidate, latest), check=False)
-                    if code:
-                        raise DeliveryError("known integration bases diverged; no single basis is known")
-                    continue
-            latest = candidate
+                    raise DeliveryError("known integration bases diverged; no single basis is known")
+                continue
+        latest = candidate
     if latest:
         return latest
     base = os.environ.get("TASK_BASE_COMMIT") or os.environ.get("ADDED_TEST_BASE")
@@ -125,9 +149,12 @@ def settings():
     return template, patterns, cap
 
 
-def run_commands(source, commands, report):
+def run_commands(source, commands, report, *, temporary=None):
     """Run all commands, keeping the existing post-delivery command policy."""
     environment = support.git_environment(with_credential=False)
+    if temporary is not None:
+        temporary.mkdir(parents=True, exist_ok=True)
+        environment["TMPDIR"] = str(temporary)
     failures = 0
     for command in commands:
         try:
@@ -140,7 +167,8 @@ def run_commands(source, commands, report):
         text = (output + diagnostics).strip()
         if len(text) > 4000:
             text = "… " + text[-4000:]
-        label = " ".join(support.readable(shlex.quote(part)) for part in command)
+        label = " ".join(support.readable(part) if any(not c.isprintable() for c in part)
+                         else shlex.quote(part) for part in command)
         report.append("Command: %s\nExit status: %d\n%s" % (label, status, text or "(no output)"))
         failures += status != 0
     return failures
@@ -150,7 +178,7 @@ def run(source, paths, report, configuration):
     template, patterns, cap = configuration
     paths = [path for path in paths if any(path.startswith(rule) if rule.endswith("/")
              else fnmatch.fnmatchcase(PurePosixPath(path).name, rule) for rule in patterns)]
-    report.append("%d added test files matched the configured path rules." % len(paths))
+    report.append("%d added test file%s matched the configured path rules." % (len(paths), "" if len(paths) == 1 else "s"))
     if not paths:
         return 0
     report.append("Added tests: " + ", ".join(map(support.readable, paths)))
@@ -167,11 +195,11 @@ def run(source, paths, report, configuration):
             present.append(path)
     commands = expand(template, present)
     failures = run_commands(source, commands[:cap], report)
-    report.append("%d of %d added-test commands failed." % (failures, min(len(commands), cap)))
     excess = max(0, len(commands) - cap)
+    report.append("%d of %d added-test commands failed, and %d not run." % (failures, min(len(commands), cap), excess))
     if excess:
         report.append("%d additional command%s not run: ADDED_TEST_MAX_COMMANDS=%d." % (excess, "" if excess == 1 else "s", cap))
-    return failures + bool(excess)
+    return failures
 
 
 def verify(arguments):
@@ -180,14 +208,13 @@ def verify(arguments):
     configuration = settings()
     support.discard_prompt()
     source = Path(os.environ.get("TASK_WORKSPACE") or os.getcwd())
-    report = []
+    report = Report()
     try:
         paths = detect(source, workspace_base(source))
     except DeliveryError as error:
         print("Added tests not executed individually: detection unavailable (%s)." % error)
         return 0
     failures = run(source, paths, report, configuration)
-    print("\n\n".join(report))
     return int(bool(failures))
 
 

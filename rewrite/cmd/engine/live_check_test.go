@@ -549,8 +549,16 @@ func TestTheDocumentedLiveCheckJoinsTheShippedVerifyStage(t *testing.T) {
 			for _, process := range cfg.Roles[verify].Processes {
 				shipped = append(shipped, process.Name)
 			}
-			if !slices.Equal(shipped, []string{"project-build", "project-tests", "added-tests"}) {
+			if !slices.Equal(shipped, []string{"project-build", "project-tests"}) {
 				t.Fatalf("the shipped verify stage runs %v", shipped)
+			}
+			stage := slices.IndexFunc(cfg.Workflow.Stages, func(stage chain.Stage) bool { return stage.Name == "verify" })
+			if stage < 0 || stage+1 >= len(cfg.Workflow.Stages) || cfg.Workflow.Stages[stage+1] != (chain.Stage{Name: "verify_added", Kind: chain.CommandStage, OnFailure: "elicit"}) {
+				t.Fatalf("added tests must run after aggregate verification: %+v", cfg.Workflow.Stages)
+			}
+			added := slices.IndexFunc(cfg.Roles, func(role chain.Role) bool { return role.Name == "verify_added" })
+			if added < 0 || len(cfg.Roles[added].Processes) != 1 || cfg.Roles[added].Processes[0].Name != "added-tests" {
+				t.Fatal("the example lacks its separate added-test command")
 			}
 			tests := cfg.Roles[verify].Processes[1]
 			launcher := tests.Command[:len(tests.Command)-1]

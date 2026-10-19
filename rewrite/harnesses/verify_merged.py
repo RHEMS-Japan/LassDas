@@ -43,7 +43,6 @@ Environment (all from the operator, never from a role):
   DELIVERY_BASE_BRANCH       integration branch to check
   VERIFY_COMMANDS            newline-separated commands, each run without a shell
   ADDED_TEST_COMMAND, ADDED_TEST_PATTERNS, ADDED_TEST_MAX_COMMANDS: added_tests.py
-  TASK_BASE_COMMIT            prepared workspace basis (pre-delivery only)
   DELIVERY_REMOTE_URL        optional Git URL override (default: github.com)
   VERIFY_TIMEOUT_SECONDS, VERIFY_CLONE_TIMEOUT_SECONDS: optional
 
@@ -146,7 +145,8 @@ def verify_commands():
 
 def delivered_paths(source, workspace, receipt, merge):
     """Attribute additions to this receipt, not to the prepared checkout."""
-    if receipt.get("merge_sha") and receipt.get("merge_method") in {"merge", "squash"}:
+    if (receipt.get("merge_sha") and not receipt.get("merge_left_to_person")
+            and receipt.get("merge_method") in {"merge", "squash"}):
         return added_tests.detect(source, merge + "^1", merge)
     base, head = receipt.get("integration_base"), receipt.get("head")
     if not base or not head:
@@ -241,7 +241,8 @@ def verify(arguments):
             "be read from here."]), flush=True)
         raise
     _, tip, _ = support.run(support.git("-C", str(source), "rev-parse", "HEAD"))
-    report = ["Fetched %s of %s/%s at commit %s." % (fetched, owner, name, tip.strip())]
+    report = added_tests.Report()
+    report.append("Fetched %s of %s/%s at commit %s." % (fetched, owner, name, tip.strip()))
     if dry:
         report.append("This was a check of the configured commands against the branch as it is, "
                       "with no delivery to verify, so it ends non-zero on purpose.")
@@ -289,7 +290,7 @@ def verify(arguments):
             report.append("The configured commands ran with commit %s checked out%s."
                           % (merge, "" if merge == tip.strip() else
                              "; %s has moved on to %s since" % (fetched, tip.strip())))
-        failures = run_verification(source, commands, report)
+        failures = run_verification(source, commands, report, temporary=Path(source).parent / "tmp")
         report.append("%d of %d configured verification commands failed." % (failures, len(commands)))
         if configuration_error:
             report.append("Added tests not run: " + configuration_error)
@@ -308,7 +309,6 @@ def verify(arguments):
     else:
         report.append("The configured verification commands were not run: %s, so there is nothing verified "
                       "to check." % absent)
-    print("\n\n".join(report))
     if dry:
         return 3
     return 1 if failures or not contained else 0

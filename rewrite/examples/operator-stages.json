@@ -49,6 +49,11 @@
         "on_failure": "elicit"
       },
       {
+        "name": "verify_added",
+        "kind": "command",
+        "on_failure": "elicit"
+      },
+      {
         "name": "review",
         "kind": "command",
         "on_failure": "elicit"
@@ -269,12 +274,18 @@
             "--",
             "/opt/ticket-automation/operator/test"
           ],
-          "instructions": "Run the operator's tests. The exit status and captured command output are observations, not approval.",
+          "instructions": "Run the operator's tests. Its exit status is the observation; it returns no report and no approval.",
           "env": {
             "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch"
           }
-        },
+        }
+      ]
+    },
+    {
+      "name": "verify_added",
+      "purpose": "Run tests added by this request after the aggregate checks finish, or report why they were not run.",
+      "processes": [
         {
           "name": "added-tests",
           "command": [
@@ -298,6 +309,7 @@
           ],
           "instructions": "Run test files added by this request with the configured single-file command, or report that they were not run. Do not replace the operator's aggregate tests.",
           "env": {
+            "ADDED_TEST_COMMAND": "",
             "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch"
           }
@@ -467,6 +479,7 @@
             "TASK_BRANCH": "example-integration-branch",
             "DELIVERY_REPOSITORY": "example-owner/example-repository",
             "DELIVERY_BASE_BRANCH": "example-integration-branch",
+            "ADDED_TEST_COMMAND": "",
             "VERIFY_COMMANDS": "/opt/ticket-automation/operator/build\n/opt/ticket-automation/operator/test"
           },
           "secrets": {

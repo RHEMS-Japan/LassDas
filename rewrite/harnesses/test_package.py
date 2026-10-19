@@ -92,7 +92,8 @@ class PackageTests(unittest.TestCase):
                 roles = json.loads((bundle / "examples" / (example + ".json")).read_text())["roles"]
                 verify = next(role for role in roles if role["name"] == "verify")["processes"]
                 self.assertEqual(verify[1]["command"], verify[0]["command"][:-1] + ["/opt/ticket-automation/operator/test"])
-                self.assertEqual(verify[2]["name"], "added-tests")
+                added = next(role for role in roles if role["name"] == "verify_added")["processes"]
+                self.assertEqual([process["name"] for process in added], ["added-tests"])
                 for role in roles:
                     for process in role["processes"]:
                         argv = process["command"]

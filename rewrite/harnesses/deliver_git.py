@@ -383,7 +383,8 @@ def integration_tip(workspace, url, base):
 
 
 def catch_up(workspace, url, base, issue, method):
-    """Bring the ticket branch up to date with the integration branch. Returns
+    """Record the fetched integration tip for added-test attribution under all
+    methods. For merge/none, also bring the ticket branch up to date. Returns
     whether a merge commit was made. A conflict is left in the working tree,
     between Git's markers where Git can write them, for the next
     implementation launch to resolve. Only under the merge method, and under
