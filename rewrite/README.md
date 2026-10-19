@@ -1716,6 +1716,25 @@ action. It can require HTTP basic authentication (`--auth-user-env` and
 without it. `deploy/ticket-engine/statefulset.yaml.example` runs it as a
 second container of the same Pod with the state volume mounted read-only.
 
+The overview reads and displays usage of the filesystem containing the queue,
+including space unavailable to ordinary processes. This is not the size of the
+queue directory or a claim about a storage provider's separate quota. An
+unavailable reading is shown as unknown, never as zero usage.
+`intake.disk_notice_percent` sets the warning threshold (default 85; an integer
+from 1 to 100, with zero selecting the default). Give status the engine's
+configuration with `--config` to show the same threshold. Above it, the watch
+posts one capacity warning per watched unfinished request (including those
+waiting for an answer or model credit) through the existing notice
+path. Its saved notice prevents resending after a restart or another crossing.
+The warning does not stop work, delete files or change routing. A full disk can
+also prevent saving a notice: that failure is logged and retried, not reported
+as a sent warning. Status reads usage independently and never posts anything.
+
+Homes are currently reused per role and process, not created per attempt.
+Their latest contents and the shared checkout remain available for retries;
+this monitoring change does not remove either. Finished-request retention is
+unchanged.
+
 Nothing the runtime wrote is out of the page's reach: every directory under
 the queue is listed and every file served whole under `/files/`, with a path
 that leaves the queue refused, symbolic links included. For a review after the

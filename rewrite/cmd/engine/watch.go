@@ -61,6 +61,7 @@ type intakeConfig struct {
 	// StallNoticeMinutes is how long a request may go without completing a step
 	// before the requester is told. Absent means 90 minutes; zero says nothing.
 	StallNoticeMinutes *int `json:"stall_notice_minutes,omitempty"`
+	DiskNoticePercent  int  `json:"disk_notice_percent,omitempty"`
 	// Statuses names, by id, where the issue moves at each turn of the work.
 	Statuses *statusConfig `json:"statuses,omitempty"`
 	// CategoryOnAccept is added to an accepted issue, so the tracker's own
@@ -112,6 +113,9 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 	}
 	if cfg.Intake == nil {
 		return fail(errors.New("watch requires an explicit intake configuration"))
+	}
+	if cfg.Intake.DiskNoticePercent < 0 || cfg.Intake.DiskNoticePercent > 100 {
+		return fail(errors.New("intake.disk_notice_percent must be between 1 and 100, or zero for the default"))
 	}
 	if err := validateStopReporter(*cfg); err != nil {
 		return fail(err)

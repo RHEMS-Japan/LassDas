@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/diskusage"
 	"ticket-runner/internal/stagename"
 )
 
@@ -81,18 +82,19 @@ func run(ctx context.Context, args []string, log io.Writer) error {
 }
 
 type server struct {
-	runDir    string
-	configRaw []byte
-	config    map[string]any
-	issueBase string
-	user      string
-	password  string
-	location  *time.Location
-	templates *template.Template
+	diskPercent func(string) (float64, error)
+	runDir      string
+	configRaw   []byte
+	config      map[string]any
+	issueBase   string
+	user        string
+	password    string
+	location    *time.Location
+	templates   *template.Template
 }
 
 func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error) {
-	s := &server{runDir: runDir, location: time.Local}
+	s := &server{runDir: runDir, location: time.Local, diskPercent: diskusage.Percent}
 	if configPath != "" {
 		raw, err := os.ReadFile(configPath)
 		if err != nil {
@@ -1571,23 +1573,26 @@ func (s *server) sizeIn(rel string) (int64, error) {
 }
 
 type page struct {
-	Lang      string
-	Now       string
-	RunDir    string
-	Path      string
-	Base      string
-	Files     []fileEntry
-	Jobs      []*job
-	Lanes     []lane
-	Columns   []column
-	Job       *job
-	Intake    any
-	Stages    []string
-	Router    any
-	Selection any
-	Config    bool
-	Log       string
-	Notes     []string
+	DiskUsage     string
+	DiskThreshold int
+	DiskWarning   bool
+	Lang          string
+	Now           string
+	RunDir        string
+	Path          string
+	Base          string
+	Files         []fileEntry
+	Jobs          []*job
+	Lanes         []lane
+	Columns       []column
+	Job           *job
+	Intake        any
+	Stages        []string
+	Router        any
+	Selection     any
+	Config        bool
+	Log           string
+	Notes         []string
 }
 
 func (s *server) render(w http.ResponseWriter, name string, data page) {
@@ -1604,6 +1609,18 @@ func (s *server) render(w http.ResponseWriter, name string, data page) {
 func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	data := page{Lang: language(r), Now: s.formatTime(now), RunDir: s.runDir, Config: s.configRaw != nil}
+	data.DiskThreshold = diskusage.DefaultThreshold
+	if intake, ok := s.config["intake"].(map[string]any); ok {
+		if threshold, ok := intake["disk_notice_percent"].(float64); ok && threshold > 0 && threshold <= 100 {
+			data.DiskThreshold = int(threshold)
+		}
+	}
+	if percent, err := s.diskPercent(s.runDir); err != nil {
+		data.Notes = append(data.Notes, "Queue filesystem usage is unknown: "+err.Error())
+	} else {
+		data.DiskUsage = fmt.Sprintf("%.1f%%", percent)
+		data.DiskWarning = percent > float64(data.DiskThreshold)
+	}
 	jobs, err := s.jobs(now)
 	if err != nil {
 		data.Notes = append(data.Notes, "the jobs directory could not be listed: "+err.Error())
@@ -1855,6 +1872,7 @@ func (s *server) languagePage(w http.ResponseWriter, r *http.Request) {
 }
 
 var japanese = map[string]string{
+	"Queue filesystem usage": "作業用の保存領域の使用率", "warning threshold": "通知の閾値",
 	"ticket engine status": "自動処理の状態", "skip to content": "本文へ", "overview": "一覧", "configuration as read": "読み込まれた設定", "runtime log": "本体のログ",
 	"every file of the queue": "queue の全ファイル", "every file of this request": "この依頼の全ファイル", "Requests": "依頼",
 	"Queue": "queue", "read at": "読み取り時刻", "No request has been accepted into this queue yet.": "この queue に受け付けた依頼はまだありません。",

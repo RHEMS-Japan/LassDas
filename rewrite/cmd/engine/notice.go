@@ -250,7 +250,7 @@ func pendingNotice(log noticeLog) int {
 // onceNotice reports a kind said at most once per request, so any record of
 // it, posted or predating, settles it.
 func onceNotice(kind string) bool {
-	return kind == acceptedNotice || kind == startedNotice || kind == modelsNotice || strings.HasPrefix(kind, stagePrefix)
+	return kind == diskNotice || kind == acceptedNotice || kind == startedNotice || kind == modelsNotice || strings.HasPrefix(kind, stagePrefix)
 }
 
 // noticeDue decides whether a condition may speak again. The budget pause and
@@ -349,7 +349,7 @@ func kindStart(now time.Time) time.Time {
 // postableKinds are the kinds of notice an engine with this configuration
 // posts.
 func postableKinds(cfg config) []string {
-	kinds := []string{resumeNotice}
+	kinds := []string{resumeNotice, diskNotice}
 	if cfg.Intake == nil {
 		return kinds
 	}

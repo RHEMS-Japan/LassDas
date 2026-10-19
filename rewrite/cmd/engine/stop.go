@@ -184,6 +184,11 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				observe("no-progress notice not confirmed: " + noticeErr.Error())
 			}
 		}
+		if instruction == nil && err == nil {
+			if noticeErr := noteQueueDisk(ctx, cfg, notice); noticeErr != nil {
+				observe("queue disk usage notice not confirmed: " + noticeErr.Error())
+			}
+		}
 		if instruction != nil {
 			stopChild()
 			if err := writeRuntimeFile(filepath.Join(directory, "stop-request.json"), instruction); err == nil {

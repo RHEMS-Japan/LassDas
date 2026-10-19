@@ -116,6 +116,7 @@ details{margin:.4em 0}details summary{cursor:pointer;color:var(--accent);font-si
 {{define "overview"}}{{template "head" (head .Lang "ticket engine status" 30)}}{{template "top" .}}<main id="main">
 <h1>{{t .Lang "Requests"}}</h1>
 <p class="sub"><span class="path">{{t .Lang "Queue"}} {{.RunDir}} · </span>{{t .Lang "read at"}} {{.Now}}</p>
+{{if .DiskUsage}}<p class="{{if .DiskWarning}}attn{{else}}sub{{end}}">{{t .Lang "Queue filesystem usage"}}: {{.DiskUsage}} ({{t .Lang "warning threshold"}} {{.DiskThreshold}}%)</p>{{end}}
 {{range .Notes}}<p class="err">{{.}}</p>{{end}}
 <div class="strip summary">{{range .Lanes}}<span class="badge {{.Key}}">{{t $.Lang .Title}} <b>{{.Count}}</b></span>{{end}}</div>
 {{if not .Jobs}}<p class="meta">{{t .Lang "No request has been accepted into this queue yet."}}</p>{{end}}

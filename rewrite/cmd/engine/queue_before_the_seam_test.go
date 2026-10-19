@@ -196,6 +196,25 @@ func TestAQueueWrittenBeforeTheSeamCarriesOn(t *testing.T) {
 		if strings.HasPrefix(path, "jobs/62/") {
 			continue
 		}
+		if path == noticeKindsFile {
+			// A new notification kind is registered without changing the old
+			// kinds or the already finished requests.
+			var before noticeKinds
+			if err := json.Unmarshal(data, &before); err != nil {
+				t.Fatal(err)
+			}
+			after, err := loadNoticeKinds(root)
+			if err != nil || after.Since[diskNotice].IsZero() {
+				t.Fatalf("disk notification kind not registered: %+v %v", after, err)
+			}
+			delete(after.Since, diskNotice)
+			beforeJSON, _ := json.Marshal(before)
+			afterJSON, _ := json.Marshal(after)
+			if !bytes.Equal(beforeJSON, afterJSON) {
+				t.Errorf("previous notification kinds changed: %s", afterJSON)
+			}
+			continue
+		}
 		now, err := os.ReadFile(filepath.Join(root, path))
 		if err != nil || !bytes.Equal(now, data) {
 			t.Errorf("%s changed: %s (%v)", path, now, err)
