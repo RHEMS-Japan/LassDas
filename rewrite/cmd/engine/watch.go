@@ -364,11 +364,19 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				reason = "(no reason given)"
 			}
 			if trimTrouble[name] != reason {
-				say("finished caches not removed, retried each tick: " + reason)
+				label := "finished caches not removed, retried each tick: "
+				if installErr != nil {
+					label = "finished workspace cleanup incomplete, retried each tick: "
+				}
+				say(label + reason)
 				trimTrouble[name] = reason
 			}
 		} else if trimTrouble[name] != "" {
-			say("finished caches removed")
+			if len(cfg.Intake.TrimInstallDirs) != 0 {
+				say("finished cleanup complete")
+			} else {
+				say("finished caches removed")
+			}
 			delete(trimTrouble, name)
 		}
 	}

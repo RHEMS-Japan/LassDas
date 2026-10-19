@@ -8,12 +8,16 @@ regenerated install directories".
 An empty-by-default `intake.trim_install_dirs` lets an operator declare exact
 relative install-output directories. Before a different role executes, only
 the previous role's bound homes are cleaned, after all processes returned and
-results were saved. Same-role retries keep their directories. Failed roles
+results were saved. Same-role retries and entering a requester question keep
+their directories. Failed roles
 that hand back to another role are included; success-only cleanup was considered
 but not selected because the declared files are regenerable and failure evidence
 remains in history and logs. Workspace cleanup waits for the existing finished
 request path, stop report and preview lifetime. Cleanup failure is an observation,
-not delivery failure.
+not delivery failure. Finished workspace cleanup has one 512-entry visit budget
+per tick and preserves Git-tracked work. A zero-removal pass stops and reports
+the remaining tree rather than retrying immediately. No selected path remaining
+means no saved-configuration read; no completion marker is needed.
 
 Reuse the existing descriptor-relative directory/mount boundary helpers. Do not
 pass arbitrary multi-component operator paths to the string-path final-cache

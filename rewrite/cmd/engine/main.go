@@ -447,9 +447,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 	if err != nil {
 		return err
 	}
-	if cfg.Intake != nil && len(cfg.Intake.TrimInstallDirs) != 0 {
-		questionAware = installTrimExecutor{next: questionAware, cfg: cfg, job: filepath.Dir(store.Dir), observe: observe}
-	}
+	questionAware = withInstallTrim(questionAware, cfg, filepath.Dir(store.Dir), observe)
 	engine := chain.Chain{
 		Router:   router,
 		Executor: questionAware, Store: store,

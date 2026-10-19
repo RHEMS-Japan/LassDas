@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"ticket-runner/internal/chain"
 )
@@ -24,18 +26,15 @@ func validateInstallTrim(cfg config) error {
 			if process.Receipt == "" {
 				continue
 			}
-			directory := process.Directory
-			if filepath.IsAbs(directory) {
+			receipt := filepath.Join(process.Directory, process.Receipt)
+			if filepath.IsAbs(receipt) && process.Env["TASK_WORKSPACE"] != "" {
 				var err error
-				directory, err = filepath.Rel(process.Env["TASK_WORKSPACE"], directory)
-				if err != nil || !filepath.IsLocal(directory) {
-					return refuse(process.Receipt)
+				receipt, err = filepath.Rel(process.Env["TASK_WORKSPACE"], receipt)
+				if err != nil {
+					return fmt.Errorf("receipt %q cannot be located for workspace cleanup: %w", process.Receipt, err)
 				}
 			}
-			if !filepath.IsLocal(process.Receipt) {
-				return refuse(process.Receipt)
-			}
-			receipts = append(receipts, filepath.Join(directory, process.Receipt))
+			receipts = append(receipts, receipt)
 		}
 	}
 	for _, name := range cfg.Intake.TrimInstallDirs {
@@ -43,20 +42,33 @@ func validateInstallTrim(cfg config) error {
 			return refuse(name)
 		}
 		for _, part := range strings.Split(name, "/") {
+			for _, c := range part {
+				if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("._@+-", c)) {
+					return refuse(name)
+				}
+			}
 			switch strings.ToLower(part) {
 			case "", ".", "..", ".git", "logs", "run", "live", "stop-report", "preview-down", "history.json", "task-activity.json", "task-preview.txt":
 				return refuse(name)
 			}
 		}
-		folded := strings.ToLower(name)
 		for _, receipt := range receipts {
-			receipt = strings.ToLower(receipt)
-			if folded == receipt || strings.HasPrefix(receipt, folded+"/") || strings.HasPrefix(folded, receipt+"/") {
+			if installPathsOverlap(name, receipt) {
 				return refuse(name)
 			}
 		}
 	}
 	return nil
+}
+
+func installPathsOverlap(a, b string) bool {
+	x, y := strings.Split(a, "/"), strings.Split(b, "/")
+	for i := 0; i < len(x) && i < len(y); i++ {
+		if !strings.EqualFold(x[i], y[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // The chain saves every returned process result before starting another role.
@@ -69,8 +81,15 @@ type installTrimExecutor struct {
 	observe func(string)
 }
 
+func withInstallTrim(next chain.Executor, cfg config, job string, observe func(string)) chain.Executor {
+	if cfg.Intake == nil || len(cfg.Intake.TrimInstallDirs) == 0 {
+		return next
+	}
+	return installTrimExecutor{next: next, cfg: cfg, job: job, observe: observe}
+}
+
 func (e installTrimExecutor) Execute(ctx context.Context, next chain.Assignment, state chain.State) []chain.Result {
-	if state.Step != "" && state.Step != next.Role {
+	if state.Step != "" && state.Step != next.Role && next.Role != e.cfg.Intake.QuestionRole {
 		for i, role := range e.cfg.Roles {
 			if role.Name != state.Step {
 				continue
@@ -95,6 +114,9 @@ func (e installTrimExecutor) Execute(ctx context.Context, next chain.Assignment,
 }
 
 func trimInstallPaths(ctx context.Context, directory, base string, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
 	job, mount, err := openInstallRoot(directory)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -103,15 +125,40 @@ func trimInstallPaths(ctx context.Context, directory, base string, names []strin
 		return err
 	}
 	defer job.Close()
-	return trimOpenedInstallPaths(ctx, job, base, names, mount)
+	return trimOpenedInstallPaths(ctx, job, base, names, mount, true)
 }
 
 func trimFinishedInstalls(ctx context.Context, directory string, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
 	job, mount, err := openInstallRoot(directory)
 	if err != nil {
 		return err
 	}
 	defer job.Close()
+	workspace, err := removalDirectory(job, "workspace", mount)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer workspace.Close()
+	var present []string
+	for _, name := range names {
+		// Root confines this existence check. Parent links and mounts are
+		// checked again component by component before any removal.
+		if _, err := workspace.Lstat(name); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		present = append(present, name)
+	}
+	if len(present) == 0 {
+		return nil
+	}
 	raw, err := removalRead(job, "engine.json", mount)
 	if err != nil {
 		return fmt.Errorf("reading the saved configuration before workspace cleanup: %w", err)
@@ -122,7 +169,7 @@ func trimFinishedInstalls(ctx context.Context, directory string, names []string)
 	}
 	for _, role := range saved.Roles {
 		for _, process := range role.Processes {
-			if process.Receipt != "" && (!filepath.IsAbs(process.Directory) || process.Env["TASK_WORKSPACE"] != filepath.Join(directory, "workspace")) {
+			if process.Receipt != "" && process.Env["TASK_WORKSPACE"] != filepath.Join(directory, "workspace") {
 				return errors.New("the saved receipt is not bound to this workspace; workspace cleanup is held")
 			}
 		}
@@ -131,7 +178,50 @@ func trimFinishedInstalls(ctx context.Context, directory string, names []string)
 	if err := validateInstallTrim(saved); err != nil {
 		return fmt.Errorf("protecting the saved request's receipts: %w", err)
 	}
-	return trimOpenedInstallPaths(ctx, job, "workspace", names, mount)
+	if err := protectTrackedInstallPaths(ctx, workspace, filepath.Join(directory, "workspace"), present); err != nil {
+		return err
+	}
+	return trimOpenedInstallPaths(ctx, job, "workspace", present, mount, false)
+}
+
+func protectTrackedInstallPaths(ctx context.Context, workspace *os.Root, directory string, names []string) error {
+	// A plain directory must not discover an unrelated ancestor repository.
+	if _, err := workspace.Lstat(".git"); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	readGit := func(args ...string) ([]byte, error) {
+		command := exec.CommandContext(ctx, "git", append([]string{"-C", directory, "-c", "core.fsmonitor=false"}, args...)...)
+		command.Env = []string{"PATH=" + os.Getenv("PATH"), "LC_ALL=C", "GIT_CONFIG_GLOBAL=" + os.DevNull,
+			"GIT_CONFIG_SYSTEM=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0"}
+		return command.Output()
+	}
+	top, err := readGit("rev-parse", "--show-toplevel")
+	if err != nil {
+		return fmt.Errorf("workspace Git root could not be checked; cleanup is held: %w", err)
+	}
+	actual, err := os.Stat(strings.TrimSpace(string(top)))
+	expected, expectedErr := workspace.Stat(".")
+	if err != nil || expectedErr != nil || !os.SameFile(expected, actual) {
+		return errors.New("Git root is not this workspace; cleanup is held")
+	}
+	// Git's icase pathspec does not cover every filesystem case alias.
+	// Compare index paths (not their contents) with the same rule as receipts.
+	out, err := readGit("ls-files", "--cached", "-z")
+	if err != nil {
+		return fmt.Errorf("Git-tracked workspace files could not be checked; cleanup is held: %w", err)
+	}
+	for _, tracked := range strings.Split(string(out), "\x00") {
+		for _, name := range names {
+			if tracked != "" && installPathsOverlap(name, tracked) {
+				return errors.New("a selected workspace directory contains Git-tracked work; cleanup is held")
+			}
+		}
+	}
+	return nil
 }
 
 func openInstallRoot(directory string) (*os.Root, string, error) {
@@ -153,17 +243,32 @@ func openInstallRoot(directory string) (*os.Root, string, error) {
 	return job, mount, err
 }
 
-func trimOpenedInstallPaths(ctx context.Context, job *os.Root, base string, names []string, mount string) error {
+func trimOpenedInstallPaths(ctx context.Context, job *os.Root, base string, names []string, mount string, repeat bool) error {
 	var failures []error
+	remaining, removed := 512, 0
 	for _, name := range names {
-		if err := removeInstallDirectory(ctx, job, filepath.Join(base, name), mount); err != nil && !errors.Is(err, os.ErrNotExist) {
-			failures = append(failures, fmt.Errorf("%s/%s: %w", base, name, err))
+		for {
+			err := removeInstallDirectory(ctx, job, filepath.Join(base, name), mount, &remaining, &removed)
+			if errors.Is(err, errRemovalYield) {
+				if removed == 0 {
+					err = fmt.Errorf("no removal progress within the entry budget; cleanup is held: %w", err)
+				} else if repeat {
+					remaining = 512
+					removed = 0
+					continue
+				}
+				return errors.Join(append(failures, fmt.Errorf("%s/%s: %w", base, name, err))...)
+			}
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				failures = append(failures, fmt.Errorf("%s/%s: %w", base, name, err))
+			}
+			break
 		}
 	}
 	return errors.Join(failures...)
 }
 
-func removeInstallDirectory(ctx context.Context, root *os.Root, name, mount string) error {
+func removeInstallDirectory(ctx context.Context, root *os.Root, name, mount string, remaining, removed *int) error {
 	parts := strings.Split(name, string(filepath.Separator))
 	for _, part := range parts[:len(parts)-1] {
 		next, err := removalDirectory(root, part, mount)
@@ -183,20 +288,16 @@ func removeInstallDirectory(ctx context.Context, root *os.Root, name, mount stri
 		return err
 	}
 	defer target.Close()
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		remaining := 512
-		err := removeWorkspaceEntries(target, mount, &remaining)
-		if errors.Is(err, errRemovalYield) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		break
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	if err := removeWorkspaceEntries(target, mount, remaining, removed); err != nil {
+		return err
+	}
+	return removeInstallTarget(root, leaf, before)
+}
+
+func removeInstallTarget(root *os.Root, leaf string, before os.FileInfo) error {
 	after, err := root.Lstat(leaf)
 	if err != nil || !os.SameFile(before, after) {
 		return errors.New("regenerable directory changed while being removed")
