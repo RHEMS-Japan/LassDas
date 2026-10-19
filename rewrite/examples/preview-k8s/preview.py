@@ -161,9 +161,22 @@ def matching(environment, name, pattern, description, default=None):
     return value
 
 
-# An annotation's name, as the API checks it: an optional DNS subdomain and /,
-# then 1 to 63 letters, digits, -, _ and ., starting and ending alphanumeric.
+# An annotation's name: an optional DNS subdomain and /, then 1 to 63
+# letters, digits, -, _ and ., starting and ending alphanumeric. Stricter than
+# the API, which lowercases the name before it checks it: here the prefix has
+# to be lowercase already.
 ANNOTATION_NAME = r"([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?"
+
+
+def json_type(value):
+    """The JSON name of a decoded value's type."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    return {str: "string", list: "array", dict: "object"}.get(type(value), type(value).__name__)
 
 
 def pod_annotations_setting(value):
@@ -183,8 +196,10 @@ def pod_annotations_setting(value):
         annotations = json.loads(value, object_pairs_hook=unique)
     except ValueError:
         raise Failure("%s (it is not JSON)" % wrong) from None
+    except RecursionError:
+        raise Failure("%s (it is nested too deeply to read)" % wrong) from None
     if not isinstance(annotations, dict):
-        raise Failure("%s (it is a JSON %s)" % (wrong, type(annotations).__name__))
+        raise Failure("%s (it is a JSON %s)" % (wrong, json_type(annotations)))
     for name, text in annotations.items():
         if not name:
             raise Failure("%s; a name is empty" % wrong)
@@ -193,7 +208,7 @@ def pod_annotations_setting(value):
         if name in (CHANGE, EXPIRES, ISSUE):
             raise Failure("%s; %s is preview.py's own" % (wrong, name))
         if not isinstance(text, str):
-            raise Failure("%s; the value of %s is not a string" % (wrong, name))
+            raise Failure("%s; the value of %s is a JSON %s, not a string" % (wrong, name, json_type(text)))
     return annotations or None
 
 
