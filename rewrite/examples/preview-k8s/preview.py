@@ -168,6 +168,12 @@ def matching(environment, name, pattern, description, default=None):
 ANNOTATION_NAME = r"([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?"
 
 
+# The API's limit on the annotations of an object (here the Pod template),
+# names and values together, in bytes; preview-change takes its share.
+ANNOTATIONS_LIMIT = 262144
+CHANGE_LENGTH = 12  # the identifier's hex digits (change_identifier)
+
+
 def json_type(value):
     """The JSON name of a decoded value's type."""
     if value is None:
@@ -209,6 +215,10 @@ def pod_annotations_setting(value):
             raise Failure("%s; %s is preview.py's own" % (wrong, name))
         if not isinstance(text, str):
             raise Failure("%s; the value of %s is a JSON %s, not a string" % (wrong, name, json_type(text)))
+    size = sum(len(name.encode()) + len(text.encode()) for name, text in annotations.items())
+    if size + len(CHANGE) + CHANGE_LENGTH > ANNOTATIONS_LIMIT:
+        raise Failure("PREVIEW_POD_ANNOTATIONS holds %d bytes of names and values; with %s the Pod's annotations "
+                      "would pass the API's limit of %d bytes" % (size, CHANGE, ANNOTATIONS_LIMIT))
     return annotations or None
 
 
@@ -570,7 +580,7 @@ def change_identifier(archive_digest, template):
     file, PREVIEW_POD_ANNOTATIONS): a new value for any change of either."""
     digest = hashlib.sha256(b"preview change\n" + archive_digest.encode() + b"\n")
     digest.update(json.dumps(template, sort_keys=True, separators=(",", ":")).encode())
-    return digest.hexdigest()[:12]
+    return digest.hexdigest()[:CHANGE_LENGTH]
 
 
 # -- talking to the cluster ------------------------------------------------

@@ -415,6 +415,12 @@ def load_tool(path=TOOL, name="preview_k8s_example"):
     return module
 
 
+# A DNS subdomain of 253 characters, the longest an annotation name's prefix
+# may be: three labels of 63 and one of 61, joined by dots.
+PREFIX_253 = ".".join(["a" * 63] * 3 + ["b" * 61])
+assert len(PREFIX_253) == 253
+
+
 class PreviewExampleTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="preview-k8s-")
@@ -1186,6 +1192,8 @@ class PreviewExampleTests(unittest.TestCase):
                 ("an upper-case prefix", '{"Example.invalid/keep": "true"}', "is not an annotation name"),
                 ("the change's own name", '{"preview-change": "0"}', "is preview.py's own"),
                 ("the lifetime's name", '{"preview-expires-at": "2100-01-01T00:00:00Z"}', "is preview.py's own"),
+                ("the request number's name", '{"preview-issue": "1"}', "is preview.py's own"),
+                ("a prefix of 254 characters", json.dumps({PREFIX_253 + "a/keep": "true"}), "is not an annotation name"),
                 ("a name given twice", '{"keep": "a", "keep": "b"}', "a name is given twice")):
             with self.subTest(label):
                 self.reset_cluster()
@@ -1195,6 +1203,32 @@ class PreviewExampleTests(unittest.TestCase):
                 last = output.strip().splitlines()[-1]
                 self.assertIn("PREVIEW_POD_ANNOTATIONS", last)
                 self.assertIn(reason, last)
+
+    def test_the_limits_of_a_name_and_of_the_annotations_together(self):
+        """A prefix of 253 characters passes (254 is refused above); the names
+        and values together, with preview-change's 14 + 12 bytes, may reach the
+        API's 262144 bytes but not pass it, counted in bytes."""
+        status, output = self.up(PREVIEW_POD_ANNOTATIONS=json.dumps({PREFIX_253 + "/keep": "true"}))
+        self.assertEqual(status, 0, output)
+        self.assertEqual(self.template_annotations().get(PREFIX_253 + "/keep"), "true")
+        name = "example.invalid/keep"
+        at_limit = 262144 - len("preview-change") - 12 - len(name)
+        for label, value, passes in (("at the limit", "x" * at_limit, True),
+                                     ("one byte over", "x" * (at_limit + 1), False),
+                                     ("under in characters, over in bytes", "あ" * (at_limit // 3 + 1), False)):
+            with self.subTest(label):
+                self.reset_cluster()
+                status, output = self.up(PREVIEW_POD_ANNOTATIONS=json.dumps({name: value}, ensure_ascii=False))
+                if passes:
+                    self.assertEqual(status, 0, output)
+                    annotations = self.template_annotations()
+                    self.assertEqual(sum(len(k.encode()) + len(v.encode()) for k, v in annotations.items()), 262144)
+                else:
+                    self.assertEqual(status, 1, output)
+                    self.assertEqual(self.calls(), [], "the cluster was called")
+                    last = output.strip().splitlines()[-1]
+                    self.assertIn("PREVIEW_POD_ANNOTATIONS holds", last)
+                    self.assertIn("262144 bytes", last)
 
     def test_down_does_not_read_pod_annotations(self):
         status, output = self.down(PREVIEW_POD_ANNOTATIONS="not JSON")
