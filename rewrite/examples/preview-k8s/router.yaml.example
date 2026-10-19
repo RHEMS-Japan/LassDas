@@ -119,6 +119,8 @@ data:
       # relay: end
 
       # relay: begin full. Optional request-local API; keep label sets disjoint.
+      # Also fill <full-relay-cleared-header>, one line per header, and create
+      # the separate Secret preview-relay-full before enabling this mode.
       js_set $full_relay_key preview.fullRelayKey;
       js_set $full_relay_token preview.relayToken;
       js_set $full_write_allowed preview.fullWriteAllowed;
@@ -129,6 +131,10 @@ data:
         default 0;
         "~[^A-Za-z0-9/._~-]" 1;
         "~^<full-relay-refused-path>" 1;
+      }
+      map "$full_relay_refused:$full_write_allowed" $full_relay_message {
+        "0:1" "この画面は課題に投稿された URL から開いてください";
+        default "確認用の画面では使えない操作です";
       }
       log_format preview_full_relay '$remote_addr [$time_local] "$request_method $full_relay_path $server_protocol" $status';
       # relay: end full
@@ -197,7 +203,9 @@ data:
         location @relay_down { access_log /dev/stdout preview_relay; default_type application/json; return 503 '{"error":"API に届きません"}'; }
         # relay: end
         # relay: begin full
+        proxy_ignore_headers X-Accel-Redirect;
         location = /_relay/full {
+          if ($full_relay_label = 0) { return 403; }
           internal;
           auth_basic off;
           auth_request /_preview/check;
@@ -211,8 +219,7 @@ data:
           proxy_set_header Host $host;
           proxy_set_header Authorization "";
           proxy_set_header Cookie "";
-          proxy_set_header X-Impersonate-UID "";
-          proxy_set_header X-API-Key "";
+          proxy_set_header <full-relay-cleared-header> "";
           proxy_set_header <full-relay-header> $full_relay_key;
           proxy_set_header X-Preview-Relay $full_relay_token;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -223,8 +230,8 @@ data:
           access_log /dev/stdout preview_full_relay;
           error_log stderr crit;
         }
-        location @full_relay_refused { default_type application/json; return 403 '{"error":"確認用の画面では使えない操作です"}'; }
-        location @full_relay_down { default_type application/json; return 503 '{"error":"API に届きません"}'; }
+        location @full_relay_refused { access_log /dev/stdout preview_full_relay; default_type application/json; return 403 '{"error":"$full_relay_message"}'; }
+        location @full_relay_down { access_log /dev/stdout preview_full_relay; default_type application/json; return 503 '{"error":"API に届きません"}'; }
         # relay: end full
         location / {
           if ($preview_label = "") { return 404; }
