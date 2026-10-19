@@ -331,9 +331,10 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
 	observe := func(message string) { fmt.Fprintln(log, message) }
-	// A finished request whose caches could not be removed is retried each
-	// tick and said once per reason, not once per tick.
+	// Legacy cache cleanup retries each tick. Install cleanup remembers held
+	// paths separately; both report once per reason, not once per tick.
 	trimTrouble := map[string]string{}
+	installHolds := map[string]*installTrimMemory{}
 	removalTrouble := map[string]string{}
 	diskTrouble := ""
 	diskSaid := map[string]bool{}
@@ -356,7 +357,16 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	trim := func(name, directory string, say func(string)) {
 		var installErr error
 		if len(cfg.Intake.TrimInstallDirs) != 0 {
-			installErr = trimFinishedInstalls(ctx, directory, cfg.Intake.TrimInstallDirs)
+			if installHolds[name] == nil {
+				installHolds[name] = &installTrimMemory{}
+			}
+			installErr = trimFinishedInstalls(ctx, directory, cfg.Intake.TrimInstallDirs, installHolds[name])
+			if errors.Is(installErr, context.Canceled) || errors.Is(installErr, context.DeadlineExceeded) {
+				say("finished workspace cleanup stopped")
+				return
+			}
+		} else {
+			delete(installHolds, name)
 		}
 		if err := errors.Join(installErr, trimFinished(directory)); err != nil {
 			reason := err.Error()
@@ -366,7 +376,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			if trimTrouble[name] != reason {
 				label := "finished caches not removed, retried each tick: "
 				if installErr != nil {
-					label = "finished workspace cleanup incomplete, retried each tick: "
+					label = "finished workspace cleanup incomplete: "
 				}
 				say(label + reason)
 				trimTrouble[name] = reason

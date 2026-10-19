@@ -360,7 +360,10 @@ After all processes of a role have returned and their results have been saved,
 the runtime removes only those directories in that role's homes immediately
 before a different role starts, except when that role asks the requester.
 It keeps them on a same-role retry, when entering a question and while waiting
-for the reply. This also applies when a failed role hands work back to
+for the reply. After the answer, it compares the next role with the last actual
+non-question role in history: returning to that role keeps its home; moving to
+another role cleans that previous role's home, not the questioner's home.
+This also applies when a failed role hands work back to
 another role: the recorded output and logs stay. No workspace directory is
 removed at a stage transition. After delivery or stop, the same list applies
 to the workspace at the existing cleanup point, after stop reporting and the
@@ -369,13 +372,18 @@ cleanup is unchanged. Before workspace cleanup, receipts are also checked
 against that request's saved configuration, not only today's watch settings.
 If a listed workspace path remains, a missing or unreadable saved configuration
 holds cleanup. Once none remain, the saved configuration is not read again.
-Git-tracked files beneath a listed workspace path also hold that deletion,
+Git-tracked files beneath a listed workspace path hold only that named deletion,
 including unpushed work in a stopped request. Non-Git workspaces need no Git
 repository; a parent's repository is not used. Cleanup errors are logged;
 they do not fail delivery. Workspace cleanup visits at most 512 entries per
-tick across the list. A pass that removes nothing stops and reports why, rather
-than repeating forever. Very deep trees can therefore remain for the operator
-to remove. Home cleanup repeats only after a pass actually removed entries.
+tick across the list. A full-budget pass that removes nothing stops and reports why. The
+queue remembers held request/path/reason combinations in memory and does not
+inspect them again until restart or a change to the listed paths. Other names
+still progress; if a held deep tree used the budget, they continue next tick.
+A pass that made progress but used its budget also continues next tick.
+Cancellation is stopped work, not a remembered hold. A Git check's own timeout
+holds cleanup; it is not mistaken for queue cancellation. Very deep trees can remain
+for the operator to remove. Home cleanup repeats only after actual progress.
 
 This setting is permission to remove declared regenerable directories, not an
 installer. **Enable it only when every affected role's operator command always
@@ -401,6 +409,9 @@ does not mean `client/node_modules`. Empty/root/dot/parent paths, Git metadata,
 logs, runtime records and overlap with a configured receipt are rejected
 without regard to letter case, including Unicode simple-case aliases in receipt
 components on case-insensitive filesystems.
+Full-fold aliases such as `ß`/`ss` or `ﬁ`/`fi` on APFS are not detected by this
+simple-case comparison. Do not select paths with those aliases to protected
+files; this filesystem-alias limitation does not apply to ordinary Linux paths.
 Intermediate or target symlinks, special files and different mounts are not
 followed; symlinks inside a selected directory are removed only as links.
 Encountering a special file stops that removal; earlier entries may already

@@ -353,7 +353,7 @@ func TestInstallTrimCaseAliasProtectsRecordsBeforeLaunching(t *testing.T) {
 }
 
 func TestInstallTrimBoundariesDoNotFailTheNextRole(t *testing.T) {
-	for _, boundary := range []string{"parent link", "target link", "descendant link", "special file", "unbound home"} {
+	for _, boundary := range []string{"parent link", "target link", "descendant link", "special file", "unbound home", "deep home"} {
 		t.Run(boundary, func(t *testing.T) {
 			job, outside := t.TempDir(), t.TempDir()
 			installTrimFile(t, filepath.Join(outside, "keep.txt"), "not owned by this request")
@@ -391,10 +391,14 @@ func TestInstallTrimBoundariesDoNotFailTheNextRole(t *testing.T) {
 				}
 			case "unbound home":
 				cfg.Roles[0].Processes[0].Env["TASK_HOME"] = outside
+			case "deep home":
+				installTrimDeepTree(t, install)
 			}
 			var observations []string
 			executor := installTrimExecutor{next: chain.Processes{Roles: map[string]chain.Role{"review": cfg.Roles[1]}}, cfg: cfg, job: job, observe: func(s string) { observations = append(observations, s) }}
-			results := executor.Execute(context.Background(), chain.Assignment{Role: "review"}, chain.State{Step: "implement"})
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			results := executor.Execute(ctx, chain.Assignment{Role: "review"}, chain.State{Step: "implement"})
 			if len(results) != 1 || results[0].Error != "" || !strings.Contains(results[0].Output, "next-role-returned") {
 				t.Fatalf("cleanup failed the next role: %+v", results)
 			}
@@ -409,16 +413,19 @@ func TestInstallTrimBoundariesDoNotFailTheNextRole(t *testing.T) {
 				if len(observations) != 0 {
 					t.Fatalf("safe removal failed: %v", observations)
 				}
-			} else if len(observations) != 1 || !strings.Contains(observations[0], "not removed") {
+			} else if len(observations) != 1 || !strings.Contains(observations[0], "not removed") || strings.Contains(observations[0], "workspace removal") {
 				t.Fatalf("refusal not observed: %v", observations)
+			}
+			if boundary == "deep home" && (ctx.Err() != nil || !strings.Contains(observations[0], "no removal progress")) {
+				t.Fatalf("home blocked the next role or omitted its reason: %v %v", ctx.Err(), observations)
 			}
 		})
 	}
 }
 
 // Existing final-home markers must not suppress new workspace cleanup or a
-// retry after a boundary refusal. With no setting the same link is untouched
-// and does not produce a new observation.
+// retry after a restart. With no setting a real installation is untouched and
+// does not produce a new observation. A held path is not inspected each tick.
 func TestInstallTrimFinishedRetryAndDefaultOff(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
@@ -440,8 +447,12 @@ func TestInstallTrimFinishedRetryAndDefaultOff(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(outside, target); err != nil {
-				t.Fatal(err)
+			if enabled {
+				if err := os.Symlink(outside, target); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				installTrimFile(t, filepath.Join(target, "package"), "keep when unset")
 			}
 			var log trimTestLog
 			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, &log)
@@ -451,13 +462,19 @@ func TestInstallTrimFinishedRetryAndDefaultOff(t *testing.T) {
 					t.Fatal(err)
 				}
 				installTrimFile(t, filepath.Join(target, "package"), "recreated")
+				waitTicks()
+				if _, err := os.Stat(filepath.Join(target, "package")); err != nil {
+					t.Fatalf("held path was retried before restart: %v", err)
+				}
+				finish()
+				finish = startStopQueue(t, cfg, root, 10*time.Millisecond, &log)
 				waitFor(t, func() bool { _, err := os.Lstat(target); return errors.Is(err, os.ErrNotExist) })
 			} else {
 				waitTicks()
-				if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeSymlink == 0 {
-					t.Fatalf("off changed target: %v", err)
+				if got, err := os.ReadFile(filepath.Join(target, "package")); err != nil || string(got) != "keep when unset" {
+					t.Fatalf("off changed real installation: %q %v", got, err)
 				}
-				if strings.Contains(log.String(), "not removed") {
+				if strings.Contains(log.String(), "not removed") || strings.Contains(log.String(), "workspace cleanup") {
 					t.Fatalf("off inspected target: %s", log.String())
 				}
 			}
@@ -523,7 +540,7 @@ func TestInstallTrimFinishedUsesSavedReceipts(t *testing.T) {
 }
 
 func TestInstallTrimDeepTreeDoesNotBlockOtherFinishedRequests(t *testing.T) {
-	cfg := installTrimConfig(t, watchConfiguration(t), "installed")
+	cfg := installTrimConfig(t, watchConfiguration(t), "installed", "plain")
 	(&noticeTracker{}).install(t, alwaysChoose("done"))
 	root := t.TempDir()
 	first := deliveredJob(t, root, 51, time.Now().Add(-time.Minute))
@@ -532,10 +549,32 @@ func TestInstallTrimDeepTreeDoesNotBlockOtherFinishedRequests(t *testing.T) {
 		saveInstallTrimJobConfig(t, cfg, job)
 	}
 	deep := filepath.Join(first, "workspace/installed")
-	if err := os.MkdirAll(deep, 0700); err != nil {
+	installTrimDeepTree(t, deep)
+	plain := filepath.Join(first, "workspace/plain/file")
+	installTrimFile(t, plain, "regenerable")
+	installTrimFile(t, filepath.Join(second, "workspace/installed/file"), "regenerable")
+	var log trimTestLog
+	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, &log)
+	waitFor(t, func() bool {
+		_, err := os.Stat(filepath.Join(second, "workspace/installed"))
+		_, plainErr := os.Stat(plain)
+		return errors.Is(err, os.ErrNotExist) && errors.Is(plainErr, os.ErrNotExist)
+	})
+	finish()
+	if !strings.Contains(log.String(), "no removal progress") {
+		t.Fatalf("deep tree not explained: %s", log.String())
+	}
+	if _, err := os.Stat(deep); err != nil {
+		t.Fatalf("deep tree disappeared: %v", err)
+	}
+}
+
+func installTrimDeepTree(t *testing.T, target string) {
+	t.Helper()
+	if err := os.MkdirAll(target, 0700); err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.OpenRoot(deep)
+	dir, err := os.OpenRoot(target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,20 +595,6 @@ func TestInstallTrimDeepTreeDoesNotBlockOtherFinishedRequests(t *testing.T) {
 	}
 	file.Close()
 	dir.Close()
-	installTrimFile(t, filepath.Join(second, "workspace/installed/file"), "regenerable")
-	var log trimTestLog
-	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, &log)
-	waitFor(t, func() bool {
-		_, err := os.Stat(filepath.Join(second, "workspace/installed"))
-		return errors.Is(err, os.ErrNotExist)
-	})
-	finish()
-	if !strings.Contains(log.String(), "no removal progress") {
-		t.Fatalf("deep tree not explained: %s", log.String())
-	}
-	if _, err := os.Stat(deep); err != nil {
-		t.Fatalf("deep tree disappeared: %v", err)
-	}
 }
 
 func TestInstallTrimFinishedBudgetAndAbsentPaths(t *testing.T) {
@@ -579,7 +604,8 @@ func TestInstallTrimFinishedBudgetAndAbsentPaths(t *testing.T) {
 	for i := 0; i < 600; i++ {
 		installTrimFile(t, filepath.Join(job, "workspace/installed", fmt.Sprint(i)), "output")
 	}
-	err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs)
+	memory := &installTrimMemory{}
+	err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs, memory)
 	if !errors.Is(err, errRemovalYield) {
 		t.Fatalf("large cleanup did not yield: %v", err)
 	}
@@ -587,26 +613,66 @@ func TestInstallTrimFinishedBudgetAndAbsentPaths(t *testing.T) {
 	if err != nil || len(entries) != 88 {
 		t.Fatalf("one pass left %d entries: %v", len(entries), err)
 	}
-	if err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs); err != nil {
+	if err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs, memory); err != nil {
 		t.Fatal(err)
+	}
+	// A preceding name can leave too little budget even for a shallow tree.
+	// That is a next-tick retry, not a permanent zero-progress hold.
+	for i := 0; i < 511; i++ {
+		installTrimFile(t, filepath.Join(job, "workspace/first", fmt.Sprint(i)), "output")
+	}
+	installTrimFile(t, filepath.Join(job, "workspace/second/child/file"), "output")
+	names := []string{"first", "second"}
+	if err := trimFinishedInstalls(context.Background(), job, names, memory); !errors.Is(err, errRemovalYield) || len(memory.held) != 0 {
+		t.Fatalf("partial budget permanently held a shallow path: %v held=%v", err, memory.held)
+	}
+	if err := trimFinishedInstalls(context.Background(), job, names, memory); err != nil {
+		t.Fatalf("next tick did not finish the shallow path: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(job, "workspace/second")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("next tick retained regenerable output: %v", err)
+	}
+	// Changing the list, like restarting the queue, releases remembered holds.
+	target := filepath.Join(job, "workspace/installed")
+	if err := os.Symlink(t.TempDir(), target); err != nil {
+		t.Fatal(err)
+	}
+	if err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs, memory); err == nil {
+		t.Fatal("symlink was not held")
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	installTrimFile(t, filepath.Join(target, "package"), "recreated")
+	if err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs, memory); err == nil {
+		t.Fatal("same list retried a held path")
+	}
+	if _, err := os.Stat(filepath.Join(target, "package")); err != nil {
+		t.Fatalf("remembered hold lost its directory: %v", err)
+	}
+	if err := trimFinishedInstalls(context.Background(), job, []string{"installed", "absent"}, memory); err != nil {
+		t.Fatalf("changed list did not release the hold: %v", err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("changed list retained regenerable output: %v", err)
 	}
 	// A corrupt saved configuration is irrelevant once there is nothing to remove.
 	installTrimFile(t, filepath.Join(job, "engine.json"), "no longer readable")
-	if err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs); err != nil {
+	if err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs, memory); err != nil {
 		t.Fatalf("finished cleanup still read configuration: %v", err)
 	}
-	if err := trimFinishedInstalls(context.Background(), filepath.Join(job, "absent"), nil); err != nil {
+	if err := trimFinishedInstalls(context.Background(), filepath.Join(job, "absent"), nil, memory); err != nil {
 		t.Fatalf("unset cleanup inspected request: %v", err)
 	}
 }
 
 func TestInstallTrimProtectsTrackedWork(t *testing.T) {
 	for _, tc := range []struct {
-		stopped       bool
-		name, tracked string
-	}{{false, "vendor", "vendor"}, {true, "VENDOR", "vendor"}, {true, "results", "reſults"}} {
+		stopped, corrupt bool
+		name, tracked    string
+	}{{false, false, "vendor", "vendor"}, {true, false, "VENDOR", "vendor"}, {true, false, "results", "reſults"}, {false, true, "broken-index", "broken-index"}} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := installTrimConfig(t, watchConfiguration(t), tc.name)
+			cfg := installTrimConfig(t, watchConfiguration(t), tc.name, "installed")
 			root := t.TempDir()
 			job := deliveredJob(t, root, 51, time.Now().Add(-time.Minute))
 			if tc.stopped {
@@ -620,13 +686,74 @@ func TestInstallTrimProtectsTrackedWork(t *testing.T) {
 			installTrimFile(t, filepath.Join(workspace, tc.name, "untracked"), "rebuildable")
 			environmentGit(t, workspace, "-c", "init.templateDir=", "init", "-q")
 			environmentGit(t, workspace, "add", source)
+			if tc.corrupt {
+				installTrimFile(t, filepath.Join(workspace, ".git/index"), "not an index")
+			}
+			plain := filepath.Join(workspace, "installed/output")
+			installTrimFile(t, plain, "regenerable")
 			(&noticeTracker{}).install(t, alwaysChoose("done"))
 			var log trimTestLog
 			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, &log)
-			waitFor(t, func() bool { return strings.Contains(log.String(), "contains Git-tracked work") })
+			waitFor(t, func() bool {
+				if tc.corrupt {
+					_, err := os.Stat(filepath.Join(workspace, source))
+					return strings.Contains(log.String(), "Git-tracked workspace files could not be checked") || errors.Is(err, os.ErrNotExist)
+				}
+				_, err := os.Stat(plain)
+				return strings.Contains(log.String(), "contains Git-tracked work") && errors.Is(err, os.ErrNotExist)
+			})
 			finish()
 			if got, err := os.ReadFile(filepath.Join(workspace, source)); err != nil || string(got) != "unpublished work" {
 				t.Fatalf("tracked work lost: %q %v", got, err)
+			}
+			if tc.corrupt {
+				if !strings.Contains(log.String(), "Git-tracked workspace files could not be checked") {
+					t.Fatalf("broken index not explained: %s", log.String())
+				}
+				if _, err := os.Stat(plain); err != nil {
+					t.Fatalf("unchecked index allowed deletion: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestInstallTrimGitTimeoutAndCancellation(t *testing.T) {
+	for _, cancellation := range []bool{true, false} {
+		t.Run(fmt.Sprint(cancellation), func(t *testing.T) {
+			cfg := installTrimConfig(t, watchConfiguration(t), "installed")
+			(&noticeTracker{}).install(t, alwaysChoose("done"))
+			root := t.TempDir()
+			job := deliveredJob(t, root, 51, time.Now().Add(-time.Minute))
+			saveInstallTrimJobConfig(t, cfg, job)
+			target := filepath.Join(job, "workspace/installed/package")
+			installTrimFile(t, target, "must remain")
+			environmentGit(t, filepath.Join(job, "workspace"), "-c", "init.templateDir=", "init", "-q")
+			bin := t.TempDir()
+			entered := filepath.Join(bin, "entered")
+			fakeGit := filepath.Join(bin, "git")
+			installTrimFile(t, fakeGit, fmt.Sprintf("#!/bin/sh\nprintf entered > %q\nexec /bin/sleep 30\n", entered))
+			if err := os.Chmod(fakeGit, 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if cancellation {
+				var log trimTestLog
+				finish := startStopQueue(t, cfg, root, 10*time.Millisecond, &log)
+				waitFor(t, func() bool { _, err := os.Stat(entered); return err == nil })
+				finish()
+				if !strings.Contains(log.String(), "finished workspace cleanup stopped") || strings.Contains(log.String(), "signal: killed") || strings.Contains(log.String(), "held until") {
+					t.Fatalf("queue cancellation misreported: %s", log.String())
+				}
+			} else {
+				memory := &installTrimMemory{}
+				err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs, memory)
+				if err == nil || errors.Is(err, context.DeadlineExceeded) || memory.held["installed"] == "" || !strings.Contains(err.Error(), "timed out") {
+					t.Fatalf("Git timeout was not remembered as a hold: %v held=%v", err, memory.held)
+				}
+			}
+			if got, err := os.ReadFile(target); err != nil || string(got) != "must remain" {
+				t.Fatalf("cancelled or timed-out cleanup removed files: %q %v", got, err)
 			}
 		})
 	}
@@ -643,13 +770,13 @@ func TestInstallTrimUsesOnlyWorkspaceGitRoot(t *testing.T) {
 	environmentGit(t, ancestor, "add", "job/workspace/installed/output")
 	cfg := installTrimConfig(t, watchConfiguration(t), "installed")
 	saveInstallTrimJobConfig(t, cfg, job)
-	if err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs); err != nil {
+	if err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs, &installTrimMemory{}); err != nil {
 		t.Fatalf("plain workspace consulted ancestor Git: %v", err)
 	}
 	installTrimFile(t, filepath.Join(workspace, "installed/output"), "regenerable")
 	environmentGit(t, workspace, "-c", "init.templateDir=", "init", "-q")
 	environmentGit(t, workspace, "config", "core.worktree", ancestor)
-	if err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs); err == nil || !strings.Contains(err.Error(), "Git root") {
+	if err := trimFinishedInstalls(context.Background(), job, cfg.Intake.TrimInstallDirs, &installTrimMemory{}); err == nil || !strings.Contains(err.Error(), "Git root") {
 		t.Fatalf("redirected Git root accepted: %v", err)
 	}
 	if got, err := os.ReadFile(filepath.Join(workspace, "installed/output")); err != nil || string(got) != "regenerable" {
@@ -658,12 +785,22 @@ func TestInstallTrimUsesOnlyWorkspaceGitRoot(t *testing.T) {
 }
 
 func TestInstallTrimQuestionPreservesPreviousHomeThroughAnswer(t *testing.T) {
+	for _, next := range []string{"implement", "review"} {
+		t.Run(next, func(t *testing.T) { testInstallTrimAfterAnswer(t, next) })
+	}
+}
+
+func testInstallTrimAfterAnswer(t *testing.T, next string) {
+	root := t.TempDir()
 	cfg := installTrimConfig(t, questionConfiguration(t), ".cache/go-build")
 	cfg.Roles = append(cfg.Roles, chain.Role{Name: "implement", Processes: []chain.Process{{Name: "worker", Command: []string{"/bin/sh", "-c", `set -eu
 cat >/dev/null
 if [ -f "$TASK_HOME/ran" ]; then test -f "$TASK_HOME/.cache/go-build/blob"; echo reused > "$TASK_WORKSPACE/reused"; fi
 mkdir -p "$TASK_HOME/.cache/go-build"; echo keep > "$TASK_HOME/.cache/go-build/blob"; touch "$TASK_HOME/ran"; echo work-returned`}}}})
-	root := t.TempDir()
+	cfg.Roles = append(cfg.Roles, chain.Role{Name: "review", Processes: []chain.Process{{Name: "reader", Command: []string{"/bin/sh", "-c", `set -eu
+cat >/dev/null
+test ! -e "$PREVIOUS_HOME/.cache/go-build"
+echo reused > "$TASK_WORKSPACE/reused"; echo review-returned`}, Env: map[string]string{"PREVIOUS_HOME": filepath.Join(root, "jobs/51/homes/1-0")}}}})
 	var mu sync.Mutex
 	comments := []json.RawMessage{}
 	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
@@ -683,7 +820,7 @@ mkdir -p "$TASK_HOME/.cache/go-build"; echo keep > "$TASK_HOME/.cache/go-build/b
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			return nil, err
 		}
-		works, answered := 0, false
+		works, answered, reviewed := 0, false, false
 		for _, row := range input.State.History {
 			if row.Role == "implement" {
 				works++
@@ -691,12 +828,18 @@ mkdir -p "$TASK_HOME/.cache/go-build"; echo keep > "$TASK_HOME/.cache/go-build/b
 			if row.Speaker == "requester" {
 				answered = true
 			}
+			if row.Role == "review" {
+				reviewed = true
+			}
 		}
 		choice := "implement"
 		if works == 1 && !answered {
 			choice = "ask_requester"
 		}
-		if works == 2 {
+		if answered {
+			choice = next
+		}
+		if works == 2 || reviewed {
 			choice = "done"
 		}
 		return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
