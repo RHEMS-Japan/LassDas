@@ -655,6 +655,24 @@ class PreviewExampleTests(unittest.TestCase):
             self.assertNotIn('private-error-value', output)
             supplied = {'stage': 'migration', 'container': 'app', 'file': '001_example.up.sql', 'code': '1050'}
 
+    def test_client_migration_diagnostic_accepts_only_the_fixed_word(self):
+        from unittest.mock import Mock
+        settings = self.tool.read_settings(self.environment(PREVIEW_FAILURE_FILE='failed'), 'up')
+        pod = {'metadata': {'name': 'preview'}, 'status': {'initContainerStatuses': [
+            {'name': 'net', 'state': {'terminated': {'exitCode': 0}}}]}}
+        (self.checkout / 'migrations').mkdir()
+        (self.checkout / 'migrations/001_example.up.sql').write_text('synthetic migration')
+        archive = self.base / 'diagnostic.tar'
+        self.tool.write_tar(str(self.checkout), ['migrations/001_example.up.sql'], str(archive))
+        for code in ('client', 'Client', 'client: private-value', 'server', '', 1, None):
+            with self.subTest(code=code):
+                value = {'stage': 'migration', 'container': 'app', 'file': '001_example.up.sql', 'code': code}
+                cluster = Mock()
+                cluster.run.return_value = subprocess.CompletedProcess([], 0, json.dumps(value).encode(), b'private-value')
+                expected = ('app: migration failed (001_example.up.sql, error client)'
+                            if code == 'client' else 'application did not start')
+                self.assertEqual(self.tool.startup_diagnostic(cluster, settings, pod, archive), expected)
+
     def test_optional_settings_refuse_secret_refs_and_privilege_before_cluster(self):
         bad = [
             {"env": [{"name": "MODE", "valueFrom": {"secretKeyRef": {"name": "unread", "key": "key"}}}]},
