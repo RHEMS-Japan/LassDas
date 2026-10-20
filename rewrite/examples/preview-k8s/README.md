@@ -415,7 +415,7 @@ none set, the Pod template, archive and change identifier are unchanged.
   replaces `head`. The file must contain at most 1024 bytes of JSON: `stage`
   (`snapshot`, `migration`, `seed` or `start`), `container` (a configured
   ordinary container), and, for migration only, `file` (a name actually
-  packed under `migrations/`) and `code` (four or five decimal digits).
+  packed under `migrations/`) and `code` (four or five decimal digits, or the fixed word `client` for a client-side error).
   Only these fields are printed, up to 300 characters. Missing, unreadable
   or malformed output, including JSON nested too deeply to read, becomes
   `application did not start`, with a known

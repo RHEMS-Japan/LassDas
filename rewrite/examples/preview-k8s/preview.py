@@ -995,7 +995,7 @@ def startup_diagnostic(cluster, settings, pod, archive):
             filename, code = value.get("file"), value.get("code")
             if not isinstance(filename, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+[.]up[.]sql", filename):
                 return fallback
-            if not isinstance(code, str) or not re.fullmatch(r"[0-9]{4,5}", code):
+            if not isinstance(code, str) or not re.fullmatch(r"[0-9]{4,5}|client", code):
                 return fallback
             with tarfile.open(archive) as packed:
                 member = packed.getmember("migrations/" + filename)
