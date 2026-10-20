@@ -54,7 +54,7 @@ func TestReportProposesPreventionOnlyForAnObservedRecurrence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"operator.json", "operator-gateway.json", "operator-github.json", "operator-stages.json", "operator-github-stages.json"} {
+	for _, name := range []string{"operator.json", "operator-gateway.json", "operator-github.json", "operator-stages.json", "operator-github-stages.json", "operator-redmine-stages.json"} {
 		cfg := loadExample(t, "../../examples/"+name)
 		for _, role := range cfg.Roles {
 			if role.Name != "report" && role.Name != "draft_report" {

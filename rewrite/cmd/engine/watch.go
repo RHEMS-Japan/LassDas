@@ -288,6 +288,9 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 // engine understood it that way before the first issue is accepted.
 func intakeScope(cfg config, since time.Time) string {
 	scope := fmt.Sprintf("intake: project %d, issues created at or after %s", cfg.Intake.ProjectID, since.Format(time.RFC3339Nano))
+	if cfg.Redmine != nil {
+		scope = fmt.Sprintf("intake: Redmine project %d without its subprojects, open issues created at or after %s", cfg.Intake.ProjectID, since.Format(time.RFC3339Nano))
+	}
 	if cfg.GitHub != nil {
 		scope = fmt.Sprintf("intake: repository %s, open issues created at or after %s carrying label %q; pull requests are excluded",
 			cfg.GitHub.Repository, since.Format(time.RFC3339Nano), cfg.GitHub.IntakeLabel)

@@ -1,8 +1,8 @@
 # Setting up the ticket engine for your repository
 
 This guide takes you from nothing to one running instance: a Pod in your
-Kubernetes cluster that watches one Backlog project or labelled GitHub Issues
-in one repository, takes each matching new issue as a request, works on a
+Kubernetes cluster that watches one Backlog project, labelled GitHub Issues
+in one repository or one Redmine project, takes each matching new issue as a request, works on a
 checkout of one delivery repository, merges the
 result into that repository's integration branch (or opens the pull request
 and leaves the merge to a person, [section 4](#leaving-the-merge-to-a-person)),
@@ -54,7 +54,7 @@ permissions or open intake to discover whether the choice works.
 
 | Decision | (a) | (b) | (c) |
 | --- | --- | --- | --- |
-| Tracker | Dedicated Backlog project/account, section 2 | GitHub Issues in one repository, section 2 | Shared Backlog account: verify the project identity as described below before opening intake |
+| Tracker | Dedicated Backlog project/account, section 2 | GitHub Issues in one repository, or one Redmine project, section 2 | Shared Backlog account: verify the project identity as described below before opening intake |
 | Namespace | New dedicated namespace, section 6 | Existing dedicated namespace, with its owner's approval | Shared namespace: arrange a suitable dedicated one; do not relax admission for unrelated workloads |
 | Delivery | Leave merge to a person, section 4 | Automatic merge to an integration branch, after checking its rules and CI | Another completion point: define and test that project workflow first; neither PR nor merge proves production delivery |
 | Build dependencies | Public dependencies with approved network access | Dependencies already in the checkout or pre-provisioned without credentials | Private dependencies: choose an approved preparation/proxy path below before accepting tickets |
@@ -66,7 +66,8 @@ grant of the permissions each path requires.
 ## How a request moves
 
 The shipped ordered configurations, `rewrite/examples/operator-stages.json`
-for Backlog and `rewrite/examples/operator-github-stages.json` for GitHub Issues,
+for Backlog, `rewrite/examples/operator-github-stages.json` for GitHub Issues
+and `rewrite/examples/operator-redmine-stages.json` for Redmine,
 run every request through the same stages. A stage that runs a command is
 finished only when the command exits 0; a stage that runs a model is finished
 when its model process returns without an error. Three decisions are a
@@ -186,15 +187,17 @@ instructions to adopt this behavior. `confirm_report` continues to return to `re
   not a measured working set.
 - **Pulls from ghcr.io**, or a registry mirror of the published image.
 
-### An issue tracker: Backlog or GitHub Issues
+### An issue tracker: Backlog, GitHub Issues or Redmine
 
 The engine's tracker client speaks Backlog's API v2. You need a space, a
 project for the requests, and a separate account for the engine itself
 ([section 2](#2-preparing-the-tracker)). A dedicated project is simplest.
 Alternatively, use GitHub Issues in one repository with a dedicated intake
 label and a separate account's PAT ([GitHub setup](#github-issues)). This
-repository may differ from the repository that receives the work. Selecting
-GitHub Issues does not change the models, workflow or delivery permissions.
+repository may differ from the repository that receives the work. Or use
+one project of your own Redmine, 5.0 or later, with its REST API enabled and a
+separate account for the engine ([Redmine setup](#redmine)). Selecting
+GitHub Issues or Redmine does not change the models, workflow or delivery permissions.
 
 ### A GitHub repository to deliver to
 
@@ -291,7 +294,8 @@ toolchain for an offline runtime instead of silently weakening its requirement.
 ## 2. Preparing the tracker
 
 Choose one tracker. The Backlog instructions below are not additional steps
-for GitHub; for GitHub, use [GitHub Issues](#github-issues) instead.
+for GitHub or Redmine; for GitHub, use [GitHub Issues](#github-issues) instead,
+and for Redmine, [Redmine](#redmine).
 
 ### Backlog: the engine's own account
 
@@ -454,6 +458,119 @@ stop reads pause the role process; when reads succeed again, the same queued
 request is launched again. This does not preserve a running model call or
 guarantee exactly-once external writes.
 
+### Redmine
+
+The engine reads and writes one project of your own Redmine through its REST
+API. What follows was measured against Redmine 6.0.11 in a local container
+(2026-10-20); a different version or plugin set may differ, so repeat the
+read check of section 7 against yours.
+
+1. **Version.** Use Redmine 5.0 or later. Listing, reading, posting notes,
+   statuses and assignees use APIs older than that, but the engine also
+   rewrites its own notes (`PUT /journals/<id>.json`, added in 5.0 and marked
+   Alpha in Redmine's API list). On an older Redmine the engine posts a new
+   note where it would rewrite one, and a role's earlier trial posts are not
+   removed.
+2. **REST API.** An administrator enables it: Administration, Settings, API,
+   "Enable REST web service".
+3. **The engine's own account.** Create a user for the engine, not an
+   administrator, and make it a member of the intake project only. Its role
+   needs these permissions (the last three were each checked by taking it
+   away):
+
+   | Permission | Without it |
+   | --- | --- |
+   | View issues | nothing is listed or read |
+   | Add notes | no question, notice or report can be posted |
+   | Edit issues | `intake.statuses` and `intake.assign` do nothing: Redmine answers 204 and leaves the status and the assignee as they were |
+   | Edit own notes | the engine posts a new note instead of rewriting its own, and the earlier posts of a role with `comment` access stay |
+   | View private notes (optional) | a private note, an answer or a `停止` included, is invisible to the engine |
+
+   Redmine moves an issue only along the role's workflow (Administration,
+   Workflow, for that role and each tracker the project uses). Allow every
+   move between the statuses you map in `intake.statuses`: from the status a
+   new issue starts in to `processing`, between `processing` and
+   `awaiting_requester`, and from those to `delivered` and `stopped`. A move
+   the workflow does not allow is also answered with 204 and not made. The
+   engine reads the issue back after each change, writes the refusal in its
+   log ("tracker did not confirm the status change ...") and asks again later.
+   Set the role's issue visibility to all issues if requesters may file
+   private issues. Grant nothing else: not Delete issues, not Manage members.
+4. **The key.** Logged in as the engine's account, open My account, API
+   access key, Show. This is `TRACKER_API_KEY`; `redmine.key_env` is that
+   variable's name, never the key itself (a value that looks like a 40-digit
+   hexadecimal key is refused). The engine sends it only in the
+   `X-Redmine-API-Key` header.
+5. **The address.** `redmine.base_url` is the HTTPS address under which an
+   issue's page is `/issues/<id>`, with the sub-path if Redmine is served
+   under one (`https://host.example/redmine`). Plain HTTP is refused: the key
+   would cross the network readable. The shipped egress policy refuses
+   private addresses; a Redmine on a private network needs that boundary
+   checked first.
+6. **Requesters.** If `intake.assign` is on, the requester must be a member of
+   the project with a role whose "Issues can be assigned to this role" is set;
+   otherwise Redmine refuses the hand-over with 422 "Assignee is invalid" and
+   the engine asks again later.
+
+Only open issues of `intake.project_id` itself (not of its subprojects)
+created at or after `intake.created_since` are discovered. In a project people
+also use, `intake.category_ids` narrows the intake to issues in one of the
+listed categories, as with Backlog. A Redmine issue has one category, so the
+engine never sets one: `intake.category_on_accept` is refused with Redmine.
+`intake.statuses` uses Redmine's status ids. `intake.issue_ids` and
+`intake.stop_user_ids` take Redmine's issue and user ids (the number after
+`#`, and the user's id). The engine records no hours: Redmine adds up time
+entries, and a request that is worked again would be counted twice.
+
+Comments are notes. A change of a field is a note without words and is not an
+answer. Use the requester's own account to file requests: their notes, and
+those of the users in `intake.stop_user_ids`, are the only ones that count as
+an answer or a stop (`停止` on the first nonblank line). Closing the issue
+does not stop an accepted request. Redmine 5.0 and later sends mail to an
+account named after an `@` in a note; the engine puts an invisible word
+joiner after each `@` in the failure detail it quotes, so a diagnostic line
+names nobody. What roles post is sent as they wrote it.
+
+**Looking up the ids.** This reads them with the engine account's key, which
+it takes from an environment variable and never prints. Run it on your
+workstation. `<project-identifier>` is the project's identifier from its
+address (`/projects/<project-identifier>`):
+
+```sh
+read -rs TRACKER_API_KEY && export TRACKER_API_KEY   # paste the key; nothing is shown
+python3 - 'https://<your Redmine address>' '<project-identifier>' <<'EOF'
+import json, os, sys, urllib.error, urllib.parse, urllib.request
+base, project = sys.argv[1].rstrip("/"), sys.argv[2]
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+client = urllib.request.build_opener(NoRedirect)
+def get(path):
+    request = urllib.request.Request(base + path, headers={"X-Redmine-API-Key": os.environ["TRACKER_API_KEY"]})
+    try:
+        with client.open(request, timeout=30) as answer:
+            return json.load(answer)
+    except urllib.error.HTTPError as error:
+        sys.exit("%s answered HTTP %d" % (path, error.code))
+found = get("/projects/" + urllib.parse.quote(project) + ".json")["project"]
+print("project  %10d  %s" % (found["id"], found["name"]))
+for status in get("/issue_statuses.json")["issue_statuses"]:
+    print("status   %10d  %s%s" % (status["id"], status["name"], " (closed)" if status.get("is_closed") else ""))
+for category in get("/projects/%d/issue_categories.json" % found["id"])["issue_categories"]:
+    print("category %10d  %s" % (category["id"], category["name"]))
+for member in get("/projects/%d/memberships.json?limit=100" % found["id"])["memberships"]:
+    if "user" in member:
+        print("member   %10d  %s" % (member["user"]["id"], member["user"]["name"]))
+me = get("/users/current.json")["user"]
+print("this key acts as %d (%s)" % (me["id"], me["login"]))
+EOF
+unset TRACKER_API_KEY
+```
+
+The last line must name the engine's account, not yours. The ids go where the
+Backlog table above says, except `intake.category_on_accept`, which Redmine
+does not take.
+
 ## 3. Preparing the delivery repository
 
 ### The token
@@ -559,7 +676,7 @@ the same way, and merge that pull request into the integration branch before
 the intake opens (section 8): the roles read the definition from a checkout of
 that branch, so a location whose file is not there yet gives them nothing to
 read. The engine is given only its location, in the project guidance
-([section 4](#finish-the-project-guidance-either-tracker)). Its commands
+([section 4](#finish-the-project-guidance-any-tracker)). Its commands
 become the operator's `build` and `test` (section 6) and, if there is one, the
 live check's process. Change a command and the definition together, and run
 the check in section 7 again after either changes.
@@ -665,17 +782,18 @@ the same lines can conflict when a person merges the second.
 
 ## 4. Writing the operator configuration
 
-`rewrite/examples/operator-stages.json` (Backlog) and
-`rewrite/examples/operator-github-stages.json` (GitHub Issues) are complete for
+`rewrite/examples/operator-stages.json` (Backlog),
+`rewrite/examples/operator-github-stages.json` (GitHub Issues) and
+`rewrite/examples/operator-redmine-stages.json` (Redmine) are complete for
 the runtime of this directory: their delivery and merged check are the image's
 fixed processes under `/opt/ticket-automation/scripts`; their build, tests and report check are
 the operator scripts of section 6, and every checkout comes from the Pod's
 mirror once you name it in place of the example's placeholder URL. Every value
 you must change is one distinct string in it.
 
-Use one of the two copy procedures below. Both examples keep identical ordered
+Use one of the three copy procedures below. The examples keep identical ordered
 stages, roles, permissions, question handling and knowledge-writing instructions;
-only the tracker settings differ. Neither unedited example can start intake. The
+only the tracker settings differ. No unedited example can start intake. The
 separate `rewrite/examples/operator-github.json` ships the model-routed
 workflow, so do not substitute that whole file for the ordered configuration.
 
@@ -759,7 +877,33 @@ names. For Enterprise, add `github.api_url` as described there. Do not retain
 `intake.issue_ids`, if used, contains GitHub issue numbers. The mirror's
 `MIRROR_PATH` must use the delivery repo, not the intake repo.
 
-### Finish the project guidance (either tracker)
+### Redmine: make your copy with one command
+
+The Redmine example is the Backlog one with its tracker exchanged, so its copy
+is made the same way. Run this from the repository's root, with your values in
+place of the `<...>` parts (none of them may contain `#` or `&`), once the
+project id is known (section 2):
+
+```sh
+CONFIG='<absolute path outside the repository>/operator.json'
+sed -e 's#"base_url": "https://tracker.example.invalid"#"base_url": "https://<your Redmine address>"#' \
+    -e 's#"project_id": 0,#"project_id": <project-id>,#' \
+    -e 's#REPLACE_WITH_RFC3339_ACCEPTANCE_START#2100-01-01T00:00:00Z#' \
+    -e 's#https://repository.example.invalid/example-owner/example-repository.git#/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git#g' \
+    -e 's#example-owner/example-repository#<owner>/<repository-name>#g' \
+    -e 's#example-integration-branch#<integration-branch>#g' \
+    rewrite/examples/operator-redmine-stages.json > "$CONFIG"
+```
+
+`redmine.base_url` is the address of section 2, with its sub-path if it has
+one and without a trailing `/issues`. The other values are those of the
+Backlog table above. Add `intake.statuses` and `intake.category_ids` from
+section 2 if you use them; do not add `intake.category_on_accept`, `backlog`
+or `github`, which are refused with Redmine. The repository's tests run this
+command and the configuration check together; they do not test access to a
+live server.
+
+### Finish the project guidance (any tracker)
 
 Then open your copy and replace the first sentence of `instructions`
 ("Operator setup is incomplete: ...") with your project's guidance: where the
@@ -843,7 +987,8 @@ role; a missing project or start time; the example's paragraph still in
 `instructions`; a URL whose host is still under `example.invalid`; a
 `REPLACE_WITH_` component of `github.repository`; a token prefix
 (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`) in
-`github.key_env`, which must name an environment variable, not its value. `--check`
+`github.key_env`, or a 40-digit hexadecimal key in `redmine.key_env`, each of
+which must name an environment variable, not its value. `--check`
 runs those same checks without starting anything, contacting anything or
 creating any file. Run it from the repository's root, on a checkout of the
 commit your image was built from (`engine_sha` in `docs/DISTRIBUTION.json`),
@@ -859,7 +1004,9 @@ the line that says which issues the engine would take up. With the intake
 still closed that line reads
 `intake: project <project-id>, issues created at or after 2100-01-01T00:00:00Z; every such issue is accepted`.
 For GitHub it names the repository and intake label instead, says that PRs
-are excluded, and lists any configured issue numbers. Check all of these.
+are excluded, and lists any configured issue numbers. For Redmine it reads
+`intake: Redmine project <project-id> without its subprojects, open issues created at or after 2100-01-01T00:00:00Z; every such issue is accepted`.
+Check all of these.
 A refusal names the place instead, for example
 `roles[0].processes[0].env.TASK_REPOSITORY still holds the example's placeholder host under example.invalid; a watch needs your own value there`.
 
@@ -934,7 +1081,9 @@ None of these is required. Each changes what appears on the issue
 
 The following block is for Backlog. With GitHub, leave out `statuses` and
 `category_on_accept`; use `github.labels` from section 2 instead. The other
-settings are common, and user IDs mean numeric GitHub account IDs.
+settings are common, and user IDs mean numeric GitHub account IDs. With
+Redmine, leave out `category_on_accept`; `statuses` takes Redmine's status ids,
+and user IDs mean Redmine user ids.
 
 ```json
 "intake": {
@@ -1500,7 +1649,7 @@ from:
 | Secret | Key | Value |
 | --- | --- | --- |
 | `<consumer>-ticket-engine` | `MODEL_API_KEY` | the model provider's key (OpenRouter with the shipped configuration) |
-| | `TRACKER_API_KEY` | the engine account's Backlog API key or GitHub intake PAT (section 2); not the delivery token |
+| | `TRACKER_API_KEY` | the engine account's Backlog API key, GitHub intake PAT or Redmine API key (section 2); not the delivery token |
 | | `DELIVERY_GITHUB_TOKEN` | the delivery token (section 3) |
 | | `GATEWAY_API_KEY` | only with a gateway |
 | `<consumer>-ticket-engine-status` | `STATUS_USER`, `STATUS_PASSWORD` | basic authentication for the status page; choose them yourself |
@@ -1806,8 +1955,9 @@ kubectl -n "$NS" exec "$POD" -c engine -- \
 It must print the intended intake scope and
 `the configuration is accepted; nothing was started`. With Backlog the scope
 names the project and any category filter. With GitHub it names the repository,
-intake label, date and any issue numbers, and excludes PRs. In either case the
-date must still be `2100-01-01T00:00:00Z`. If the engine container keeps
+intake label, date and any issue numbers, and excludes PRs. With Redmine it
+names the project, without its subprojects, and any category filter. In every
+case the date must still be `2100-01-01T00:00:00Z`. If the engine container keeps
 restarting instead, it refused the configuration when it started
 ([section 11](#the-engine-container-restarts-right-after-it-starts)).
 
@@ -2076,8 +2226,9 @@ All `set`. Never `printenv`, `echo` a variable or print a Secret.
 **Connections, with no work to do:**
 
 The `ticket-tracker ... --project-id ... issues` command below is Backlog-only.
-For GitHub, skip that command and use the read-only check following this block.
-The model catalogue and mirror checks are common to both trackers.
+For GitHub or Redmine, skip that command and use the read-only check for that
+tracker following this block. The model catalogue and mirror checks are common
+to all trackers.
 
 ```sh
 kubectl -n "$NS" exec "$POD" -c engine -- /opt/ticket-automation/bundle/bin/ticket-engine --list-models \
@@ -2128,6 +2279,51 @@ The account must be the engine's dedicated account. This procedure has been
 checked with local fixtures, not your live token. Confirm permission to post
 comments, change the configured labels and assign the intended accounts before
 opening intake; the read check alone cannot establish those permissions.
+
+For Redmine, this reads the configured account, the configured statuses and
+the first page of the issues the intake would list, without posting, changing
+a status or starting a role. It prints no key or response body on failure.
+
+```sh
+kubectl -n "$NS" exec "$POD" -c engine -- python3 -B -c '
+import json, os, sys, urllib.error, urllib.parse, urllib.request
+config = json.load(open("/etc/ticket-automation/operator.json"))
+r, intake = config["redmine"], config["intake"]
+key = os.environ.get(r["key_env"], "")
+if not key:
+    sys.exit("tracker credential is unavailable")
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+client = urllib.request.build_opener(NoRedirect)
+def get(path):
+    req = urllib.request.Request(r["base_url"].rstrip("/") + path, headers={"X-Redmine-API-Key": key})
+    try:
+        with client.open(req, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        sys.exit("Redmine read check returned HTTP %d" % error.code)
+    except (urllib.error.URLError, ValueError):
+        sys.exit("Redmine read check failed; inspect connectivity and configuration")
+me = get("/users/current.json")["user"]
+known = {s["id"]: s["name"] for s in get("/issue_statuses.json")["issue_statuses"]}
+for turn, status in sorted((intake.get("statuses") or {}).items()):
+    print("status", turn, status, known.get(status, "NOT A STATUS OF THIS REDMINE"))
+query = {"project_id": intake["project_id"], "subproject_id": "!*", "status_id": "open", "sort": "id", "limit": 100}
+if intake.get("category_ids"):
+    query["category_id"] = "|".join(str(c) for c in intake["category_ids"])
+page = get("/issues.json?" + urllib.parse.urlencode(query))
+print("account", me["id"], me["login"])
+print("open issues of the project", page["total_count"], "of which on this page", len(page["issues"]))'
+```
+
+The account must be the engine's. The count is of all open issues of the
+project (or of its intake categories), not only those created after
+`intake.created_since`. Before opening intake, also confirm on one test issue
+that the engine's account may post a note, edit it, and make each configured
+status move and the assignee change: Redmine answers 204 to a status or an
+assignee it did not set, so only the issue read back shows whether the role
+and its workflow allow it.
 
 **The delivery and the merged check, in check mode.** Both end with exit
 status 3 on purpose: `--dry-run` commits, pushes, opens and merges nothing.
@@ -2286,6 +2482,9 @@ In your copy (`$CONFIG`), in the same edit:
    Do not use `category_ids` or the Backlog command below. Its creation time
    and author are visible through GitHub's issue page/API; use the original
    creation time, not the time the label was added.
+   With Redmine, the same holds as for Backlog below, except that an issue's
+   id is the number after `#` on its page and the Backlog command does not
+   apply; read the creation time on the issue's page.
    With Backlog in a shared project, set `intake.category_ids` to the category
    of section 2. For a single first ticket you can instead file it first,
    look up its id and creation time, and set `intake.issue_ids` to
@@ -2314,7 +2513,8 @@ In your copy (`$CONFIG`), in the same edit:
    what you meant, for example
    `intake: project <project-id>, issues created at or after 2026-10-05T09:00:00Z; only issues carrying one of the categories [<id>]`.
    For GitHub, check the named repository, intake label, creation boundary and
-   optional issue numbers instead; PRs must be excluded.
+   optional issue numbers instead; PRs must be excluded. For Redmine, check
+   that it names the Redmine project without its subprojects.
    Without Go, read the same line as the first line of the engine's log after
    the restart below.
 
@@ -2339,8 +2539,9 @@ sentences for `work` and `deliver`), the issue shows the following. Status,
 category and assignee changes appear in Backlog as change entries without
 text. Model ids are examples.
 
-For GitHub, substitute the configured stage labels for statuses and omit
-categories and actual hours. The same question/answer comments and assignee
+For Redmine, the status and assignee changes appear in the issue's history
+without a note; no category is set and no hours are recorded. For GitHub, substitute the
+configured stage labels for statuses and omit categories and actual hours. The same question/answer comments and assignee
 changes apply, but delivery does not close the issue. If the model allowance
 is already low, acceptance and answer acknowledgements say they are waiting
 instead of saying work began; recovery is announced when execution starts.

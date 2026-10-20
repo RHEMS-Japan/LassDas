@@ -1,0 +1,81 @@
+{
+ "issues": [
+  {
+   "id": 1,
+   "project": {
+    "id": 1,
+    "name": "Intake check"
+   },
+   "tracker": {
+    "id": 1,
+    "name": "Bug"
+   },
+   "status": {
+    "id": 1,
+    "name": "New",
+    "is_closed": false
+   },
+   "priority": {
+    "id": 2,
+    "name": "Normal"
+   },
+   "author": {
+    "id": 6,
+    "name": "Requester Check"
+   },
+   "subject": "Check plain",
+   "description": "Body of plain\r\nline 2",
+   "start_date": "2026-10-20",
+   "due_date": null,
+   "done_ratio": 0,
+   "is_private": false,
+   "estimated_hours": null,
+   "total_estimated_hours": null,
+   "created_on": "2026-10-20T04:46:03Z",
+   "updated_on": "2026-10-20T04:46:03Z",
+   "closed_on": null
+  },
+  {
+   "id": 3,
+   "project": {
+    "id": 1,
+    "name": "Intake check"
+   },
+   "tracker": {
+    "id": 1,
+    "name": "Bug"
+   },
+   "status": {
+    "id": 1,
+    "name": "New",
+    "is_closed": false
+   },
+   "priority": {
+    "id": 2,
+    "name": "Normal"
+   },
+   "author": {
+    "id": 6,
+    "name": "Requester Check"
+   },
+   "category": {
+    "id": 2,
+    "name": "other"
+   },
+   "subject": "Check other-cat",
+   "description": "Body of other-cat\r\nline 2",
+   "start_date": "2026-10-20",
+   "due_date": null,
+   "done_ratio": 30,
+   "is_private": false,
+   "estimated_hours": null,
+   "total_estimated_hours": null,
+   "created_on": "2026-10-20T04:46:03Z",
+   "updated_on": "2026-10-20T04:47:52Z",
+   "closed_on": null
+  }
+ ],
+ "total_count": 5,
+ "offset": 0,
+ "limit": 2
+}

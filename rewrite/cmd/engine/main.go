@@ -31,6 +31,7 @@ type config struct {
 	Roles          []chain.Role     `json:"roles"`
 	Backlog        tracker.Backlog  `json:"backlog,omitzero"`
 	GitHub         *tracker.GitHub  `json:"github,omitempty"`
+	Redmine        *tracker.Redmine `json:"redmine,omitempty"`
 	ModelSelection *selectionConfig `json:"model_selection,omitempty"`
 	Intake         *intakeConfig    `json:"intake,omitempty"`
 	AssignedIssue  string           `json:"assigned_issue,omitempty"`
@@ -81,6 +82,9 @@ func readConfig(data []byte) (config, error) {
 	}
 	if _, err := decoder.Token(); err != io.EOF {
 		return config{}, errors.New("reading the configuration: text follows the configuration object")
+	}
+	if err := validateRedmineConfig(cfg, data); err != nil {
+		return config{}, err
 	}
 	if err := validateGitHubConfig(cfg, data); err != nil {
 		return config{}, err

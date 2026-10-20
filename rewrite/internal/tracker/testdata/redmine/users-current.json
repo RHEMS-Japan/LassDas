@@ -1,0 +1,14 @@
+{
+ "user": {
+  "id": 5,
+  "login": "engine-bot",
+  "admin": false,
+  "firstname": "Engine",
+  "lastname": "Check",
+  "created_on": "2026-10-20T04:45:31Z",
+  "updated_on": "2026-10-20T04:45:31Z",
+  "last_login_on": null,
+  "passwd_changed_on": "2026-10-20T04:45:31Z",
+  "twofa_scheme": null
+ }
+}

@@ -69,6 +69,7 @@ class PackageTests(unittest.TestCase):
                         "examples/operator-stages.json",
                         "examples/operator-github.json",
                         "examples/operator-github-stages.json",
+                        "examples/operator-redmine-stages.json",
                         "harnesses/hermes.py", "harnesses/raven.py", "harnesses/git_workspace.py",
                         "harnesses/linux_role.py", "harnesses/adversarial_review.py",
                         "harnesses/delivery_support.py", "harnesses/added_tests.py"]
@@ -88,7 +89,7 @@ class PackageTests(unittest.TestCase):
             dockerfile = (SOURCE.parent / "deploy/pod/Dockerfile").read_text()
             scripts = set(re.findall(r"rewrite/harnesses/([a-z_]+[.]py)", dockerfile))
             operator = (SOURCE.parent / "deploy/ticket-engine/operator-scripts-configmap.yaml.example").read_text()
-            for example in ("operator-stages", "operator-github-stages"):
+            for example in ("operator-stages", "operator-github-stages", "operator-redmine-stages"):
                 roles = json.loads((bundle / "examples" / (example + ".json")).read_text())["roles"]
                 verify = next(role for role in roles if role["name"] == "verify")["processes"]
                 self.assertEqual(verify[1]["command"], verify[0]["command"][:-1] + ["/opt/ticket-automation/operator/test"])
@@ -142,6 +143,15 @@ class PackageTests(unittest.TestCase):
                     self.assertNotEqual(github_inactive.returncode, 0)
                     self.assertIn("intake.created_since", github_inactive.stderr)
                     self.assertFalse(github_queue.exists())
+            redmine_queue = root / "operator-redmine-stages-must-not-accept"
+            redmine_inactive = subprocess.run(
+                [str(bundle / "bin/ticket-engine"), "--config", str(bundle / "examples/operator-redmine-stages.json"),
+                 "--watch", "--run-dir", str(redmine_queue)], cwd=root,
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(redmine_inactive.returncode, 0)
+            self.assertIn("explicit intake.project_id", redmine_inactive.stderr)
+            self.assertFalse(redmine_queue.exists())
 
 
 if __name__ == "__main__":

@@ -999,6 +999,11 @@ func noticeDetail(cfg config, text string) string {
 		line = strings.ReplaceAll(line, url.QueryEscape(value), "[credential]")
 	}
 	line = textclip.Clip(strings.TrimSpace(line), 200)
+	if cfg.Redmine != nil {
+		// Redmine 5.0 and later notifies the account an @ names in a note,
+		// inside inline code too. A word joiner after the @ names nobody.
+		return strings.ReplaceAll(line, "@", "@\u2060")
+	}
 	if cfg.GitHub == nil || line == "" {
 		return line
 	}

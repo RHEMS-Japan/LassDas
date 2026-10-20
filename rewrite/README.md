@@ -172,7 +172,7 @@ or production acceptance results.
 
 ### Choosing the issue tracker
 
-Choose one top-level tracker: `backlog` or `github`, never both. This selects
+Choose one top-level tracker: `backlog`, `github` or `redmine`, never two. This selects
 where requests and comments live; it does not select the source repository,
 delivery credentials, working models or workflow.
 `examples/operator-github.json` has the same roles and connections as
@@ -231,6 +231,46 @@ role process; when reads work again, the same queued request is launched again.
 That is process interruption and recovery, not preservation of a running model
 call. The role-facing tracker command still uses the assigned local endpoint;
 its direct `issues` command is Backlog-only, not a GitHub administration CLI.
+
+For Redmine, `examples/operator-redmine-stages.json` is `operator-stages.json`
+with the tracker exchanged:
+
+```json
+"redmine": {
+  "base_url": "https://tracker.example.invalid",
+  "key_env": "TRACKER_API_KEY"
+}
+```
+
+`base_url` is the HTTPS address under which an issue's page is `/issues/<id>`,
+with any sub-path; `key_env` names the variable that holds the API key of a
+dedicated Redmine account, sent only in the `X-Redmine-API-Key` header. The
+intake settings are Backlog's: `intake.project_id` (Redmine's numeric project
+id), `created_since`, and optionally `category_ids`, `statuses`, `issue_ids`
+and `stop_user_ids` with Redmine's ids. Discovery takes the project's open
+issues, not its subprojects', created at or after `created_since`; Redmine is
+asked for the categories and the starting time, and the engine checks both
+again. An issue is named by its id. `intake.category_on_accept` is refused:
+a Redmine issue has one category, and the engine leaves the requester's.
+Comments are the issue's notes; a field change is a note without words, and
+is not an answer.
+
+Redmine answers a note or a change with 204 and nothing else. The engine
+therefore reads the issue again: a new note is the newest one after the post,
+by the engine's account, in exactly the posted words; a status or an assignee
+counts as set only when the issue reads back with it, because Redmine leaves
+one it may not set as it was without an error (the role needs Edit issues,
+and its workflow must allow each status move). Rewriting the engine's own
+note and removing a role's earlier posts use `PUT /journals/<id>.json`, which
+Redmine added in 5.0: removal empties the note, which Redmine then deletes.
+On an older Redmine, or without the Edit own notes permission, the engine
+posts a new note instead and the earlier posts stay. Hours are not recorded.
+A private note is read only if the engine's role may view private notes.
+Redmine 5.0 and later mails an account named after an `@` in a note, also
+inside inline code, so the failure detail the engine quotes in its own notices
+carries an invisible word joiner after each `@`. The setup guide's
+[Redmine section](../deploy/ticket-engine/SETUP.md#redmine) lists the
+permissions, measured against Redmine 6.0.11.
 
 ### Automatic intake experiment
 

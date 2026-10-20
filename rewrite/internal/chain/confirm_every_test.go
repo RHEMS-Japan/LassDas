@@ -370,11 +370,11 @@ func TestAlwaysAskRefusesAModelStageRightAfterIt(t *testing.T) {
 	shippedExamplesAcceptAlwaysAsk(t)
 }
 
-// shippedExamplesAcceptAlwaysAsk checks the two shipped ordered runs with
+// shippedExamplesAcceptAlwaysAsk checks the three shipped ordered runs with
 // always_ask turned on at their stage that confirms the change.
 func shippedExamplesAcceptAlwaysAsk(t *testing.T) {
 	t.Helper()
-	for _, file := range []string{"operator-stages.json", "operator-github-stages.json"} {
+	for _, file := range []string{"operator-stages.json", "operator-github-stages.json", "operator-redmine-stages.json"} {
 		t.Run(file, func(t *testing.T) {
 			raw, err := os.ReadFile(filepath.Join("..", "..", "examples", file))
 			if err != nil {

@@ -1,0 +1,45 @@
+{
+ "issue": {
+  "id": 5,
+  "project": {
+   "id": 1,
+   "name": "Intake check"
+  },
+  "tracker": {
+   "id": 1,
+   "name": "Bug"
+  },
+  "status": {
+   "id": 5,
+   "name": "Closed",
+   "is_closed": true
+  },
+  "priority": {
+   "id": 2,
+   "name": "Normal"
+  },
+  "author": {
+   "id": 6,
+   "name": "Requester Check"
+  },
+  "assigned_to": {
+   "id": 6,
+   "name": "Requester Check"
+  },
+  "category": {
+   "id": 1,
+   "name": "engine"
+  },
+  "subject": "Live marked",
+  "description": "Live check body\r\nsecond line 日本語",
+  "start_date": "2026-10-20",
+  "due_date": null,
+  "done_ratio": 0,
+  "is_private": false,
+  "estimated_hours": null,
+  "total_estimated_hours": null,
+  "created_on": "2026-10-20T04:56:08Z",
+  "updated_on": "2026-10-20T04:56:08Z",
+  "closed_on": "2026-10-20T04:56:08Z"
+ }
+}

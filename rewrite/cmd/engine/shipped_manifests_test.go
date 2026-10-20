@@ -559,6 +559,9 @@ func startOnNewVolume(t *testing.T, engine templateContainer, example string) {
 	if cfg.GitHub != nil {
 		address, keyEnv = cfg.GitHub.APIURL, cfg.GitHub.KeyEnv
 	}
+	if cfg.Redmine != nil {
+		address, keyEnv = cfg.Redmine.BaseURL, cfg.Redmine.KeyEnv
+	}
 	trackerURL, err := url.Parse(address)
 	if err != nil || trackerURL.Host == "" || keyEnv == "" {
 		t.Fatalf("the example names no tracker address or credential: %q %q", address, keyEnv)
@@ -575,8 +578,8 @@ func startOnNewVolume(t *testing.T, engine templateContainer, example string) {
 	}
 
 	type question struct {
-		method, path, authorization string
-		query                       url.Values
+		method, path, authorization, redmineKey string
+		query                                   url.Values
 	}
 	var (
 		mu        sync.Mutex
@@ -586,7 +589,7 @@ func startOnNewVolume(t *testing.T, engine templateContainer, example string) {
 	)
 	tracker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		questions = append(questions, question{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.URL.Query()})
+		questions = append(questions, question{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Redmine-API-Key"), r.URL.Query()})
 		first := len(questions) == 1
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -645,6 +648,10 @@ func startOnNewVolume(t *testing.T, engine templateContainer, example string) {
 	if cfg.GitHub != nil {
 		if first.method != http.MethodGet || first.path != base+"/repos/"+cfg.GitHub.Repository+"/issues" || first.authorization != "Bearer "+credential {
 			t.Errorf("the first question to the tracker was %s %s with authorization %q", first.method, first.path, first.authorization)
+		}
+	} else if cfg.Redmine != nil {
+		if first.method != http.MethodGet || first.path != base+"/issues.json" || first.query.Get("project_id") != "17" || first.redmineKey != credential || first.query.Has("key") {
+			t.Errorf("the first question to the tracker was %s %s?%s", first.method, first.path, first.query.Encode())
 		}
 	} else if first.method != http.MethodGet || first.path != base+"/issues" || first.query.Get("projectId[]") != "17" || first.query.Get("apiKey") != credential {
 		t.Errorf("the first question to the tracker was %s %s?%s", first.method, first.path, first.query.Encode())

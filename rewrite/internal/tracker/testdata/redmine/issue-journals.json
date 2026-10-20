@@ -1,0 +1,220 @@
+{
+ "issue": {
+  "id": 5,
+  "project": {
+   "id": 1,
+   "name": "Intake check"
+  },
+  "tracker": {
+   "id": 1,
+   "name": "Bug"
+  },
+  "status": {
+   "id": 5,
+   "name": "Closed",
+   "is_closed": true
+  },
+  "priority": {
+   "id": 2,
+   "name": "Normal"
+  },
+  "author": {
+   "id": 6,
+   "name": "Requester Check"
+  },
+  "assigned_to": {
+   "id": 6,
+   "name": "Requester Check"
+  },
+  "category": {
+   "id": 1,
+   "name": "engine"
+  },
+  "subject": "Live marked",
+  "description": "Live check body\r\nsecond line 日本語",
+  "start_date": "2026-10-20",
+  "due_date": null,
+  "done_ratio": 0,
+  "is_private": false,
+  "estimated_hours": null,
+  "total_estimated_hours": null,
+  "created_on": "2026-10-20T04:56:08Z",
+  "updated_on": "2026-10-20T04:56:08Z",
+  "closed_on": "2026-10-20T04:56:08Z",
+  "journals": [
+   {
+    "id": 274,
+    "user": {
+     "id": 5,
+     "name": "Engine Check"
+    },
+    "notes": "どちらにしますか？ (a) この範囲 (b) 別の範囲\n@requester へ（追記）",
+    "created_on": "2026-10-20T04:56:08Z",
+    "updated_on": "2026-10-20T04:56:08Z",
+    "updated_by": {
+     "id": 5,
+     "name": "Engine Check"
+    },
+    "private_notes": false,
+    "details": []
+   },
+   {
+    "id": 275,
+    "user": {
+     "id": 6,
+     "name": "Requester Check"
+    },
+    "notes": "(a) でお願いします。",
+    "created_on": "2026-10-20T04:56:08Z",
+    "updated_on": "2026-10-20T04:56:08Z",
+    "private_notes": false,
+    "details": []
+   },
+   {
+    "id": 276,
+    "user": {
+     "id": 6,
+     "name": "Requester Check"
+    },
+    "notes": "停止\n理由はあとで",
+    "created_on": "2026-10-20T04:56:08Z",
+    "updated_on": "2026-10-20T04:56:08Z",
+    "private_notes": false,
+    "details": []
+   },
+   {
+    "id": 277,
+    "user": {
+     "id": 5,
+     "name": "Engine Check"
+    },
+    "notes": "",
+    "created_on": "2026-10-20T04:56:08Z",
+    "updated_on": "2026-10-20T04:56:08Z",
+    "private_notes": false,
+    "details": [
+     {
+      "property": "attr",
+      "name": "status_id",
+      "old_value": "1",
+      "new_value": "2"
+     }
+    ]
+   },
+   {
+    "id": 278,
+    "user": {
+     "id": 5,
+     "name": "Engine Check"
+    },
+    "notes": "",
+    "created_on": "2026-10-20T04:56:08Z",
+    "updated_on": "2026-10-20T04:56:08Z",
+    "private_notes": false,
+    "details": [
+     {
+      "property": "attr",
+      "name": "status_id",
+      "old_value": "2",
+      "new_value": "4"
+     }
+    ]
+   },
+   {
+    "id": 279,
+    "user": {
+     "id": 5,
+     "name": "Engine Check"
+    },
+    "notes": "",
+    "created_on": "2026-10-20T04:56:08Z",
+    "updated_on": "2026-10-20T04:56:08Z",
+    "private_notes": false,
+    "details": [
+     {
+      "property": "attr",
+      "name": "status_id",
+      "old_value": "4",
+      "new_value": "2"
+     }
+    ]
+   },
+   {
+    "id": 280,
+    "user": {
+     "id": 5,
+     "name": "Engine Check"
+    },
+    "notes": "",
+    "created_on": "2026-10-20T04:56:08Z",
+    "updated_on": "2026-10-20T04:56:08Z",
+    "private_notes": false,
+    "details": [
+     {
+      "property": "attr",
+      "name": "status_id",
+      "old_value": "2",
+      "new_value": "3"
+     }
+    ]
+   },
+   {
+    "id": 281,
+    "user": {
+     "id": 5,
+     "name": "Engine Check"
+    },
+    "notes": "",
+    "created_on": "2026-10-20T04:56:08Z",
+    "updated_on": "2026-10-20T04:56:08Z",
+    "private_notes": false,
+    "details": [
+     {
+      "property": "attr",
+      "name": "status_id",
+      "old_value": "3",
+      "new_value": "5"
+     }
+    ]
+   },
+   {
+    "id": 282,
+    "user": {
+     "id": 5,
+     "name": "Engine Check"
+    },
+    "notes": "",
+    "created_on": "2026-10-20T04:56:08Z",
+    "updated_on": "2026-10-20T04:56:08Z",
+    "private_notes": false,
+    "details": [
+     {
+      "property": "attr",
+      "name": "assigned_to_id",
+      "old_value": null,
+      "new_value": "5"
+     }
+    ]
+   },
+   {
+    "id": 283,
+    "user": {
+     "id": 5,
+     "name": "Engine Check"
+    },
+    "notes": "",
+    "created_on": "2026-10-20T04:56:08Z",
+    "updated_on": "2026-10-20T04:56:08Z",
+    "private_notes": false,
+    "details": [
+     {
+      "property": "attr",
+      "name": "assigned_to_id",
+      "old_value": "5",
+      "new_value": "6"
+     }
+    ]
+   }
+  ]
+ }
+}
