@@ -6,6 +6,10 @@ enters the workspace and runs the command, and an operator test that parses
 the Python sources. The launcher's arguments are compared with the shipped
 verify processes'. No cluster, network or credential is used; the real
 launcher's confinement is tested elsewhere (test_linux_role.py).
+
+Fixture Git commands must finish automatic maintenance before cleanup removes
+their object directories. Keep maintenance in the foreground rather than
+retrying deletion while a detached writer can still recreate files.
 """
 import json
 import os
@@ -15,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SOURCE = Path(__file__).resolve().parents[2]
 GUIDE = SOURCE / "deploy/ticket-engine/SETUP.md"
@@ -146,9 +151,11 @@ class DefinitionOfDoneCheckTests(unittest.TestCase):
         git = ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
                "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
         for command in (git + ["init", "--quiet", str(origin)],
+                        git + ["-C", str(origin), "config", "maintenance.autoDetach", "false"],
                         git + ["-C", str(origin), "add", "."],
                         git + ["-C", str(origin), "commit", "--quiet", "-m", "fixture"],
                         git + ["init", "--quiet", "--bare", str(self.mirror)],
+                        git + ["-C", str(self.mirror), "config", "maintenance.autoDetach", "false"],
                         git + ["-C", str(origin), "push", "--quiet", str(self.mirror), "HEAD:refs/heads/integration"]):
             subprocess.run(command, check=True, capture_output=True, timeout=30)
         self.record = root / "launch.json"
@@ -242,6 +249,35 @@ class DefinitionOfDoneCheckTests(unittest.TestCase):
         self.assertEqual(launch["environment"]["LIVE_CHECK_PASSWORD"], value)
         self.assertEqual(launch["environment"]["LIVE_CHECK_TEST_USER"], "<agreed-test-user>")
         self.assertNotIn(value, result.stdout + result.stderr)
+
+
+class FixtureCleanupTests(unittest.TestCase):
+    def test_git_maintenance_finishes_before_fixture_cleanup(self):
+        with tempfile.TemporaryDirectory(prefix="done-trace-") as temporary:
+            trace = Path(temporary) / "events.json"
+            config = Path(temporary) / "gitconfig"
+            config.write_text("[maintenance]\n    autoDetach = true\n")
+            with patch.dict(os.environ, GIT_TRACE2_EVENT=str(trace),
+                            GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_SYSTEM=os.devnull,
+                            GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="maintenance.auto",
+                            GIT_CONFIG_VALUE_0="true"):
+                case = DefinitionOfDoneCheckTests(
+                    "test_the_documented_command_passes_both_values_to_the_container")
+                result = unittest.TestResult()
+                unittest.TestSuite([case]).run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            events = [json.loads(line) for line in trace.read_text().splitlines()]
+        maintenance = [event for event in events if event["event"] == "child_start"
+                       and event.get("argv", [])[1:3] == ["maintenance", "run"]]
+        self.assertGreaterEqual(len(maintenance), 2, "commit and push must both be observed")
+        for start in maintenance:
+            self.assertIn("--no-detach", start["argv"])
+            self.assertNotIn("--detach", start["argv"])
+            self.assertTrue(any(event["event"] == "child_exit"
+                                and event["sid"] == start["sid"]
+                                and event["child_id"] == start["child_id"]
+                                and event["code"] == 0 for event in events),
+                            "the parent did not wait for automatic maintenance")
 
 
 if __name__ == "__main__":
