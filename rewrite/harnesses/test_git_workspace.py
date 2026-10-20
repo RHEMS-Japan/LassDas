@@ -3,6 +3,8 @@ import fcntl
 import json
 import os
 from pathlib import Path
+from fixture_git import fixture_git_environment
+import re
 import shutil
 import signal
 import subprocess
@@ -27,6 +29,7 @@ class WorkspaceTests(unittest.TestCase):
                     "PYTHONDONTWRITEBYTECODE": "1", "GIT_CONFIG_GLOBAL": os.devnull,
                     "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": os.devnull,
                     "GIT_TERMINAL_PROMPT": "0"}
+        self.env = fixture_git_environment(self.env)
         self.git(self.source, "init", "--initial-branch=main")
         (self.source / "entry.txt").write_text("original\n")
         self.commit("initial")
@@ -92,6 +95,31 @@ os.execv(os.environ['TEST_REAL_GIT'], [os.environ['TEST_REAL_GIT'], *sys.argv[1:
                 "TEST_REAL_GIT": shutil.which("git"),
                 "TEST_CHECKOUT_REACHED": str(self.root / "checkout-reached"),
                 "TEST_CHECKOUT_RELEASE": str(self.root / "checkout-release")}
+
+    def test_template_free_workspace_finishes_maintenance_before_cleanup(self):
+        version = subprocess.run(["git", "--version"], check=True, capture_output=True, text=True, timeout=10)
+        major, minor = re.search(r"git version (\d+)\.(\d+)", version.stdout).groups()
+        if (int(major), int(minor)) < (2, 47):
+            self.skipTest("foreground maintenance trace requires Git 2.47 or newer")
+        trace = self.root / "maintenance.json"
+        self.env = fixture_git_environment(dict(
+            self.env, GIT_TRACE2_EVENT=str(trace), GIT_CONFIG_COUNT="2",
+            GIT_CONFIG_KEY_0="maintenance.auto", GIT_CONFIG_VALUE_0="true",
+            GIT_CONFIG_KEY_1="maintenance.autoDetach", GIT_CONFIG_VALUE_1="true"))
+        workspace = self.workspace("maintenance")
+        code, _, error = self.run_launcher(workspace)
+        self.assertEqual(code, 0, error)
+        self.git(workspace, "fetch", str(self.source))
+        events = [json.loads(line) for line in trace.read_text().splitlines()]
+        starts = [event for event in events if event["event"] == "child_start"
+                  and event.get("argv", [])[1:3] == ["maintenance", "run"]]
+        self.assertGreaterEqual(len(starts), 1)
+        for start in starts:
+            self.assertIn("--no-detach", start["argv"])
+            self.assertNotIn("--detach", start["argv"])
+            self.assertTrue(any(event["event"] == "child_exit" and event["sid"] == start["sid"]
+                                and event["child_id"] == start["child_id"] and event["code"] == 0
+                                for event in events))
 
     def test_empty_workspace_is_ready_before_child_and_prose_is_unchanged(self):
         workspace = self.workspace("one")

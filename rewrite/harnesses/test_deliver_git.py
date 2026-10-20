@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from fixture_git import fixture_git_environment
 import shutil
 import struct
 import subprocess
@@ -29,10 +30,11 @@ def git_environment():
     with neither is exactly where these programs have to work. The delivery's
     Git on the workspace drops settings handed to Git through the environment,
     so the workspace's own configuration forbids the guess there (see setUp)."""
-    return {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
+    environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly",
             "GIT_CONFIG_VALUE_0": "true"}
+    return fixture_git_environment(environment)
 
 
 def service_handler(state):
@@ -196,6 +198,7 @@ class DeliveryTests(unittest.TestCase):
         self.git(source, "add", "-A")
         self.git(source, "commit", "-m", "Codex: initial")
         self.git(source, "clone", "--bare", str(source), str(self.remote))
+        (self.remote / "hooks").mkdir(exist_ok=True)
         self.git(self.root, "clone", "--no-local", str(self.remote), str(self.workspace))
         self.git(self.workspace, "checkout", "--detach", "HEAD")
         self.git(self.workspace, "config", "user.useConfigOnly", "true")

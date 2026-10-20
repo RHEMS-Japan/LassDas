@@ -17,6 +17,7 @@ import io
 import json
 import os
 from pathlib import Path
+from fixture_git import fixture_git_environment
 import re
 import shutil
 import signal
@@ -457,7 +458,8 @@ class PreviewExampleTests(unittest.TestCase):
 
     def git(self, *arguments):
         subprocess.run([self.real_git, "-C", str(self.checkout), *arguments], check=True,
-                       stdin=subprocess.DEVNULL, capture_output=True)
+                       stdin=subprocess.DEVNULL, capture_output=True,
+                       env=fixture_git_environment(os.environ))
 
     def write_fake(self, name, source):
         path = self.fake / name
