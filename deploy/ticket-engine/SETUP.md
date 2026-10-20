@@ -676,7 +676,7 @@ the same way, and merge that pull request into the integration branch before
 the intake opens (section 8): the roles read the definition from a checkout of
 that branch, so a location whose file is not there yet gives them nothing to
 read. The engine is given only its location, in the project guidance
-([section 4](#finish-the-project-guidance-any-tracker)). Its commands
+([section 4](#finish-the-project-guidance-either-tracker)). Its commands
 become the operator's `build` and `test` (section 6) and, if there is one, the
 live check's process. Change a command and the definition together, and run
 the check in section 7 again after either changes.
@@ -903,7 +903,7 @@ or `github`, which are refused with Redmine. The repository's tests run this
 command and the configuration check together; they do not test access to a
 live server.
 
-### Finish the project guidance (any tracker)
+### Finish the project guidance (either tracker)
 
 Then open your copy and replace the first sentence of `instructions`
 ("Operator setup is incomplete: ...") with your project's guidance: where the
