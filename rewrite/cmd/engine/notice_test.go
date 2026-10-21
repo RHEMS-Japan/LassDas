@@ -340,8 +340,17 @@ func TestRestartNoticeIsPostedOncePerRestartAndNotForACleanStart(t *testing.T) {
 	// A clean history is not a restart and says nothing at all.
 	cleanRoot, cleanDirectory := noticeJob(t, chain.State{History: []chain.Result{}})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go pollRequests(ctx, cfg, filepath.Join(cleanRoot, "jobs"), since, 10*time.Millisecond, 1, &serialLog{writer: io.Discard})
+	finished := make(chan struct{})
+	// The poller can still be writing to the job after it is done; it stops
+	// before the test's directories are removed.
+	defer func() {
+		cancel()
+		<-finished
+	}()
+	go func() {
+		defer close(finished)
+		_ = pollRequests(ctx, cfg, filepath.Join(cleanRoot, "jobs"), since, 10*time.Millisecond, 1, &serialLog{writer: io.Discard})
+	}()
 	waitFor(t, func() bool { return loadJobState(t, cleanDirectory).Done })
 	if notices := readNotices(t, cleanDirectory).Notices; len(notices) != 0 {
 		t.Fatalf("a clean start told the requester about a restart: %+v", notices)
