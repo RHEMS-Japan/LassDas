@@ -528,31 +528,39 @@ func TestRedmineAnswersAndStopsComeOnlyFromTheirAuthors(t *testing.T) {
 // (Fails at b997c63, which found no note in the sent words and posted the
 // notice again on every tick.)
 func TestRedmineNoticeIsPostedOnceWhenRedmineKeepsOtherWords(t *testing.T) {
-	cfg := redmineConfiguration(t)
-	start := time.Now().UTC().Add(-3 * time.Hour)
-	root, directory := noticeJob(t, chain.State{History: []chain.Result{
-		{Role: "implement", Speaker: "worker", Output: "previous work", StartedAt: start, FinishedAt: start.Add(time.Minute)},
-		{Role: "router", Speaker: "runtime", Error: "failed 😀", StartedAt: start.Add(time.Hour), FinishedAt: start.Add(time.Hour)},
-	}})
-	queueRanSince(t, root, cfg, start)
-	fake := newRedmineQueueFake(t, cfg, redmineIssueRow(51, 0))
-	// A database that cannot hold four-byte characters keeps them as ?.
-	fake.keep = func(text string) string { return strings.ReplaceAll(text, "😀", "?") }
-	useCatalogTransport(t, fake.roundTrip)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	n := requestNotices(cfg, sourceIssue{ID: 51, Key: "51"}, directory)
-	if err := noteStall(ctx, cfg, n, directory, true, start); err != nil {
-		t.Fatal(err)
-	}
-	for range 4 {
-		if err := n.flush(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	records := readNotices(t, directory).Notices
-	if len(fake.puts) != 1 || len(records) != 1 || records[0].CommentID != 900 || records[0].PostedAt == nil {
-		t.Fatalf("notice posted %d times: %q %+v", len(fake.puts), fake.puts, records)
+	for name, keep := range map[string]func(string) string{
+		// A database that cannot hold four-byte characters keeps them as ?.
+		"four-byte characters as ?": func(text string) string { return strings.ReplaceAll(text, "😀", "?") },
+		// A plugin or a database that drops an invisible character.
+		"word joiners dropped": func(text string) string { return strings.ReplaceAll(text, "\u2060", "") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := redmineConfiguration(t)
+			start := time.Now().UTC().Add(-3 * time.Hour)
+			root, directory := noticeJob(t, chain.State{History: []chain.Result{
+				{Role: "implement", Speaker: "worker", Output: "previous work", StartedAt: start, FinishedAt: start.Add(time.Minute)},
+				{Role: "router", Speaker: "runtime", Error: "failed 😀 for @example", StartedAt: start.Add(time.Hour), FinishedAt: start.Add(time.Hour)},
+			}})
+			queueRanSince(t, root, cfg, start)
+			fake := newRedmineQueueFake(t, cfg, redmineIssueRow(51, 0))
+			fake.keep = keep
+			useCatalogTransport(t, fake.roundTrip)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			n := requestNotices(cfg, sourceIssue{ID: 51, Key: "51"}, directory)
+			if err := noteStall(ctx, cfg, n, directory, true, start); err != nil {
+				t.Fatal(err)
+			}
+			for range 4 {
+				if err := n.flush(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			records := readNotices(t, directory).Notices
+			if len(fake.puts) != 1 || len(records) != 1 || records[0].CommentID != 900 || records[0].PostedAt == nil {
+				t.Fatalf("notice posted %d times: %q %+v", len(fake.puts), fake.puts, records)
+			}
+		})
 	}
 }
 

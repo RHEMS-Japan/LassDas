@@ -239,25 +239,32 @@ func TestRedmineAsksForItsOwnAccountOnce(t *testing.T) {
 // it saved without an id, which is not to be posted again. (The first fails
 // at b997c63, which found no note and said it may be posted; the second too.)
 func TestRedmineFindsANoteRedmineKeptInOtherWords(t *testing.T) {
-	for _, others := range []int{0, 1} {
-		fake, redmine := redmineFixture(t)
-		fake.before = func(w http.ResponseWriter, r *http.Request) bool {
-			if r.Method != http.MethodPut {
-				return false
-			}
-			for range others {
+	for name, keep := range map[string]func(string) string{
+		"four-byte characters as ?": func(text string) string { return strings.ReplaceAll(text, "😀", "?") },
+		"a trailing newline cut":    func(text string) string { return strings.TrimRight(text, "\n") },
+	} {
+		for _, others := range []int{0, 1} {
+			fake, redmine := redmineFixture(t)
+			fake.before = func(w http.ResponseWriter, r *http.Request) bool {
+				if r.Method != http.MethodPut {
+					return false
+				}
+				var body map[string]map[string]string
+				json.NewDecoder(r.Body).Decode(&body)
+				for range others {
+					fake.next++
+					fake.journals = append(fake.journals, map[string]any{"id": fake.next, "user": map[string]any{"id": 5}, "notes": "a role's note"})
+				}
 				fake.next++
-				fake.journals = append(fake.journals, map[string]any{"id": fake.next, "user": map[string]any{"id": 5}, "notes": "a role's note"})
+				fake.journals = append(fake.journals, map[string]any{"id": fake.next, "user": map[string]any{"id": 5}, "notes": keep(body["issue"]["notes"])})
+				w.WriteHeader(http.StatusNoContent)
+				return true
 			}
-			fake.next++
-			fake.journals = append(fake.journals, map[string]any{"id": fake.next, "user": map[string]any{"id": 5}, "notes": "a notice ????"})
-			w.WriteHeader(http.StatusNoContent)
-			return true
-		}
-		id, err := redmine.AddComment(context.Background(), Issue{ID: 5, Key: "5"}, "a notice 😀😀😀😀")
-		want := map[int]int64{0: 901, 1: 0}[others]
-		if err != nil || id != want {
-			t.Fatalf("with %d other new notes: id=%d (%v), want %d", others, id, err, want)
+			id, err := redmine.AddComment(context.Background(), Issue{ID: 5, Key: "5"}, "a notice 😀😀😀😀\n")
+			want := map[int]int64{0: 901, 1: 0}[others]
+			if err != nil || id != want {
+				t.Fatalf("%s, with %d other new notes: id=%d (%v), want %d", name, others, id, err, want)
+			}
 		}
 	}
 }

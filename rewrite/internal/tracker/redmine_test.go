@@ -623,6 +623,10 @@ func TestRedmineOrdersJournalsByIDWhateverTheirTimes(t *testing.T) {
 	if fmt.Sprint(order) != "[274 275 276]" {
 		t.Fatalf("read in the order %v", order)
 	}
+	// A note is still added to it, and found.
+	if id, err := redmine.AddComment(context.Background(), issue, "a notice"); err != nil || id != 901 {
+		t.Fatalf("a note on an issue listed out of id order: %d %v", id, err)
+	}
 }
 
 // An issue closed between two pages does not shift another one out of the
