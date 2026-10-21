@@ -579,7 +579,11 @@ func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory
 				if last != nil && last.Event == event {
 					return said, false
 				}
-				if last != nil && last.PostedAt != nil && !last.Predates && last.CommentID > 0 && sameFailures(saved(), role.Name, last.Event, latest.Launch) {
+				// A notice recorded with notes the tracker could not tell it
+				// apart from (Also) may not be the engine's own comment at
+				// CommentID: it is never rewritten, the rerun is a new comment.
+				if last != nil && last.PostedAt != nil && !last.Predates && last.CommentID > 0 && len(last.Also) == 0 &&
+					sameFailures(saved(), role.Name, last.Event, latest.Launch) {
 					said.Edits = last.CommentID
 				}
 				return said, true

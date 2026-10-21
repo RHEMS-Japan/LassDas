@@ -85,14 +85,16 @@ func (p RedmineProject) Forward(ctx context.Context, method, path string, query,
 		}
 		return json.Marshal(page)
 	case method == http.MethodPost && len(parts) == 3 && parts[2] == "comments" && len(query) == 0 && len(form) == 1 && len(form["content"]) == 1 && expected == http.StatusCreated:
-		// A note Redmine kept in other words, landing with another note by the
-		// same account, is answered with the newer one's id. The other is not
-		// added to the launch's cleanup, which would then empty a note that
-		// may be the engine's own; a note of the role's that the cleanup does
-		// not know stays, as the cleanup's limits already allow.
-		raw, _, err := p.addNote(ctx, key, form.Get("content"))
+		// A note Redmine kept in other words, landing with another new note by
+		// the same account, cannot be told apart from it. The role gets no
+		// receipt, and neither note joins the launch's cleanup, which would
+		// otherwise empty a note that may be the engine's own.
+		raw, others, err := p.addNote(ctx, key, form.Get("content"))
 		if err != nil {
 			return nil, err
+		}
+		if len(others) > 0 {
+			return nil, errors.New("comment submission not confirmed: Redmine kept the note in other words and another new note by the engine's account landed with it, so it cannot be told which is this one; it may already be posted; inspect comments before retrying")
 		}
 		return scopedRedmineJournal(raw)
 	case (method == http.MethodGet || method == http.MethodDelete) && len(parts) == 4 && parts[2] == "comments" && len(query) == 0 && len(form) == 0 && expected == http.StatusOK:

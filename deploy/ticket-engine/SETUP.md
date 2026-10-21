@@ -477,8 +477,9 @@ so repeat the read check of section 7 against yours.
    "Enable REST web service".
 3. **The engine's own account.** Create a user for the engine, not an
    administrator, and make it a member of the intake project only. Its role
-   needs these permissions (each was checked by taking it away), and not
-   View private notes:
+   needs these permissions (each was checked by taking it away). It does not
+   need View private notes: the engine leaves every private note out whatever
+   its role may see (see "Comments are notes" below).
 
    | Permission | Without it |
    | --- | --- |
@@ -565,10 +566,14 @@ engine's account may not look up is treated the same way. The engine says in
 its log, once for each issue, which issue it left out and why. That an id is
 no account is kept for ten minutes, then asked again; an issue whose author
 cannot be looked up at all (Redmine answers neither the account nor 404) is
-held for that poll only, the rest of the intake going on. Redmine 5.0 and later sends mail to an
+held for that poll only, the rest of the intake going on, and said again
+every ten minutes while it stays held, with how many polls it has been. Redmine 5.0 and later sends mail to an
 account named after an `@` in a note; the engine puts an invisible word
 joiner after each `@` in the failure detail it quotes, so a diagnostic line
-names nobody. What roles post is sent as they wrote it.
+names nobody. What roles post is sent as they wrote it. When a role gives up
+waiting on a note it sent, the engine still carries that note to Redmine and
+reads it back, for up to 90 seconds, before the role's launch ends; a stop or
+the next stage can wait that long behind it on Redmine only.
 
 **Looking up the ids.** This reads them with the engine account's key, which
 it takes from an environment variable and never prints. Run it on your

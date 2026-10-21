@@ -639,41 +639,51 @@ func TestRedmineHoldsEveryNoteItCannotTellApartForItsOwnNotice(t *testing.T) {
 	}
 }
 
-// Redmine saved the notice in other words, but the answer to the change was
-// lost: the issue is read back all the same, the notice is found and not
-// posted again on the next ticks. (Fails at 3adf54a, which read nothing back
-// after a failed change and posted the notice again; from the third review's
-// probe.)
-func TestRedmineNoticeWhoseAnswerWasLostIsNotPostedAgain(t *testing.T) {
-	cfg := redmineConfiguration(t)
-	start := time.Now().UTC().Add(-3 * time.Hour)
-	root, directory := noticeJob(t, chain.State{History: []chain.Result{
-		{Role: "implement", Speaker: "worker", Output: "previous work", StartedAt: start, FinishedAt: start.Add(time.Minute)},
-		{Role: "router", Speaker: "runtime", Error: "failed 😀", StartedAt: start.Add(time.Hour), FinishedAt: start.Add(time.Hour)},
-	}})
-	queueRanSince(t, root, cfg, start)
-	fake := newRedmineQueueFake(t, cfg, redmineIssueRow(51, 0))
-	fake.keep = func(text string) string { return strings.ReplaceAll(text, "😀", "?") }
-	puts := 0
-	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
-		response, err := fake.roundTrip(r)
-		if r.Method == "PUT" {
-			if puts++; puts == 1 {
-				return catalogReply(r, 502, ""), nil // saved, but the answer is lost
+// The answer to the change that posts a notice is lost. Saved in its own
+// words, the notice is found when the issue is read back and not posted
+// again. Saved in other words, it cannot be told from another note, since
+// nothing says Redmine saved anything: it is posted again once, and that post
+// is confirmed. (The first case fails at 3adf54a, which read nothing back
+// after a failed change; the second case is the fourth review's rule, which
+// b84f97f broke by taking the only new note after a failed change.)
+func TestRedmineNoticeWhoseAnswerWasLostIsFoundOnlyByItsWords(t *testing.T) {
+	for name, keep := range map[string]func(string) string{
+		"its own words":  nil,
+		"in other words": func(text string) string { return strings.ReplaceAll(text, "😀", "?") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := redmineConfiguration(t)
+			start := time.Now().UTC().Add(-3 * time.Hour)
+			root, directory := noticeJob(t, chain.State{History: []chain.Result{
+				{Role: "implement", Speaker: "worker", Output: "previous work", StartedAt: start, FinishedAt: start.Add(time.Minute)},
+				{Role: "router", Speaker: "runtime", Error: "failed 😀", StartedAt: start.Add(time.Hour), FinishedAt: start.Add(time.Hour)},
+			}})
+			queueRanSince(t, root, cfg, start)
+			fake := newRedmineQueueFake(t, cfg, redmineIssueRow(51, 0))
+			fake.keep = keep
+			puts := 0
+			useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+				response, err := fake.roundTrip(r)
+				if r.Method == "PUT" {
+					if puts++; puts == 1 {
+						return catalogReply(r, 502, ""), nil // saved, but the answer is lost
+					}
+				}
+				return response, err
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			n := requestNotices(cfg, sourceIssue{ID: 51, Key: "51"}, directory)
+			noteStall(ctx, cfg, n, directory, true, start)
+			for range 3 {
+				n.flush(ctx)
 			}
-		}
-		return response, err
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	n := requestNotices(cfg, sourceIssue{ID: 51, Key: "51"}, directory)
-	noteStall(ctx, cfg, n, directory, true, start)
-	for range 3 {
-		n.flush(ctx)
-	}
-	records := readNotices(t, directory).Notices
-	if puts != 1 || len(fake.journals["51"]) != 1 || len(records) != 1 || records[0].CommentID != 900 {
-		t.Fatalf("puts=%d journals=%d records=%+v", puts, len(fake.journals["51"]), records)
+			records := readNotices(t, directory).Notices
+			want := map[string][2]int{"its own words": {1, 900}, "in other words": {2, 901}}[name]
+			if puts != want[0] || len(fake.journals["51"]) != want[0] || len(records) != 1 || records[0].CommentID != int64(want[1]) || records[0].PostedAt == nil {
+				t.Fatalf("puts=%d journals=%d records=%+v", puts, len(fake.journals["51"]), records)
+			}
+		})
 	}
 }
 

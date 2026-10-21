@@ -26,7 +26,7 @@ type IssueAccess struct {
 	URL, Certificate, Key string
 	close                 func()
 	settle                func()
-	answering             *sync.WaitGroup
+	answering             *answering
 }
 
 // Close ends the launch's access. Requests still being answered are waited
@@ -39,11 +39,14 @@ type IssueAccess struct {
 // after the count; it then stays as one comment more, and nothing stored at
 // or after the kept one is ever removed.
 func (a *IssueAccess) Close() {
+	if a.answering != nil {
+		a.answering.stop()
+	}
 	a.close()
 	if a.answering != nil {
 		done := make(chan struct{})
 		go func() {
-			a.answering.Wait()
+			a.answering.group.Wait()
 			close(done)
 		}()
 		timer := time.NewTimer(issueAnswerWait)
@@ -61,6 +64,32 @@ func (a *IssueAccess) Close() {
 // issueAnswerWait bounds how long Close waits for the requests still being
 // answered: longer than a Redmine post is carried after it is sent.
 const issueAnswerWait = 100 * time.Second
+
+// answering counts the requests being answered. Once Close has begun it
+// counts no more and refuses them, so the count is never raised from zero
+// while Close waits on it.
+type answering struct {
+	mu      sync.Mutex
+	stopped bool
+	group   sync.WaitGroup
+}
+
+// start counts one more request being answered, or says the access is closing.
+func (a *answering) start() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped {
+		return false
+	}
+	a.group.Add(1)
+	return true
+}
+
+func (a *answering) stop() {
+	a.mu.Lock()
+	a.stopped = true
+	a.mu.Unlock()
+}
 
 func ServeIssue(ctx context.Context, source Upstream, issue string, mayPost bool, options ...func(*IssueScope)) (*IssueAccess, error) {
 	// Some adapters need per-launch state to translate pagination. Never
@@ -96,10 +125,13 @@ func ServeIssue(ctx context.Context, source Upstream, issue string, mayPost bool
 		return nil, err
 	}
 	// Every request being answered is counted, so Close can wait for it.
-	answering := &sync.WaitGroup{}
+	counted := &answering{}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		answering.Add(1)
-		defer answering.Done()
+		if !counted.start() {
+			scope.reject(w, http.StatusServiceUnavailable, "the launch's tracker access is closing")
+			return
+		}
+		defer counted.group.Done()
 		scope.ServeHTTP(w, r)
 	})
 	// No worker URL (which carries a capability) goes to the HTTP error logger.
@@ -138,7 +170,7 @@ func ServeIssue(ctx context.Context, source Upstream, issue string, mayPost bool
 	}
 	return &IssueAccess{URL: "https://" + listener.Addr().String(), Key: scope.Key(),
 		Certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), close: closeServer, settle: settle,
-		answering: answering}, nil
+		answering: counted}, nil
 }
 
 // CertificateClient trusts this explicit local endpoint certificate instead of

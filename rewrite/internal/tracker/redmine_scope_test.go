@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -308,5 +309,49 @@ func TestRedmineClosingAccessWaitsForAPostBeingCarried(t *testing.T) {
 	defer mu.Unlock()
 	if len(recorded) != 1 || recorded[0] != 901 {
 		t.Fatalf("Close returned before the post's receipt was recorded: %v", recorded)
+	}
+}
+
+// A role's note Redmine kept in other words, with the engine's own notice by
+// the same account landing with it, cannot be told apart from the notice: the
+// role gets no receipt, and the launch's cleanup leaves both notes alone, the
+// notice above all. (Fails at b84f97f, whose cleanup emptied the engine's
+// notice; from the fourth review's probe.)
+func TestRedmineScopeGivesNoReceiptForANoteItCannotTellApart(t *testing.T) {
+	fake, redmine, worker, scope := redmineScopeFixture(t, true, KeepLatestPost)
+	first := true
+	fake.before = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method != http.MethodPut || r.URL.Path != "/issues/5.json" || !first {
+			return false
+		}
+		first = false
+		fake.next++
+		fake.journals = append(fake.journals, map[string]any{"id": fake.next, "user": map[string]any{"id": 5}, "notes": "trial ?"})
+		fake.next++
+		fake.journals = append(fake.journals, map[string]any{"id": fake.next, "user": map[string]any{"id": 5}, "notes": "ENGINE NOTICE"})
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
+	ctx := context.Background()
+	if receipt, err := worker.AddComment(ctx, "5", "trial 😀"); err == nil || !strings.Contains(err.Error(), "may already be posted") {
+		t.Fatalf("a note that cannot be told apart was given a receipt: %s %v", receipt, err)
+	}
+	if _, err := worker.AddComment(ctx, "5", "what the role means"); err != nil {
+		t.Fatal(err)
+	}
+	scope.RemoveEarlierPosts(ctx)
+	for _, call := range fake.called() {
+		if strings.HasPrefix(call, "PUT /journals/") {
+			t.Fatalf("the cleanup emptied a note it could not tell apart: %v", fake.called())
+		}
+	}
+	rows, _ := redmine.Comments(ctx, Issue{ID: 5, Key: "5"})
+	var tail []string
+	for _, raw := range rows[10:] {
+		_, text, _ := redmine.CommentText(raw)
+		tail = append(tail, text)
+	}
+	if fmt.Sprint(tail) != "[trial ? ENGINE NOTICE what the role means]" {
+		t.Fatalf("the notes after the cleanup: %q", tail)
 	}
 }

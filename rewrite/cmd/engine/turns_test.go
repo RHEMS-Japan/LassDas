@@ -1366,3 +1366,48 @@ func TestARunOfFailuresEndsAtOtherWorkOrTheRequestersWords(t *testing.T) {
 		})
 	}
 }
+
+// A notice recorded with notes the tracker could not tell it apart from may
+// not be the engine's own comment at its id, so a rerun after it is never a
+// rewrite of it: it is a new comment. (Fails at b84f97f, which rewrote it.)
+func TestARerunAfterANoticeThatCannotBeToldApartIsANewComment(t *testing.T) {
+	cfg := declaringConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, began := declaringJob(t, cfg)
+	tick := func() {
+		for range 2 {
+			declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
+		}
+	}
+	exits := func(count int) {
+		t.Helper()
+		if err := saveWorkLimit(directory, workLimitRecord{Version: 1, StageExits: &stageExits{Max: 3, Stage: "elicit", Count: count, Mark: count}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := time.Now().UTC()
+	launched(t, directory, "elicit", 0, "maker/one")
+	tick()
+	writeJobHistory(t, directory, chain.State{History: []chain.Result{forcedNote("elicit", at)}})
+	exits(1)
+	launched(t, directory, "elicit", 1, "maker/two")
+	tick()
+	// The first rerun's notice could not be told apart from another note.
+	n := requestNotices(cfg, announcedIssue(), directory)
+	log, err := n.load()
+	if err != nil || len(log.Notices) == 0 {
+		t.Fatalf("notices: %+v %v", log, err)
+	}
+	log.Notices[len(log.Notices)-1].Also = []int64{log.Notices[len(log.Notices)-1].CommentID - 1}
+	if err := n.save(log); err != nil {
+		t.Fatal(err)
+	}
+	writeJobHistory(t, directory, chain.State{History: []chain.Result{forcedNote("elicit", at), forcedNote("elicit", at)}})
+	exits(2)
+	launched(t, directory, "elicit", 2, "maker/two")
+	tick()
+	if got, edited := fixture.all(), fixture.rewritten(); len(got) != 3 || len(edited) != 0 {
+		t.Fatalf("posted %q and rewrote %q; the rerun must be a new comment", got, edited)
+	}
+}

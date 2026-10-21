@@ -179,7 +179,8 @@ type noticeRecord struct {
 	// tracker could not tell this notice apart from (Redmine, when it kept
 	// the words otherwise and another note by the account landed with it).
 	// They are held for the engine's own, as CommentID is: none of them is
-	// anyone's answer or instruction.
+	// anyone's answer or instruction. A notice with any is never rewritten,
+	// since CommentID itself may be another's.
 	Also []int64 `json:"also_comment_ids,omitempty"`
 }
 

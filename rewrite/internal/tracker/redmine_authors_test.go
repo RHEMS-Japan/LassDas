@@ -65,10 +65,15 @@ func TestRedmineTakesNothingFromRedminesAnonymousUser(t *testing.T) {
 
 // A look-up that fails for another reason than not found fails a read of the
 // issue's notes, rather than leaving an author out by mistake. In the intake
-// it holds only the issues of that author, for this poll, and says so once in
-// the engine's log; the other issues are listed. (The intake part fails at
-// 3adf54a, which failed the whole list on every poll and said nothing.)
-func TestRedmineHoldsOnlyTheIssueWhoseAuthorCannotBeLookedUp(t *testing.T) {
+// it holds only the issues of that author, poll by poll, and says so in the
+// engine's log when the hold begins, again every ten minutes while it lasts,
+// with how many polls it has been held, and when it ends. The other issues
+// are listed. (Fails at b84f97f, which said the hold once and never again.)
+func TestRedmineHoldsOnlyTheIssueWhoseAuthorCannotBeLookedUpAndSaysSoWhileHeld(t *testing.T) {
+	now := time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC)
+	previous := redmineNow
+	redmineNow = func() time.Time { return now }
+	t.Cleanup(func() { redmineNow = previous })
 	fake, redmine := redmineFixture(t)
 	fake.users[8] = "another-requester"
 	fake.refuse["GET /users/6.json"] = http.StatusForbidden
@@ -88,24 +93,29 @@ func TestRedmineHoldsOnlyTheIssueWhoseAuthorCannotBeLookedUp(t *testing.T) {
 	}
 	var said []string
 	observed := redmine.ObservedBy(func(line string) { said = append(said, line) })
-	for range 2 {
+	poll := func(after time.Duration, want string) {
+		t.Helper()
+		now = now.Add(after)
 		rows, err := observed.Issues(context.Background())
 		var listed []int64
 		for _, raw := range rows {
 			issue, _ := redmine.ReadIssue(raw)
 			listed = append(listed, issue.ID)
 		}
-		if err != nil || fmt.Sprint(listed) != "[1 3]" {
-			t.Fatalf("listed %v (%v); only issue 2, whose author could not be looked up, is to be held", listed, err)
+		if err != nil || fmt.Sprint(listed) != want {
+			t.Fatalf("listed %v (%v), want %s", listed, err, want)
 		}
 	}
-	if len(said) != 1 || !strings.Contains(said[0], "Redmine issue 2 is held from the intake this time") || !strings.Contains(said[0], "403") {
-		t.Fatalf("the engine's log said %q", said)
-	}
-	// Once the look-up works, the issue is listed.
+	poll(0, "[1 3]")
+	poll(time.Minute, "[1 3]")
+	poll(5*time.Minute, "[1 3]")
+	poll(5*time.Minute, "[1 3]") // ten minutes after the first line
 	delete(fake.refuse, "GET /users/6.json")
-	if rows, err := observed.Issues(context.Background()); err != nil || len(rows) != 3 {
-		t.Fatalf("the held issue did not come back: %d %v", len(rows), err)
+	poll(time.Minute, "[1 2 3]")
+	if len(said) != 3 || !strings.Contains(said[0], "Redmine issue 2 is held from the intake (1 polls so far") || !strings.Contains(said[0], "403") ||
+		!strings.Contains(said[1], "Redmine issue 2 is held from the intake (4 polls so far") ||
+		!strings.Contains(said[2], "Redmine issue 2 is no longer held from the intake, after 4 polls") {
+		t.Fatalf("the engine's log said %q", said)
 	}
 }
 

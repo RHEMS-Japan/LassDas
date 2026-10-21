@@ -55,6 +55,43 @@ func (p RedmineProject) ObservedBy(observe func(string)) Tracker {
 	return p
 }
 
+// hold leaves an issue out of this poll's intake because its author could not
+// be looked up, and says so in the engine's log: when it is first held, and
+// again every redmineHeldSaid while it stays held, with how many polls it has
+// been held.
+func (p RedmineProject) hold(id int64, err error) {
+	place := p.Client.known() + "\x00" + strconv.FormatInt(id, 10)
+	now := redmineNow()
+	redmineKnown.Lock()
+	held := redmineKnown.held[place]
+	held.polls++
+	say := held.said.IsZero() || !now.Before(held.said.Add(redmineHeldSaid))
+	if say {
+		held.said = now
+	}
+	redmineKnown.held[place] = held
+	redmineKnown.Unlock()
+	if say && p.Observe != nil {
+		p.Observe(fmt.Sprintf("Redmine issue %d is held from the intake (%d polls so far; said again every %s while held): %v", id, held.polls, redmineHeldSaid, err))
+	}
+}
+
+// release ends an issue's hold, and says so if it was held.
+func (p RedmineProject) release(id int64) {
+	place := p.Client.known() + "\x00" + strconv.FormatInt(id, 10)
+	redmineKnown.Lock()
+	held, found := redmineKnown.held[place]
+	delete(redmineKnown.held, place)
+	redmineKnown.Unlock()
+	if found && p.Observe != nil {
+		p.Observe(fmt.Sprintf("Redmine issue %d is no longer held from the intake, after %d polls", id, held.polls))
+	}
+}
+
+// redmineHeldSaid is how often a held issue is said again while it stays
+// held.
+const redmineHeldSaid = 10 * time.Minute
+
 // say writes a line to the engine's log once for the process, however many
 // polls meet the same issue for the same reason.
 func (p RedmineProject) say(line string) {
@@ -127,7 +164,8 @@ type redmineReference struct {
 // person's account (see person) is left out too: everyone who files without
 // an account is the same anonymous author, so anyone could answer or stop the
 // request in its name. One whose author cannot be looked up now is held for
-// this poll only. Either is said once in the engine's log.
+// this poll. A left-out issue is said once in the engine's log, a held one
+// while it stays held (see hold).
 func (p RedmineProject) Issues(ctx context.Context) ([]json.RawMessage, error) {
 	if p.ProjectID <= 0 {
 		return nil, errors.New("provide a positive project id for issue discovery")
@@ -162,9 +200,12 @@ func (p RedmineProject) Issues(ctx context.Context) ([]json.RawMessage, error) {
 			return nil, errors.New("tracker returned an issue outside the configured project")
 		}
 		person, err := p.Client.person(ctx, issue.Author.ID)
+		if err != nil {
+			p.hold(issue.ID, err)
+			continue
+		}
+		p.release(issue.ID)
 		switch {
-		case err != nil:
-			p.say(fmt.Sprintf("Redmine issue %d is held from the intake this time: %v", issue.ID, err))
 		case !person:
 			p.say(fmt.Sprintf("Redmine issue %d is left out of the intake: its author %d is not an account the engine can look up (Redmine's anonymous user, who stands for everyone without an account, or an account the engine's role may not see)", issue.ID, issue.Author.ID))
 		default:
@@ -466,7 +507,16 @@ var redmineKnown = struct {
 	persons map[string]redminePerson
 	said    map[string]bool
 	unsaved map[string]int
-}{me: map[string]Account{}, persons: map[string]redminePerson{}, said: map[string]bool{}, unsaved: map[string]int{}}
+	held    map[string]redmineHeld
+}{me: map[string]Account{}, persons: map[string]redminePerson{}, said: map[string]bool{}, unsaved: map[string]int{},
+	held: map[string]redmineHeld{}}
+
+// redmineHeld is an issue held from the intake: for how many polls, and when
+// that was last said.
+type redmineHeld struct {
+	polls int
+	said  time.Time
+}
 
 type redminePerson struct {
 	person bool

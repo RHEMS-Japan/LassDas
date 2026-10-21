@@ -53,7 +53,9 @@ func (p RedmineProject) PostComment(ctx context.Context, issue Issue, text strin
 // to the caller: a role's client gives up after 30 seconds, and a note sent
 // whose id is never read is neither recorded for the launch's cleanup nor
 // known to the role, which would post it again. The issue is read back after
-// a change whose answer was lost too, since Redmine may have saved it.
+// a change whose answer was lost too, since Redmine may have saved it; but
+// then only a note in exactly these words is taken for it, since nothing says
+// Redmine saved anything, and the only new note could be another's.
 func (p RedmineProject) addNote(ctx context.Context, key, text string) (json.RawMessage, []int64, error) {
 	if !utf8.ValidString(text) {
 		return nil, nil, errors.New("comment contains invalid UTF-8; it was not sent")
@@ -114,10 +116,13 @@ func (p RedmineProject) addNote(ctx context.Context, key, text string) (json.Raw
 		}
 	}
 	place := p.Client.known() + "\x00" + key
-	if len(mine) == 0 {
-		if putErr != nil {
+	if putErr != nil {
+		if exact == nil {
 			return nil, nil, unconfirmed(putErr)
 		}
+		mine, ids = []json.RawMessage{exact}, nil
+	}
+	if len(mine) == 0 {
 		redmineKnown.Lock()
 		redmineKnown.unsaved[place]++
 		times := redmineKnown.unsaved[place]

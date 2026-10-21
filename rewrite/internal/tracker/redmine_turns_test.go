@@ -382,3 +382,38 @@ func TestRedmineSendsANoteTheRoleStoppedWaitingFor(t *testing.T) {
 		t.Fatalf("recorded %v; the note was lost with the role's request", recorded)
 	}
 }
+
+// A change that failed says nothing of what Redmine saved: a note of a role's
+// by the same account landing meanwhile is not taken for this one, and the
+// post is reported as not confirmed. Only a note in exactly these words is
+// taken for it. (The first fails at b84f97f, which took the role's note; from
+// the fourth review's probe.)
+func TestRedmineTakesOnlyItsOwnWordsAfterAFailedChange(t *testing.T) {
+	for _, saved := range []string{"nothing", "the same words"} {
+		fake, redmine := redmineFixture(t)
+		fake.before = func(w http.ResponseWriter, r *http.Request) bool {
+			if r.Method != http.MethodPut {
+				return false
+			}
+			fake.next++
+			fake.journals = append(fake.journals, map[string]any{"id": fake.next, "user": map[string]any{"id": 5}, "notes": "a role's note"})
+			if saved == "the same words" {
+				fake.next++
+				fake.journals = append(fake.journals, map[string]any{"id": fake.next, "user": map[string]any{"id": 5}, "notes": "the engine's notice"})
+			}
+			w.WriteHeader(http.StatusBadGateway)
+			return true
+		}
+		id, also, err := redmine.PostComment(context.Background(), Issue{ID: 5, Key: "5"}, "the engine's notice")
+		switch saved {
+		case "nothing":
+			if err == nil || !strings.Contains(err.Error(), "may already be posted") || id != 0 {
+				t.Fatalf("a role's note was taken for a failed change: id=%d also=%v err=%v", id, also, err)
+			}
+		default:
+			if err != nil || id != 902 || len(also) != 0 {
+				t.Fatalf("the note in the same words was not found after a lost answer: id=%d also=%v err=%v", id, also, err)
+			}
+		}
+	}
+}
