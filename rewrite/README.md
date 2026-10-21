@@ -265,7 +265,9 @@ by the engine's account, in exactly the posted words, or else the only new
 one by that account; several that cannot be told apart are all held for the
 engine's own, the newest as the note's id (never rewritten, and never a
 role's receipt), and none is posted again. After a change whose answer was
-lost, only a note in exactly the posted words is taken for it; a status or an assignee
+lost, only a note in exactly the posted words is taken for it (so when Redmine
+stored such a notice in other words, the notice is posted once more and the
+requester sees it twice); a status or an assignee
 counts as set only when the issue reads back with it, because Redmine leaves
 one it may not set as it was without an error (the role needs Edit issues,
 and its workflow must allow each status move). Rewriting the engine's own
