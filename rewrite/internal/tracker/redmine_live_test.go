@@ -463,7 +463,8 @@ func TestRedmineLiveScopeForRoles(t *testing.T) {
 		_, words, _ := project.CommentText(raw)
 		contents = append(contents, words)
 	}
-	if got := strings.Join(contents, "|"); got != "Requester context.|Operator private note.|the role's question" {
-		t.Fatalf("the launch's earlier post was not removed: %q", got)
+	// The engine leaves the private note out too.
+	if got := strings.Join(contents, "|"); got != "Requester context.|the role's question" {
+		t.Fatalf("the launch's earlier post was not removed, or a private note was read: %q", got)
 	}
 }

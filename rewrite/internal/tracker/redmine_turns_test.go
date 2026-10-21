@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -260,10 +261,12 @@ func TestRedmineFindsANoteRedmineKeptInOtherWords(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 				return true
 			}
-			id, err := redmine.AddComment(context.Background(), Issue{ID: 5, Key: "5"}, "a notice 😀😀😀😀\n")
-			want := map[int]int64{0: 901, 1: 0}[others]
-			if err != nil || id != want {
-				t.Fatalf("%s, with %d other new notes: id=%d (%v), want %d", name, others, id, err, want)
+			id, also, err := redmine.PostComment(context.Background(), Issue{ID: 5, Key: "5"}, "a notice 😀😀😀😀\n")
+			// With another new note by the account, the post is the newer,
+			// and the other is held for it too.
+			want, wantAlso := map[int]int64{0: 901, 1: 902}[others], map[int]string{0: "[]", 1: "[901]"}[others]
+			if err != nil || id != want || fmt.Sprint(also) != wantAlso {
+				t.Fatalf("%s, with %d other new notes: id=%d also=%v (%v), want %d %s", name, others, id, also, err, want, wantAlso)
 			}
 		}
 	}
@@ -310,5 +313,72 @@ func TestRedmineRecordsAPostWhoseRoleStoppedWaiting(t *testing.T) {
 	}
 	if notes != 1 {
 		t.Fatalf("the note was stored %d times", notes)
+	}
+}
+
+// A note Redmine answers as saved but does not store is said with its issue
+// and how many times in a row. (Fails at 3adf54a, whose words named neither.)
+func TestRedmineSaysWhereAndHowOftenANoteWasNotSaved(t *testing.T) {
+	fake, redmine := redmineFixture(t)
+	fake.lose = true
+	for times := 1; times <= 2; times++ {
+		_, err := redmine.AddComment(context.Background(), Issue{ID: 5, Key: "5"}, "a notice")
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("comment was not saved on Redmine issue 5 (%d times in a row)", times)) {
+			t.Fatalf("attempt %d: %v", times, err)
+		}
+	}
+	fake.lose = false
+	if _, err := redmine.AddComment(context.Background(), Issue{ID: 5, Key: "5"}, "a notice"); err != nil {
+		t.Fatal(err)
+	}
+	fake.lose = true
+	if _, err := redmine.AddComment(context.Background(), Issue{ID: 5, Key: "5"}, "a notice"); err == nil || !strings.Contains(err.Error(), "(1 times in a row)") {
+		t.Fatalf("the count did not start again after a saved note: %v", err)
+	}
+}
+
+// The note is sent on the post's own context: a role's client that gives up
+// while the note is on its way does not take the note with it. Here Redmine
+// stores nothing for a client that has gone. (Fails when the change is sent
+// on the role's context: the note is then lost and nothing is recorded.)
+func TestRedmineSendsANoteTheRoleStoppedWaitingFor(t *testing.T) {
+	fake, redmine := redmineFixture(t)
+	var recorded []int64
+	scope, err := NewIssueScope(redmine, "5", true, ObserveStoredPost(func(id int64) error {
+		recorded = append(recorded, id)
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake.before = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method != http.MethodPut {
+			return false
+		}
+		// Redmine has the whole change; the role's client gives up before it
+		// is saved. A client that has gone takes the change with it: Redmine,
+		// as a server does, saves nothing for a request whose client is gone.
+		var body map[string]map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		io.Copy(io.Discard, r.Body)
+		cancel()
+		select {
+		case <-r.Context().Done():
+			return true
+		case <-time.After(200 * time.Millisecond):
+		}
+		fake.next++
+		fake.journals = append(fake.journals, map[string]any{"id": fake.next, "user": map[string]any{"id": 5}, "notes": body["issue"]["notes"]})
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
+	form := url.Values{"content": {"the role's question"}}.Encode()
+	request := httptest.NewRequest(http.MethodPost, "/issues/5/comments?apiKey="+scope.Key(), strings.NewReader(form)).WithContext(ctx)
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	scope.ServeHTTP(httptest.NewRecorder(), request)
+	if len(recorded) != 1 || recorded[0] != 901 {
+		t.Fatalf("recorded %v; the note was lost with the role's request", recorded)
 	}
 }

@@ -477,15 +477,15 @@ so repeat the read check of section 7 against yours.
    "Enable REST web service".
 3. **The engine's own account.** Create a user for the engine, not an
    administrator, and make it a member of the intake project only. Its role
-   needs these permissions (each was checked by taking it away):
+   needs these permissions (each was checked by taking it away), and not
+   View private notes:
 
    | Permission | Without it |
    | --- | --- |
    | View issues | Redmine answers every list and read with 403 |
-   | Add notes | Redmine answers 204 and records no note; the engine reads the issue again, finds none, and says in its log that the post is not confirmed |
+   | Add notes | Redmine answers 204 and records no note; the engine reads the issue again, finds none, says in its log that the note was not saved on that issue and how many times in a row, and asks again on its next turn (without limit: nothing is saved, so nothing is posted twice) |
    | Edit issues | `intake.statuses` and `intake.assign` do nothing: Redmine answers 204 and leaves the status and the assignee as they were |
    | Edit own notes | the engine posts a new note instead of rewriting its own, and the earlier posts of a role with `comment` access stay |
-   | View private notes (optional) | a private note, an answer or a `停止` included, is invisible to the engine; with it, a private note by the requester or by a user in `intake.stop_user_ids` counts as an answer or a stop like any other. Roles never see a private note either way: the engine leaves them out of what a role reads, since a role's own comments are public |
 
    Redmine moves an issue only along the role's workflow (Administration,
    Workflow, for that role and each tracker the project uses). Allow every
@@ -538,7 +538,11 @@ entries, and a request that is worked again would be counted twice.
 Comments are notes. A change of a field is a note without words and is not an
 answer. Use the requester's own account to file requests: their notes, and
 those of the users in `intake.stop_user_ids`, are the only ones that count as
-an answer or a stop (`停止` on the first nonblank line). Redmine 6.0 names in
+an answer or a stop (`停止` on the first nonblank line), or a resume (`再開`).
+They must write them as public notes: the engine leaves every private note
+out, whatever its role may see, so a private note is nobody's answer, stop or
+resume, and no role ever reads one (a role's own comments are public, and it
+could quote one into them). Redmine 6.0 names in
 its API who edited a note, and a note someone else edited counts as the
 editor's words, not as its first author's. Redmine 5.x does not say in its API
 that a note was edited (checked on 5.1.12), so there an edited note counts as
@@ -557,7 +561,11 @@ account with a login. Redmine 5.1.12 and 6.0.11 answer 404 for the anonymous
 user to a key that is not an administrator's, and give an administrator's an
 empty login. Its id and its name (translated into the account's language)
 differ from one Redmine to the next, so neither is used. An author the
-engine's account may not look up is treated the same way. Redmine 5.0 and later sends mail to an
+engine's account may not look up is treated the same way. The engine says in
+its log, once for each issue, which issue it left out and why. That an id is
+no account is kept for ten minutes, then asked again; an issue whose author
+cannot be looked up at all (Redmine answers neither the account nor 404) is
+held for that poll only, the rest of the intake going on. Redmine 5.0 and later sends mail to an
 account named after an `@` in a note; the engine puts an invisible word
 joiner after each `@` in the failure detail it quotes, so a diagnostic line
 names nobody. What roles post is sent as they wrote it.

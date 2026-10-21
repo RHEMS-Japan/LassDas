@@ -43,6 +43,32 @@ type RedmineProject struct {
 	// Since asks Redmine for the issues created at or after it only, so a
 	// long-lived project is not listed whole on every poll. Zero asks for all.
 	Since time.Time
+	// Observe, when set, is the engine's log: the intake says there, once for
+	// each issue and reason, why it left an issue out.
+	Observe func(string)
+}
+
+// ObservedBy is the project with the engine's log, for what it leaves out of
+// the intake.
+func (p RedmineProject) ObservedBy(observe func(string)) Tracker {
+	p.Observe = observe
+	return p
+}
+
+// say writes a line to the engine's log once for the process, however many
+// polls meet the same issue for the same reason.
+func (p RedmineProject) say(line string) {
+	if p.Observe == nil {
+		return
+	}
+	place := p.Client.known() + "\x00" + line
+	redmineKnown.Lock()
+	said := redmineKnown.said[place]
+	redmineKnown.said[place] = true
+	redmineKnown.Unlock()
+	if !said {
+		p.Observe(line)
+	}
 }
 
 var _ Tracker = RedmineProject{}
@@ -100,7 +126,8 @@ type redmineReference struct {
 // engine checks both again on its side. An issue whose author is not a
 // person's account (see person) is left out too: everyone who files without
 // an account is the same anonymous author, so anyone could answer or stop the
-// request in its name.
+// request in its name. One whose author cannot be looked up now is held for
+// this poll only. Either is said once in the engine's log.
 func (p RedmineProject) Issues(ctx context.Context) ([]json.RawMessage, error) {
 	if p.ProjectID <= 0 {
 		return nil, errors.New("provide a positive project id for issue discovery")
@@ -126,6 +153,7 @@ func (p RedmineProject) Issues(ctx context.Context) ([]json.RawMessage, error) {
 		// Only what places a record is read here; a record that cannot be read
 		// for the rest is the intake's to leave aside, as with the others.
 		var issue struct {
+			ID      int64            `json:"id"`
 			Project redmineReference `json:"project"`
 			Author  redmineReference `json:"author"`
 		}
@@ -134,10 +162,12 @@ func (p RedmineProject) Issues(ctx context.Context) ([]json.RawMessage, error) {
 			return nil, errors.New("tracker returned an issue outside the configured project")
 		}
 		person, err := p.Client.person(ctx, issue.Author.ID)
-		if err != nil {
-			return nil, err
-		}
-		if person {
+		switch {
+		case err != nil:
+			p.say(fmt.Sprintf("Redmine issue %d is held from the intake this time: %v", issue.ID, err))
+		case !person:
+			p.say(fmt.Sprintf("Redmine issue %d is left out of the intake: its author %d is not an account the engine can look up (Redmine's anonymous user, who stands for everyone without an account, or an account the engine's role may not see)", issue.ID, issue.Author.ID))
+		default:
 			issues = append(issues, raw)
 		}
 	}
@@ -147,8 +177,11 @@ func (p RedmineProject) Issues(ctx context.Context) ([]json.RawMessage, error) {
 // pages reads every page of an issue list in ascending id, each page asking
 // for the issues after the last one read. Paging by position would let an
 // issue that leaves the list between two pages (closed, moved) shift another
-// past the next page unseen. A page that cannot be read, or one that is not in
-// ascending id after the last, fails the whole list.
+// past the next page unseen. Each page says how many issues are left from it
+// on; the list goes on while a page holds fewer than that, so a page Redmine
+// or a proxy cut short loses nothing. A page that cannot be read, one that is
+// not in ascending id after the last, or an empty one that says more are left
+// fails the whole list.
 func (r Redmine) pages(ctx context.Context, query url.Values) ([]json.RawMessage, error) {
 	rows := []json.RawMessage{}
 	last := int64(0)
@@ -167,8 +200,9 @@ func (r Redmine) pages(ctx context.Context, query url.Values) ([]json.RawMessage
 		}
 		var page struct {
 			Issues []json.RawMessage `json:"issues"`
+			Left   *int              `json:"total_count"`
 		}
-		if err := json.Unmarshal(data, &page); err != nil || page.Issues == nil || len(page.Issues) > 100 {
+		if err := json.Unmarshal(data, &page); err != nil || page.Issues == nil || page.Left == nil || len(page.Issues) > 100 {
 			return nil, errors.New("tracker issue page is not a bounded issue list")
 		}
 		for _, raw := range page.Issues {
@@ -184,8 +218,11 @@ func (r Redmine) pages(ctx context.Context, query url.Values) ([]json.RawMessage
 			last = issue.ID
 		}
 		rows = append(rows, page.Issues...)
-		if len(page.Issues) < 100 {
+		if len(page.Issues) >= *page.Left {
 			return rows, nil
+		}
+		if len(page.Issues) == 0 {
+			return nil, fmt.Errorf("the issue list ended with %d issues still to come by Redmine's count; no partial list returned", *page.Left)
 		}
 	}
 }
@@ -271,13 +308,14 @@ func (p RedmineProject) issue(ctx context.Context, key string, journals bool) (j
 	return answer.Issue, nil
 }
 
-// journals reads every journal of the issue, in ascending id. A journal is a
+// journals reads the journals of the issue, in ascending id. A journal is a
 // note, a change of the issue's fields, or both; one without words is listed
-// too, as Backlog lists a change. Redmine leaves out the private notes the
-// account may not see. Redmine lists journals by their time and then their
-// id; the engine orders them by id, the order Redmine stored them in, so that
-// a clock set back does not reorder an issue's history. A journal listed
-// twice fails the whole list.
+// too, as Backlog lists a change. A private note is left out whatever the
+// account may see: it is nobody's answer, stop or resume, and no role reads
+// it, since a role's own comments are public. Redmine lists journals by their
+// time and then their id; the engine orders them by id, the order Redmine
+// stored them in, so that a clock set back does not reorder an issue's
+// history. A journal listed twice fails the whole list.
 //
 // Each record is the tracker's own, with two things added in front. The issue
 // it was read from goes under "issue" where Redmine names none, so a record
@@ -314,6 +352,9 @@ func (p RedmineProject) journals(ctx context.Context, key string) ([]json.RawMes
 			return nil, errors.New("tracker listed a journal twice; no incomplete list returned")
 		}
 		seen[journal.ID] = true
+		if journal.Private {
+			continue
+		}
 		person, err := p.Client.person(ctx, journal.author())
 		if err != nil {
 			return nil, err
@@ -416,12 +457,28 @@ func (p RedmineProject) Myself(ctx context.Context) (Account, error) {
 // account id is a person's account. Every caller (the intake, the queue, the
 // watcher of each request, each role's scope) asks the same Redmine with the
 // same key, so what one learns, all keep. Answers are kept per address and
-// key; a failed question keeps nothing.
+// key; a failed question keeps nothing. That an id is no person's account is
+// kept for redmineNoPerson only, so an account made visible, or a look-up
+// that failed for a while, is asked again.
 var redmineKnown = struct {
 	sync.Mutex
 	me      map[string]Account
-	persons map[string]bool
-}{me: map[string]Account{}, persons: map[string]bool{}}
+	persons map[string]redminePerson
+	said    map[string]bool
+	unsaved map[string]int
+}{me: map[string]Account{}, persons: map[string]redminePerson{}, said: map[string]bool{}, unsaved: map[string]int{}}
+
+type redminePerson struct {
+	person bool
+	until  time.Time
+}
+
+// redmineNoPerson is how long an id found to be no person's account is taken
+// for one without asking again.
+const redmineNoPerson = 10 * time.Minute
+
+// redmineNow is the clock the kept answers are timed by; the tests' to set.
+var redmineNow = time.Now
 
 // known is the place the process keeps answers for this address and key.
 func (r Redmine) known() string {
@@ -458,24 +515,28 @@ func (r Redmine) myself(ctx context.Context) (Account, error) {
 }
 
 // person says whether an account id is a person's account: one the key can
-// look up (GET /users/<id>.json) and that has a login. Redmine's anonymous
-// user, the author of everything filed or written without an account, has
-// none: Redmine 5.1 and 6.0 answer 404 for it to a key that is not an
-// administrator's, and give an administrator's an empty login. Its id and its
-// name (which is translated) differ from one Redmine to the next, so neither
-// is compared. An account the key may not look up counts the same: the
-// engine does not act on words it cannot place.
+// look up (GET /users/<id>.json) and whose login is not empty. Redmine's
+// anonymous user, the author of everything filed or written without an
+// account, has an empty one: Redmine 5.1 and 6.0 answer 404 for it to a key
+// that is not an administrator's, and give an administrator's an empty login.
+// Both render every other account's login to any key that may see it. Its id
+// and its name (which is translated) differ from one Redmine to the next, so
+// neither is compared. An account the key may not look up counts the same:
+// the engine does not act on words it cannot place. An answer without a login
+// field at all is taken for a person's, so that a Redmine that leaves the
+// field out does not shut everyone out.
 func (r Redmine) person(ctx context.Context, id int64) (bool, error) {
 	if id <= 0 {
 		return false, nil
 	}
 	place := r.known() + "\x00" + strconv.FormatInt(id, 10)
 	redmineKnown.Lock()
-	person, found := redmineKnown.persons[place]
+	kept, found := redmineKnown.persons[place]
 	redmineKnown.Unlock()
-	if found {
-		return person, nil
+	if found && (kept.person || redmineNow().Before(kept.until)) {
+		return kept.person, nil
 	}
+	person := false
 	data, err := r.call(ctx, http.MethodGet, "/users/"+strconv.FormatInt(id, 10)+".json", nil, nil, redmineItemLimit, http.StatusOK)
 	var refusal *trackerError
 	switch {
@@ -486,17 +547,17 @@ func (r Redmine) person(ctx context.Context, id int64) (bool, error) {
 	default:
 		var answer struct {
 			User struct {
-				ID    int64  `json:"id"`
-				Login string `json:"login"`
+				ID    int64   `json:"id"`
+				Login *string `json:"login"`
 			} `json:"user"`
 		}
 		if err := json.Unmarshal(data, &answer); err != nil || answer.User.ID != id {
 			return false, fmt.Errorf("the author %d of a record could not be looked up: Redmine did not answer with that account", id)
 		}
-		person = answer.User.Login != ""
+		person = answer.User.Login == nil || *answer.User.Login != ""
 	}
 	redmineKnown.Lock()
-	redmineKnown.persons[place] = person
+	redmineKnown.persons[place] = redminePerson{person: person, until: redmineNow().Add(redmineNoPerson)}
 	redmineKnown.Unlock()
 	return person, nil
 }

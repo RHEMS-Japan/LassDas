@@ -722,6 +722,13 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	source := cfg.source()
+	// A tracker that leaves an issue out of the intake for a reason the
+	// operator should read says so in the engine's log.
+	if observed, ok := source.(interface {
+		ObservedBy(func(string)) tracker.Tracker
+	}); ok {
+		source = observed.ObservedBy(observe)
+	}
 	for ctx.Err() == nil {
 		rows, err := source.Issues(ctx)
 		changed := false

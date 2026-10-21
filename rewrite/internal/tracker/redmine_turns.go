@@ -16,59 +16,62 @@ import (
 // back that finds its id, each also bounded by its own call.
 const redminePostBound = 90 * time.Second
 
-// errNoteWithoutID is a note Redmine saved that cannot be told apart from
-// another new note by the same account: its id is unknown, and it is not to be
-// posted again.
-var errNoteWithoutID = errors.New("Redmine saved the note, but it cannot be told apart from another new note by the engine's account, so its id is unknown; do not post it again")
-
 // AddComment posts the text once as a note and returns the new note's id.
 // Redmine answers a note with no content and no id, so the issue's journals
-// are read before and after (see addNote). An id of zero without an error
-// says the note was saved but its id could not be read back; it is not to be
-// posted again. A failure may still have posted it unless it says it was not
-// saved, so nothing here posts it again: read the comments before trying
-// again.
+// are read before and after (see addNote). A failure may still have posted it
+// unless it says it was not saved, so nothing here posts it again: read the
+// comments before trying again.
 func (p RedmineProject) AddComment(ctx context.Context, issue Issue, text string) (int64, error) {
-	journal, err := p.addNote(ctx, issue.Key, text)
-	if errors.Is(err, errNoteWithoutID) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	id, _, _ := p.CommentText(journal) // addNote read its id
-	return id, nil
+	id, _, err := p.PostComment(ctx, issue, text)
+	return id, err
 }
 
-// addNote posts a note and returns its journal record as journals lists it.
-// The new note is the newest one after it was sent, by the key's own account:
-// the one in exactly these words, or else the only one, which Redmine kept in
-// other words than sent (a database that cannot hold every character, a
-// length limit, a plugin). Two new ones, none in these words, cannot be told
-// apart, and the note is reported saved without an id.
+// PostComment is AddComment that also says which other new notes by the key's
+// account the post could not be told apart from: none, unless Redmine kept
+// the note in other words than sent while another note by the same account
+// landed with it. The id returned is then the newest of them, and the caller
+// is to hold every one of them for its own post, so that none of them is
+// taken for anyone's answer or instruction, or posted again.
+func (p RedmineProject) PostComment(ctx context.Context, issue Issue, text string) (int64, []int64, error) {
+	journal, others, err := p.addNote(ctx, issue.Key, text)
+	if err != nil {
+		return 0, nil, err
+	}
+	id, _, _ := p.CommentText(journal) // addNote read its id
+	return id, others, nil
+}
+
+// addNote posts a note and returns its journal record as journals lists it,
+// with the ids of the other new notes by the key's account it could not be
+// told apart from. The new note is the newest one after it was sent, by the
+// key's own account: the one in exactly these words, or else the only one,
+// which Redmine kept in other words than sent (a database that cannot hold
+// every character, a length limit, a plugin). Two or more new ones, none in
+// these words, cannot be told apart: the newest is returned, with the others.
 //
 // Once the note is sent, the change and the read back go on whatever happens
 // to the caller: a role's client gives up after 30 seconds, and a note sent
 // whose id is never read is neither recorded for the launch's cleanup nor
-// known to the role, which would post it again.
-func (p RedmineProject) addNote(ctx context.Context, key, text string) (json.RawMessage, error) {
+// known to the role, which would post it again. The issue is read back after
+// a change whose answer was lost too, since Redmine may have saved it.
+func (p RedmineProject) addNote(ctx context.Context, key, text string) (json.RawMessage, []int64, error) {
 	if !utf8.ValidString(text) {
-		return nil, errors.New("comment contains invalid UTF-8; it was not sent")
+		return nil, nil, errors.New("comment contains invalid UTF-8; it was not sent")
 	}
 	if strings.TrimSpace(text) == "" {
 		// Redmine records no note for these words and says nothing of it.
-		return nil, errors.New("a comment without words is not recorded by Redmine; it was not sent")
+		return nil, nil, errors.New("a comment without words is not recorded by Redmine; it was not sent")
 	}
 	if _, err := redmineNumber(key); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	me, err := p.Client.myself(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	before, err := p.journals(ctx, key)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	newest := int64(0)
 	for _, raw := range before {
@@ -77,30 +80,32 @@ func (p RedmineProject) addNote(ctx context.Context, key, text string) (json.Raw
 		newest = max(newest, journal.ID)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("comment was not sent: %w", err)
+		return nil, nil, fmt.Errorf("comment was not sent: %w", err)
 	}
 	sent, cancel := context.WithTimeout(context.WithoutCancel(ctx), redminePostBound)
 	defer cancel()
-	if _, err := p.Client.call(sent, http.MethodPut, "/issues/"+key+".json", nil, map[string]any{"issue": map[string]string{"notes": text}},
-		redmineItemLimit, http.StatusNoContent, http.StatusOK); err != nil {
-		var refusal *trackerError
-		if errors.As(err, &refusal) && refusal.Status >= 400 && refusal.Status < 500 {
-			return nil, fmt.Errorf("comment was not saved; Redmine refused it: %w", err)
-		}
-		return nil, fmt.Errorf("comment submission not confirmed; it may already be posted; inspect comments before retrying: %w", err)
+	_, putErr := p.Client.call(sent, http.MethodPut, "/issues/"+key+".json", nil, map[string]any{"issue": map[string]string{"notes": text}},
+		redmineItemLimit, http.StatusNoContent, http.StatusOK)
+	var refusal *trackerError
+	if errors.As(putErr, &refusal) && refusal.Status >= 400 && refusal.Status < 500 {
+		return nil, nil, fmt.Errorf("comment was not saved; Redmine refused it: %w", putErr)
+	}
+	unconfirmed := func(err error) error {
+		return fmt.Errorf("comment submission not confirmed; it may already be posted; inspect comments before retrying: %w", err)
 	}
 	after, err := p.journals(sent, key)
 	if err != nil {
-		return nil, fmt.Errorf("comment submission not confirmed; it may already be posted; inspect comments before retrying: %w", err)
+		return nil, nil, unconfirmed(errors.Join(putErr, err))
 	}
 	var exact json.RawMessage
 	var mine []json.RawMessage
+	var ids []int64
 	for _, raw := range after {
 		var journal redmineJournal
 		if json.Unmarshal(raw, &journal) != nil || journal.ID <= newest || journal.User.ID != me.ID || journal.Notes == nil || *journal.Notes == "" {
 			continue
 		}
-		mine = append(mine, raw)
+		mine, ids = append(mine, raw), append(ids, journal.ID)
 		if *journal.Notes == text {
 			// Two posts of the same words at once by the same account are
 			// told apart by nothing; the newer is taken, as the engine takes
@@ -108,15 +113,27 @@ func (p RedmineProject) addNote(ctx context.Context, key, text string) (json.Raw
 			exact = raw
 		}
 	}
+	place := p.Client.known() + "\x00" + key
+	if len(mine) == 0 {
+		if putErr != nil {
+			return nil, nil, unconfirmed(putErr)
+		}
+		redmineKnown.Lock()
+		redmineKnown.unsaved[place]++
+		times := redmineKnown.unsaved[place]
+		redmineKnown.Unlock()
+		return nil, nil, fmt.Errorf("comment was not saved on Redmine issue %s (%d times in a row): Redmine answered that it was, but the issue holds no new note by the engine's account; Redmine answers so when the account's role lacks Add notes, and the engine asks again on its next turn", key, times)
+	}
+	redmineKnown.Lock()
+	delete(redmineKnown.unsaved, place)
+	redmineKnown.Unlock()
 	switch {
 	case exact != nil:
-		return exact, nil
+		return exact, nil, nil
 	case len(mine) == 1:
-		return mine[0], nil
-	case len(mine) == 0:
-		return nil, errors.New("comment was not saved: Redmine answered that it was, but the issue holds no new note by the engine's account; Redmine answers so when the account's role lacks Add notes")
+		return mine[0], nil, nil
 	}
-	return nil, errNoteWithoutID
+	return mine[len(mine)-1], ids[:len(ids)-1], nil
 }
 
 // EditComment replaces the words of a note the key's account posted, through

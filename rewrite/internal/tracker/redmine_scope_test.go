@@ -9,7 +9,9 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // redmineScopeFixture puts the issue scope for issue 5 in front of the fake
@@ -235,9 +237,76 @@ func TestRedmineScopeKeepsPrivateNotesFromRoles(t *testing.T) {
 	if slices.Contains(fake.called(), "PUT /journals/290.json") {
 		t.Fatal("a private note was emptied through the scope")
 	}
-	// The engine's own reads still see it, for an answer or a stop.
+	// The engine does not read it either: a private note is nobody's answer,
+	// stop or resume. (Fails at 3adf54a, which read it for the engine.)
 	all, err := redmine.Comments(ctx, Issue{ID: 5, Key: "5"})
-	if err != nil || len(all) != 11 {
-		t.Fatalf("the engine read %d notes (%v)", len(all), err)
+	if err != nil || len(all) != 10 {
+		t.Fatalf("the engine read %d notes (%v); the private one is to be left out", len(all), err)
+	}
+}
+
+// A note someone else edited shows the editor to a role as the one who wrote
+// it, where Redmine names the editor. (Fails at 3adf54a, which showed the
+// first author.)
+func TestRedmineScopeShowsTheEditorOfANote(t *testing.T) {
+	fake, _, worker, _ := redmineScopeFixture(t, false)
+	fake.journals = append(fake.journals, map[string]any{"id": 290, "user": map[string]any{"id": 6, "name": "Requester Check"},
+		"updated_by": map[string]any{"id": 7, "name": "Operator Check"}, "notes": "停止"})
+	raw, err := worker.Comment(context.Background(), "5", 290)
+	var comment struct {
+		CreatedUser struct {
+			ID   int64
+			Name string
+		}
+	}
+	if err != nil || json.Unmarshal(raw, &comment) != nil || comment.CreatedUser.ID != 7 || comment.CreatedUser.Name != "Operator Check" {
+		t.Fatalf("the role saw %s (%v)", raw, err)
+	}
+}
+
+// A role gives up and exits; closing its access waits for its post to be
+// carried to its end, so the receipt is recorded before the engine reads it.
+// (Fails at 3adf54a, whose Close returned at once.)
+func TestRedmineClosingAccessWaitsForAPostBeingCarried(t *testing.T) {
+	fake, redmine := redmineFixture(t)
+	var mu sync.Mutex
+	var recorded []int64
+	access, err := ServeIssue(context.Background(), redmine, "5", true, ObserveStoredPost(func(id int64) error {
+		mu.Lock()
+		defer mu.Unlock()
+		recorded = append(recorded, id)
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reading := make(chan struct{})
+	sent := false
+	fake.before = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPut {
+			sent = true
+		} else if sent && r.Method == http.MethodGet && r.URL.Path == "/issues/5.json" {
+			close(reading)
+			fake.mu.Unlock()
+			time.Sleep(300 * time.Millisecond) // a slow read back
+			fake.mu.Lock()
+		}
+		return false
+	}
+	client, err := CertificateClient(access.Certificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLOSE_TEST_WORKER", access.Key)
+	role := Backlog{BaseURL: access.URL, KeyEnv: "CLOSE_TEST_WORKER", Client: client}
+	ctx, cancel := context.WithCancel(context.Background())
+	go role.AddComment(ctx, "5", "the role's question")
+	<-reading
+	cancel() // the role gives up and exits
+	access.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(recorded) != 1 || recorded[0] != 901 {
+		t.Fatalf("Close returned before the post's receipt was recorded: %v", recorded)
 	}
 }

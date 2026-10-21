@@ -60,7 +60,8 @@ type fakeRedmine struct {
 	// lose keeps a note from being stored, as a note lost on the way.
 	lose bool
 	// users are the accounts GET /users/<id>.json finds, by login; any other
-	// id is answered 404, as Redmine answers for its anonymous user.
+	// id is answered 404, as Redmine answers for its anonymous user. The login
+	// redmineNoLogin answers the account without a login field at all.
 	users map[int64]string
 	// before runs ahead of the fake's own handling; true when it answered.
 	before func(w http.ResponseWriter, r *http.Request) bool
@@ -124,7 +125,11 @@ func (f *fakeRedmine) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"id": id, "login": login, "firstname": login, "lastname": "Check"}})
+		user := map[string]any{"id": id, "login": login, "firstname": login, "lastname": "Check"}
+		if login == redmineNoLogin {
+			delete(user, "login")
+		}
+		json.NewEncoder(w).Encode(map[string]any{"user": user})
 		return
 	}
 	if f.before != nil && f.before(w, r) {
@@ -195,6 +200,22 @@ func (f *fakeRedmine) serve(w http.ResponseWriter, r *http.Request) {
 		f.t.Errorf("unexpected request: %s %s", r.Method, r.URL)
 		w.WriteHeader(http.StatusBadRequest)
 	}
+}
+
+// redmineNoLogin, as a fake account's login, leaves the login field out.
+const redmineNoLogin = "\x00no login field"
+
+// lookups lists the look-ups of authors made.
+func (f *fakeRedmine) lookups() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	calls := []string{}
+	for _, call := range f.calls {
+		if redmineUserPath.MatchString(strings.TrimPrefix(call, "GET ")) {
+			calls = append(calls, call)
+		}
+	}
+	return calls
 }
 
 // called lists the requests made, leaving out the look-ups of authors, which
@@ -344,9 +365,9 @@ func TestRedmineReadsEveryPageOfTheProjectsOpenIssues(t *testing.T) {
 		servedIssues(t, 100, w, r, nil)
 		return true
 	}
-	// A full page may be the last; the page after it, empty, says so.
-	if rows, err := redmine.Issues(context.Background()); err != nil || len(rows) != 100 || pages != 2 {
-		t.Fatalf("a full last page was lost: issues=%d pages=%d error=%v", len(rows), pages, err)
+	// A full page whose count says nothing is left ends the list.
+	if rows, err := redmine.Issues(context.Background()); err != nil || len(rows) != 100 || pages != 1 {
+		t.Fatalf("a full last page was lost or followed: issues=%d pages=%d error=%v", len(rows), pages, err)
 	}
 	redmine.ProjectID = 0
 	if _, err := redmine.Issues(context.Background()); err == nil {
@@ -683,5 +704,29 @@ func TestRedmineStopsAtAnIssueMovedToAnotherProject(t *testing.T) {
 		if !strings.HasPrefix(call, "GET ") {
 			t.Fatalf("a change was sent to an issue in another project: %v", fake.called())
 		}
+	}
+}
+
+// A page cut short (by Redmine's own page size, a proxy) is not the end of
+// the list while its count says more are left; an empty page that says so
+// fails the list. (The first fails at 3adf54a, which ended the list at the
+// first page shorter than a hundred and lost the rest.)
+func TestRedmineReadsOnPastAPageCutShort(t *testing.T) {
+	fake, redmine := redmineFixture(t)
+	fake.before = func(w http.ResponseWriter, r *http.Request) bool {
+		r.URL.RawQuery = strings.Replace(r.URL.RawQuery, "limit=100", "limit=60", 1)
+		servedIssues(t, 150, w, r, nil)
+		return true
+	}
+	rows, err := redmine.Issues(context.Background())
+	if err != nil || len(rows) != 150 {
+		t.Fatalf("issues=%d error=%v", len(rows), err)
+	}
+	fake.before = func(w http.ResponseWriter, r *http.Request) bool {
+		fmt.Fprint(w, `{"issues":[],"total_count":3}`)
+		return true
+	}
+	if rows, err := redmine.Issues(context.Background()); err == nil || rows != nil || !strings.Contains(err.Error(), "3 issues still to come") {
+		t.Fatalf("an empty page that says more are left was taken for the end: %d %v", len(rows), err)
 	}
 }

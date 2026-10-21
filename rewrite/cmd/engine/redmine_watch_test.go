@@ -577,3 +577,134 @@ func TestRedmineNoticeDetailStaysWithinItsBound(t *testing.T) {
 		t.Fatal("an @ before a name was left as it was")
 	}
 }
+
+// A pause notice Redmine kept in other words, landing with another new note
+// by the engine's account, is taken as the newer of the two, and the other is
+// held for the engine's own too: the pause has a positive receipt, is said
+// once, and neither note is taken for the requester's answer even where the
+// engine's account filed the issue. (Fails at 3adf54a, which recorded the
+// notice with id 0, so the pause never had a receipt; adapted from the third
+// review's probe.)
+func TestRedmineHoldsEveryNoteItCannotTellApartForItsOwnNotice(t *testing.T) {
+	cfg := redmineConfiguration(t)
+	start := time.Now().UTC().Add(-3 * time.Hour)
+	root, directory := noticeJob(t, chain.State{History: []chain.Result{
+		{Role: "implement", Speaker: "worker", Output: "previous work", StartedAt: start, FinishedAt: start.Add(time.Minute)},
+	}})
+	queueRanSince(t, root, cfg, start)
+	fake := newRedmineQueueFake(t, cfg, redmineIssueRow(51, 0))
+	fake.keep = func(text string) string { return strings.ReplaceAll(text, "😀", "?") }
+	late := int64(0)
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		if r.Method == "PUT" && late == 0 {
+			late = fake.add("51", 99, "a role's late note") // lands in the same window
+		}
+		return fake.roundTrip(r)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	n := requestNotices(cfg, sourceIssue{ID: 51, Key: "51"}, directory)
+	var ids []int64
+	for range 3 {
+		id, err := n.sayPauseEvent(ctx, workPauseNotice, "1", "paused 😀")
+		if err != nil {
+			t.Fatalf("the pause has no receipt: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	// The notice log as written: the notice's id and the notes held with it.
+	data, err := os.ReadFile(filepath.Join(directory, "notices.json"))
+	var written struct {
+		Notices []struct {
+			CommentID int64   `json:"comment_id"`
+			Also      []int64 `json:"also_comment_ids"`
+		}
+	}
+	if err != nil || json.Unmarshal(data, &written) != nil || len(written.Notices) != 1 {
+		t.Fatalf("the notice log: %s %v", data, err)
+	}
+	notice := written.Notices[0]
+	if len(fake.puts) != 1 || ids[0] != 901 || ids[1] != 901 || ids[2] != 901 || notice.CommentID != 901 ||
+		fmt.Sprint(notice.Also) != fmt.Sprint([]int64{late}) {
+		t.Fatalf("puts=%d ids=%v notice=%+v (late note %d)", len(fake.puts), ids, notice, late)
+	}
+	rows, err := cfg.source().Comments(ctx, sourceIssue{ID: 51, Key: "51"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byEngine := sourceIssue{ID: 51, Key: "51", Creator: tracker.Account{ID: 99}}
+	held := append([]int64{notice.CommentID}, notice.Also...)
+	if id, answer, err := answerToQuestion(cfg.source(), rows, byEngine, nil, 0, held...); err != nil || id != 0 {
+		t.Fatalf("the engine's own note was read as an answer: %d %q %v", id, answer, err)
+	}
+}
+
+// Redmine saved the notice in other words, but the answer to the change was
+// lost: the issue is read back all the same, the notice is found and not
+// posted again on the next ticks. (Fails at 3adf54a, which read nothing back
+// after a failed change and posted the notice again; from the third review's
+// probe.)
+func TestRedmineNoticeWhoseAnswerWasLostIsNotPostedAgain(t *testing.T) {
+	cfg := redmineConfiguration(t)
+	start := time.Now().UTC().Add(-3 * time.Hour)
+	root, directory := noticeJob(t, chain.State{History: []chain.Result{
+		{Role: "implement", Speaker: "worker", Output: "previous work", StartedAt: start, FinishedAt: start.Add(time.Minute)},
+		{Role: "router", Speaker: "runtime", Error: "failed 😀", StartedAt: start.Add(time.Hour), FinishedAt: start.Add(time.Hour)},
+	}})
+	queueRanSince(t, root, cfg, start)
+	fake := newRedmineQueueFake(t, cfg, redmineIssueRow(51, 0))
+	fake.keep = func(text string) string { return strings.ReplaceAll(text, "😀", "?") }
+	puts := 0
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		response, err := fake.roundTrip(r)
+		if r.Method == "PUT" {
+			if puts++; puts == 1 {
+				return catalogReply(r, 502, ""), nil // saved, but the answer is lost
+			}
+		}
+		return response, err
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	n := requestNotices(cfg, sourceIssue{ID: 51, Key: "51"}, directory)
+	noteStall(ctx, cfg, n, directory, true, start)
+	for range 3 {
+		n.flush(ctx)
+	}
+	records := readNotices(t, directory).Notices
+	if puts != 1 || len(fake.journals["51"]) != 1 || len(records) != 1 || records[0].CommentID != 900 {
+		t.Fatalf("puts=%d journals=%d records=%+v", puts, len(fake.journals["51"]), records)
+	}
+}
+
+// A private note is nobody's answer, stop or resume, whoever wrote it, and so
+// it never reaches a role through the history either. (Fails at 3adf54a,
+// which kept private notes from the role's own reads only.)
+func TestRedmineIgnoresPrivateNotes(t *testing.T) {
+	cfg := redmineConfiguration(t)
+	fake := newRedmineQueueFake(t, cfg, redmineIssueRow(51, 0))
+	useCatalogTransport(t, fake.roundTrip)
+	issue := sourceIssue{ID: 51, Key: "51", Creator: tracker.Account{ID: 55}}
+	for _, words := range []string{"停止", requesterAnswer, "再開"} {
+		fake.journals["51"] = []map[string]any{{"id": 702, "user": map[string]any{"id": 55}, "notes": words, "private_notes": true}}
+		rows, err := cfg.source().Comments(context.Background(), issue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stopped, err := stopInstruction(cfg.source(), rows, issue, nil); err != nil || stopped != nil {
+			t.Fatalf("a private %q stopped the request: %s %v", words, stopped, err)
+		}
+		if id, _, err := answerToQuestion(cfg.source(), rows, issue, nil, 700); err != nil || id != 0 {
+			t.Fatalf("a private %q was taken for the answer: %d %v", words, id, err)
+		}
+		if raw, err := resumeInstruction(cfg.source(), rows, issue, nil, 700, nil); err != nil || raw != nil {
+			t.Fatalf("a private %q resumed the request: %s %v", words, raw, err)
+		}
+	}
+	// The same words in a public note count.
+	fake.journals["51"] = []map[string]any{{"id": 703, "user": map[string]any{"id": 55}, "notes": "停止"}}
+	rows, _ := cfg.source().Comments(context.Background(), issue)
+	if stopped, err := stopInstruction(cfg.source(), rows, issue, nil); err != nil || stopped == nil {
+		t.Fatalf("a public 停止 was not read: %v", err)
+	}
+}

@@ -262,8 +262,9 @@ account with a login.
 Redmine answers a note or a change with 204 and nothing else. The engine
 therefore reads the issue again: a new note is the newest one after the post,
 by the engine's account, in exactly the posted words, or else the only new
-one by that account (two that cannot be told apart leave the note saved
-without an id, not posted again); a status or an assignee
+one by that account; several that cannot be told apart are all held for the
+engine's own, the newest as the note's id, and none is posted again. A change
+whose answer was lost is read back the same way; a status or an assignee
 counts as set only when the issue reads back with it, because Redmine leaves
 one it may not set as it was without an error (the role needs Edit issues,
 and its workflow must allow each status move). Rewriting the engine's own
@@ -271,8 +272,8 @@ note and removing a role's earlier posts use `PUT /journals/<id>.json`, which
 Redmine added in 5.0: removal empties the note, which Redmine then deletes.
 On an older Redmine, or without the Edit own notes permission, the engine
 posts a new note instead and the earlier posts stay. Hours are not recorded.
-A private note is read only if the engine's role may view private notes, and
-never reaches a role.
+A private note is left out entirely, whatever the engine's role may see: it is
+nobody's answer, stop or resume, and never reaches a role.
 Redmine 5.0 and later mails an account named after an `@` in a note, also
 inside inline code, so the failure detail the engine quotes in its own notices
 carries an invisible word joiner after each `@`. The setup guide's

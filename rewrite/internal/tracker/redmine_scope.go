@@ -18,7 +18,8 @@ import (
 // the note, which Redmine 5.0 and later takes as removing it.
 //
 // A private note never reaches a role, whatever the engine's account may
-// see: a role's comments are public, and it could quote one into them.
+// see: journals leaves them out (a role's comments are public, and it could
+// quote one into them).
 func (p RedmineProject) Forward(ctx context.Context, method, path string, query, form url.Values, expected int) ([]byte, error) {
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	if !strings.HasPrefix(path, "/issues/") || len(parts) < 2 {
@@ -74,7 +75,7 @@ func (p RedmineProject) Forward(ctx context.Context, method, path string, query,
 		for _, raw := range rows {
 			var journal redmineJournal
 			json.Unmarshal(raw, &journal) // journals read every id
-			if !journal.Private && journal.ID > after && int64(len(page)) < count {
+			if journal.ID > after && int64(len(page)) < count {
 				data, err := scopedRedmineJournal(raw)
 				if err != nil {
 					return nil, err
@@ -84,7 +85,12 @@ func (p RedmineProject) Forward(ctx context.Context, method, path string, query,
 		}
 		return json.Marshal(page)
 	case method == http.MethodPost && len(parts) == 3 && parts[2] == "comments" && len(query) == 0 && len(form) == 1 && len(form["content"]) == 1 && expected == http.StatusCreated:
-		raw, err := p.addNote(ctx, key, form.Get("content"))
+		// A note Redmine kept in other words, landing with another note by the
+		// same account, is answered with the newer one's id. The other is not
+		// added to the launch's cleanup, which would then empty a note that
+		// may be the engine's own; a note of the role's that the cleanup does
+		// not know stays, as the cleanup's limits already allow.
+		raw, _, err := p.addNote(ctx, key, form.Get("content"))
 		if err != nil {
 			return nil, err
 		}
@@ -99,10 +105,6 @@ func (p RedmineProject) Forward(ctx context.Context, method, path string, query,
 		raw, err := p.journal(ctx, key, id)
 		if err != nil {
 			return nil, err
-		}
-		var journal redmineJournal
-		if json.Unmarshal(raw, &journal) != nil || journal.Private {
-			return nil, &trackerError{Status: http.StatusNotFound, Body: "comment not found on the assigned issue"}
 		}
 		if method == http.MethodDelete {
 			if _, err := p.Client.call(ctx, http.MethodPut, "/journals/"+parts[3]+".json", nil, map[string]any{"journal": map[string]string{"notes": ""}},
@@ -122,7 +124,9 @@ func scopedRedmineUser(user redmineReference) map[string]any {
 }
 
 // scopedRedmineJournal is a journal with the scope's field names added: its
-// words as content, its time as created and its author as createdUser.
+// words as content, its time as created and as createdUser whoever wrote its
+// words last (the editor of a note someone else edited, where Redmine names
+// one).
 func scopedRedmineJournal(raw json.RawMessage) ([]byte, error) {
 	var journal struct {
 		redmineJournal
@@ -139,6 +143,10 @@ func scopedRedmineJournal(raw json.RawMessage) ([]byte, error) {
 	if journal.Notes != nil {
 		content = *journal.Notes
 	}
-	fields["content"], fields["created"], fields["createdUser"] = content, journal.CreatedOn, scopedRedmineUser(journal.User)
+	writer := journal.User
+	if journal.UpdatedBy != nil && journal.UpdatedBy.ID != journal.User.ID {
+		writer = *journal.UpdatedBy
+	}
+	fields["content"], fields["created"], fields["createdUser"] = content, journal.CreatedOn, scopedRedmineUser(writer)
 	return json.Marshal(fields)
 }
