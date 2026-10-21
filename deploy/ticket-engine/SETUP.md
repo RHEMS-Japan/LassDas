@@ -461,9 +461,9 @@ guarantee exactly-once external writes.
 ### Redmine
 
 The engine reads and writes one project of your own Redmine through its REST
-API. What follows was measured against Redmine 6.0.11 in a local container
-(2026-10-20); a different version or plugin set may differ, so repeat the
-read check of section 7 against yours.
+API. What follows was measured against Redmine 6.0.11 and 5.1.12 in local
+containers (2026-10-20 and 21); a different version or plugin set may differ,
+so repeat the read check of section 7 against yours.
 
 1. **Version.** Use Redmine 5.0 or later. Listing, reading, posting notes,
    statuses and assignees use APIs older than that, but the engine also
@@ -475,13 +475,12 @@ read check of section 7 against yours.
    "Enable REST web service".
 3. **The engine's own account.** Create a user for the engine, not an
    administrator, and make it a member of the intake project only. Its role
-   needs these permissions (the last three were each checked by taking it
-   away):
+   needs these permissions (each was checked by taking it away):
 
    | Permission | Without it |
    | --- | --- |
-   | View issues | nothing is listed or read |
-   | Add notes | no question, notice or report can be posted |
+   | View issues | Redmine answers every list and read with 403 |
+   | Add notes | Redmine answers 204 and records no note; the engine reads the issue again, finds none, and says in its log that the post is not confirmed |
    | Edit issues | `intake.statuses` and `intake.assign` do nothing: Redmine answers 204 and leaves the status and the assignee as they were |
    | Edit own notes | the engine posts a new note instead of rewriting its own, and the earlier posts of a role with `comment` access stay |
    | View private notes (optional) | a private note, an answer or a `停止` included, is invisible to the engine |
@@ -552,11 +551,11 @@ def get(path):
             return json.load(answer)
     except urllib.error.HTTPError as error:
         sys.exit("%s answered HTTP %d" % (path, error.code))
-found = get("/projects/" + urllib.parse.quote(project) + ".json")["project"]
+found = get("/projects/" + urllib.parse.quote(project) + ".json?include=issue_categories")["project"]
 print("project  %10d  %s" % (found["id"], found["name"]))
 for status in get("/issue_statuses.json")["issue_statuses"]:
     print("status   %10d  %s%s" % (status["id"], status["name"], " (closed)" if status.get("is_closed") else ""))
-for category in get("/projects/%d/issue_categories.json" % found["id"])["issue_categories"]:
+for category in found.get("issue_categories", []):
     print("category %10d  %s" % (category["id"], category["name"]))
 for member in get("/projects/%d/memberships.json?limit=100" % found["id"])["memberships"]:
     if "user" in member:
@@ -567,7 +566,11 @@ EOF
 unset TRACKER_API_KEY
 ```
 
-The last line must name the engine's account, not yours. The ids go where the
+The last line must name the engine's account, not yours. This script was run
+as written against local Redmine 6.0.11 and 5.1.12 containers. It reads the
+categories with the project because Redmine 5.1 refuses its category list
+(`/projects/<id>/issue_categories.json`) to an account without Manage issue
+categories. The ids go where the
 Backlog table above says, except `intake.category_on_accept`, which Redmine
 does not take.
 
@@ -2317,9 +2320,12 @@ print("account", me["id"], me["login"])
 print("open issues of the project", page["total_count"], "of which on this page", len(page["issues"]))'
 ```
 
-The account must be the engine's. The count is of all open issues of the
-project (or of its intake categories), not only those created after
-`intake.created_since`. Before opening intake, also confirm on one test issue
+The account must be the engine's. This check was run as written against the
+local Redmine 6.0.11 and 5.1.12 of section 2, with the configuration path
+pointed at a local copy. Each configured status must be named; a
+line ending in `NOT A STATUS OF THIS REDMINE` is an id to correct. The count is
+of all open issues of the project (or of its intake categories), not only
+those created after `intake.created_since`. Before opening intake, also confirm on one test issue
 that the engine's account may post a note, edit it, and make each configured
 status move and the assignee change: Redmine answers 204 to a status or an
 assignee it did not set, so only the issue read back shows whether the role

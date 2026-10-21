@@ -270,7 +270,7 @@ Redmine 5.0 and later mails an account named after an `@` in a note, also
 inside inline code, so the failure detail the engine quotes in its own notices
 carries an invisible word joiner after each `@`. The setup guide's
 [Redmine section](../deploy/ticket-engine/SETUP.md#redmine) lists the
-permissions, measured against Redmine 6.0.11.
+permissions, measured against Redmine 6.0.11 and 5.1.12.
 
 ### Automatic intake experiment
 
