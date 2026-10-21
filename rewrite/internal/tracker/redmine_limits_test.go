@@ -18,10 +18,13 @@ func TestRedmineReadsNoMoreThanItsBoundOfPages(t *testing.T) {
 	pages := 0
 	fake.before = func(w http.ResponseWriter, r *http.Request) bool {
 		pages++
-		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		from := 1
+		if cursor, found := strings.CutPrefix(r.URL.Query().Get("issue_id"), ">="); found {
+			from, _ = strconv.Atoi(cursor)
+		}
 		page := make([]any, 100)
 		for i := range page {
-			page[i] = map[string]any{"id": offset + i + 1, "project": map[string]any{"id": 1}}
+			page[i] = map[string]any{"id": from + i, "project": map[string]any{"id": 1}, "author": map[string]any{"id": 6}}
 		}
 		json.NewEncoder(w).Encode(map[string]any{"issues": page, "total_count": 1 << 30})
 		return true

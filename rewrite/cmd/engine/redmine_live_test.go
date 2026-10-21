@@ -144,6 +144,21 @@ func (l *redmineLiveServer) file(category int64, subject string) int64 {
 	return created.Issue.ID
 }
 
+// startAt opens the intake at the creation time of the given issue, by
+// Redmine's own clock, which need not agree with this machine's.
+func (l *redmineLiveServer) startAt(cfg *config, issue int64) {
+	l.t.Helper()
+	var record struct {
+		Issue struct {
+			Created string `json:"created_on"`
+		}
+	}
+	if json.Unmarshal(l.as("admin", http.MethodGet, "/issues/"+strconv.FormatInt(issue, 10)+".json", nil), &record) != nil || record.Issue.Created == "" {
+		l.t.Fatal("the issue's creation time could not be read")
+	}
+	cfg.Intake.CreatedSince = record.Issue.Created
+}
+
 type redmineLiveJournal struct {
 	ID      int64
 	User    struct{ ID int64 }
@@ -313,6 +328,7 @@ func TestRedmineLiveEngineAsksWaitsWorksReportsAndConfirms(t *testing.T) {
 	})
 	other := live.file(live.category("other"), "Live engine other category")
 	issue := live.file(live.category("engine"), "Live engine request")
+	live.startAt(&cfg, other)
 	root := t.TempDir()
 	var log lockedLog
 	finish := startStopQueue(t, cfg, root, 200*time.Millisecond, &log)
@@ -393,7 +409,9 @@ func TestRedmineLiveStopWhileWorkIsRunning(t *testing.T) {
 	cfg.Intake.Announce = false
 	cfg.Roles[0].Processes[0].Command = []string{"/bin/sh", "-c", `cat > received.txt; printf '%s' "$$" > child-pid; exec sleep 60`}
 	live.transport(t, func(chain.State) string { return "implement" })
+	cfg.Intake.CategoryIDs = []int64{live.category("engine")}
 	issue := live.file(live.category("engine"), "Live engine stop")
+	live.startAt(&cfg, issue)
 	root := t.TempDir()
 	var log lockedLog
 	finish := startStopQueue(t, cfg, root, 200*time.Millisecond, &log)

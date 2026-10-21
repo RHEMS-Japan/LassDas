@@ -8,17 +8,31 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
+// redminePostBound bounds a note once it is sent: the change and the read
+// back that finds its id, each also bounded by its own call.
+const redminePostBound = 90 * time.Second
+
+// errNoteWithoutID is a note Redmine saved that cannot be told apart from
+// another new note by the same account: its id is unknown, and it is not to be
+// posted again.
+var errNoteWithoutID = errors.New("Redmine saved the note, but it cannot be told apart from another new note by the engine's account, so its id is unknown; do not post it again")
+
 // AddComment posts the text once as a note and returns the new note's id.
 // Redmine answers a note with no content and no id, so the issue's journals
-// are read before and after: the note is the newest one after it was sent, by
-// the key's own account, in exactly these words. A failure may still have
-// posted it, so nothing here posts it again: read the comments before trying
+// are read before and after (see addNote). An id of zero without an error
+// says the note was saved but its id could not be read back; it is not to be
+// posted again. A failure may still have posted it unless it says it was not
+// saved, so nothing here posts it again: read the comments before trying
 // again.
 func (p RedmineProject) AddComment(ctx context.Context, issue Issue, text string) (int64, error) {
-	journal, err := p.Client.addNote(ctx, issue.Key, text)
+	journal, err := p.addNote(ctx, issue.Key, text)
+	if errors.Is(err, errNoteWithoutID) {
+		return 0, nil
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -27,7 +41,17 @@ func (p RedmineProject) AddComment(ctx context.Context, issue Issue, text string
 }
 
 // addNote posts a note and returns its journal record as journals lists it.
-func (r Redmine) addNote(ctx context.Context, key, text string) (json.RawMessage, error) {
+// The new note is the newest one after it was sent, by the key's own account:
+// the one in exactly these words, or else the only one, which Redmine kept in
+// other words than sent (a database that cannot hold every character, a
+// length limit, a plugin). Two new ones, none in these words, cannot be told
+// apart, and the note is reported saved without an id.
+//
+// Once the note is sent, the change and the read back go on whatever happens
+// to the caller: a role's client gives up after 30 seconds, and a note sent
+// whose id is never read is neither recorded for the launch's cleanup nor
+// known to the role, which would post it again.
+func (p RedmineProject) addNote(ctx context.Context, key, text string) (json.RawMessage, error) {
 	if !utf8.ValidString(text) {
 		return nil, errors.New("comment contains invalid UTF-8; it was not sent")
 	}
@@ -38,11 +62,11 @@ func (r Redmine) addNote(ctx context.Context, key, text string) (json.RawMessage
 	if _, err := redmineNumber(key); err != nil {
 		return nil, err
 	}
-	me, err := r.myself(ctx)
+	me, err := p.Client.myself(ctx)
 	if err != nil {
 		return nil, err
 	}
-	before, err := r.journals(ctx, key)
+	before, err := p.journals(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -52,28 +76,47 @@ func (r Redmine) addNote(ctx context.Context, key, text string) (json.RawMessage
 		json.Unmarshal(raw, &journal) // journals read every id
 		newest = max(newest, journal.ID)
 	}
-	if _, err := r.call(ctx, http.MethodPut, "/issues/"+key+".json", nil, map[string]any{"issue": map[string]string{"notes": text}},
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("comment was not sent: %w", err)
+	}
+	sent, cancel := context.WithTimeout(context.WithoutCancel(ctx), redminePostBound)
+	defer cancel()
+	if _, err := p.Client.call(sent, http.MethodPut, "/issues/"+key+".json", nil, map[string]any{"issue": map[string]string{"notes": text}},
 		redmineItemLimit, http.StatusNoContent, http.StatusOK); err != nil {
+		var refusal *trackerError
+		if errors.As(err, &refusal) && refusal.Status >= 400 && refusal.Status < 500 {
+			return nil, fmt.Errorf("comment was not saved; Redmine refused it: %w", err)
+		}
 		return nil, fmt.Errorf("comment submission not confirmed; it may already be posted; inspect comments before retrying: %w", err)
 	}
-	after, err := r.journals(ctx, key)
+	after, err := p.journals(sent, key)
 	if err != nil {
 		return nil, fmt.Errorf("comment submission not confirmed; it may already be posted; inspect comments before retrying: %w", err)
 	}
-	var found json.RawMessage
+	var exact json.RawMessage
+	var mine []json.RawMessage
 	for _, raw := range after {
 		var journal redmineJournal
-		if json.Unmarshal(raw, &journal) != nil || journal.ID <= newest || journal.User.ID != me.ID || journal.Notes == nil || *journal.Notes != text {
+		if json.Unmarshal(raw, &journal) != nil || journal.ID <= newest || journal.User.ID != me.ID || journal.Notes == nil || *journal.Notes == "" {
 			continue
 		}
-		// Two posts of the same words at once by the same account are told
-		// apart by nothing; the newer is taken, as the engine takes it.
-		found = raw
+		mine = append(mine, raw)
+		if *journal.Notes == text {
+			// Two posts of the same words at once by the same account are
+			// told apart by nothing; the newer is taken, as the engine takes
+			// it.
+			exact = raw
+		}
 	}
-	if found == nil {
-		return nil, errors.New("comment submission returned no readable id; it may already be posted; inspect comments before retrying")
+	switch {
+	case exact != nil:
+		return exact, nil
+	case len(mine) == 1:
+		return mine[0], nil
+	case len(mine) == 0:
+		return nil, errors.New("comment was not saved: Redmine answered that it was, but the issue holds no new note by the engine's account; Redmine answers so when the account's role lacks Add notes")
 	}
-	return found, nil
+	return nil, errNoteWithoutID
 }
 
 // EditComment replaces the words of a note the key's account posted, through
@@ -94,14 +137,14 @@ func (p RedmineProject) EditComment(ctx context.Context, issue Issue, id int64, 
 	}
 	// A journal's id names no issue; it is edited only when it is this
 	// issue's.
-	if _, err := p.Client.journal(ctx, issue.Key, id); err != nil {
+	if _, err := p.journal(ctx, issue.Key, id); err != nil {
 		return err
 	}
 	if _, err := p.Client.call(ctx, http.MethodPut, "/journals/"+strconv.FormatInt(id, 10)+".json", nil,
 		map[string]any{"journal": map[string]string{"notes": text}}, redmineItemLimit, http.StatusNoContent, http.StatusOK); err != nil {
 		return fmt.Errorf("comment edit not confirmed; it may already be applied; read the comment before retrying: %w", err)
 	}
-	raw, err := p.Client.journal(ctx, issue.Key, id)
+	raw, err := p.journal(ctx, issue.Key, id)
 	if err != nil {
 		return fmt.Errorf("comment edit not confirmed; it may already be applied; read the comment before retrying: %w", err)
 	}
@@ -113,8 +156,8 @@ func (p RedmineProject) EditComment(ctx context.Context, issue Issue, id int64, 
 
 // journal is one journal of the issue, as journals lists it, or an error
 // that reads as not found when the issue has none with that id.
-func (r Redmine) journal(ctx context.Context, key string, id int64) (json.RawMessage, error) {
-	rows, err := r.journals(ctx, key)
+func (p RedmineProject) journal(ctx context.Context, key string, id int64) (json.RawMessage, error) {
+	rows, err := p.journals(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +189,7 @@ func (p RedmineProject) Move(ctx context.Context, issue Issue, turn string) erro
 	if turn == Accepted || id <= 0 {
 		return fmt.Errorf("no status is configured for the turn %s", turn)
 	}
-	return p.Client.change(ctx, issue.Key, map[string]int64{"status_id": id}, func(record redmineIssue) error {
+	return p.change(ctx, issue.Key, map[string]int64{"status_id": id}, func(record redmineIssue) error {
 		if record.Status.ID != id {
 			return fmt.Errorf("tracker did not confirm the status change: the issue is still in status %d; Redmine leaves the status as it was, without an error, unless the engine's account has Edit issues and its role's workflow allows the move from that status to %d", record.Status.ID, id)
 		}
@@ -161,7 +204,7 @@ func (p RedmineProject) Assign(ctx context.Context, issue Issue, to Account) err
 	if to.ID <= 0 {
 		return errors.New("provide a positive user id")
 	}
-	return p.Client.change(ctx, issue.Key, map[string]int64{"assigned_to_id": to.ID}, func(record redmineIssue) error {
+	return p.change(ctx, issue.Key, map[string]int64{"assigned_to_id": to.ID}, func(record redmineIssue) error {
 		if record.AssignedTo == nil || record.AssignedTo.ID != to.ID {
 			return fmt.Errorf("tracker did not confirm the assignee change: Redmine did not assign %d to the issue; it leaves the assignee as it was, without an error, unless the engine's account has Edit issues", to.ID)
 		}
@@ -170,15 +213,17 @@ func (p RedmineProject) Assign(ctx context.Context, issue Issue, to Account) err
 }
 
 // change sets fields of one issue and has confirm read the issue afterwards.
-func (r Redmine) change(ctx context.Context, key string, fields map[string]int64, confirm func(redmineIssue) error) error {
-	if _, err := redmineNumber(key); err != nil {
+// The issue is read first, so nothing is changed on one moved to another
+// project.
+func (p RedmineProject) change(ctx context.Context, key string, fields map[string]int64, confirm func(redmineIssue) error) error {
+	if _, err := p.issue(ctx, key, false); err != nil {
 		return err
 	}
-	if _, err := r.call(ctx, http.MethodPut, "/issues/"+key+".json", nil, map[string]any{"issue": fields},
+	if _, err := p.Client.call(ctx, http.MethodPut, "/issues/"+key+".json", nil, map[string]any{"issue": fields},
 		redmineItemLimit, http.StatusNoContent, http.StatusOK); err != nil {
 		return err
 	}
-	data, err := r.issue(ctx, key, false)
+	data, err := p.issue(ctx, key, false)
 	if err != nil {
 		return fmt.Errorf("the change was sent, and the issue could not be read back: %w", err)
 	}

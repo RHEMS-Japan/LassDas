@@ -253,11 +253,17 @@ asked for the categories and the starting time, and the engine checks both
 again. An issue is named by its id. `intake.category_on_accept` is refused:
 a Redmine issue has one category, and the engine leaves the requester's.
 Comments are the issue's notes; a field change is a note without words, and
-is not an answer.
+is not an answer. A note someone else edited is its editor's words where
+Redmine says who edited it (6.0; 5.x does not). An issue
+filed by Redmine's anonymous user is not taken, and a note by it is nobody's
+answer or stop: the engine acts only for an author it can look up as an
+account with a login.
 
 Redmine answers a note or a change with 204 and nothing else. The engine
 therefore reads the issue again: a new note is the newest one after the post,
-by the engine's account, in exactly the posted words; a status or an assignee
+by the engine's account, in exactly the posted words, or else the only new
+one by that account (two that cannot be told apart leave the note saved
+without an id, not posted again); a status or an assignee
 counts as set only when the issue reads back with it, because Redmine leaves
 one it may not set as it was without an error (the role needs Edit issues,
 and its workflow must allow each status move). Rewriting the engine's own
@@ -265,7 +271,8 @@ note and removing a role's earlier posts use `PUT /journals/<id>.json`, which
 Redmine added in 5.0: removal empties the note, which Redmine then deletes.
 On an older Redmine, or without the Edit own notes permission, the engine
 posts a new note instead and the earlier posts stay. Hours are not recorded.
-A private note is read only if the engine's role may view private notes.
+A private note is read only if the engine's role may view private notes, and
+never reaches a role.
 Redmine 5.0 and later mails an account named after an `@` in a note, also
 inside inline code, so the failure detail the engine quotes in its own notices
 carries an invisible word joiner after each `@`. The setup guide's

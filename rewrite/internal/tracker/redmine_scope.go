@@ -16,8 +16,10 @@ import (
 // IssueScope checks the role's authority before calling this method. DELETE
 // is for the scope's own cleanup only, never a role's request: it empties
 // the note, which Redmine 5.0 and later takes as removing it.
+//
+// A private note never reaches a role, whatever the engine's account may
+// see: a role's comments are public, and it could quote one into them.
 func (p RedmineProject) Forward(ctx context.Context, method, path string, query, form url.Values, expected int) ([]byte, error) {
-	r := p.Client
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	if !strings.HasPrefix(path, "/issues/") || len(parts) < 2 {
 		return nil, errors.New("outside the issue scope's tracker operations")
@@ -28,7 +30,7 @@ func (p RedmineProject) Forward(ctx context.Context, method, path string, query,
 	}
 	switch {
 	case method == http.MethodGet && len(parts) == 2 && len(query) == 0 && len(form) == 0 && expected == http.StatusOK:
-		data, err := r.issue(ctx, key, false)
+		data, err := p.issue(ctx, key, false)
 		if err != nil {
 			return nil, err
 		}
@@ -64,7 +66,7 @@ func (p RedmineProject) Forward(ctx context.Context, method, path string, query,
 		}
 		// Redmine gives every journal of an issue in one read; the scope's page
 		// is chosen from it.
-		rows, err := r.journals(ctx, key)
+		rows, err := p.journals(ctx, key)
 		if err != nil {
 			return nil, err
 		}
@@ -72,7 +74,7 @@ func (p RedmineProject) Forward(ctx context.Context, method, path string, query,
 		for _, raw := range rows {
 			var journal redmineJournal
 			json.Unmarshal(raw, &journal) // journals read every id
-			if journal.ID > after && int64(len(page)) < count {
+			if !journal.Private && journal.ID > after && int64(len(page)) < count {
 				data, err := scopedRedmineJournal(raw)
 				if err != nil {
 					return nil, err
@@ -82,7 +84,7 @@ func (p RedmineProject) Forward(ctx context.Context, method, path string, query,
 		}
 		return json.Marshal(page)
 	case method == http.MethodPost && len(parts) == 3 && parts[2] == "comments" && len(query) == 0 && len(form) == 1 && len(form["content"]) == 1 && expected == http.StatusCreated:
-		raw, err := r.addNote(ctx, key, form.Get("content"))
+		raw, err := p.addNote(ctx, key, form.Get("content"))
 		if err != nil {
 			return nil, err
 		}
@@ -94,12 +96,16 @@ func (p RedmineProject) Forward(ctx context.Context, method, path string, query,
 		}
 		// A journal's id names no issue. It is found among this issue's
 		// before it is returned or emptied for this launch.
-		raw, err := r.journal(ctx, key, id)
+		raw, err := p.journal(ctx, key, id)
 		if err != nil {
 			return nil, err
 		}
+		var journal redmineJournal
+		if json.Unmarshal(raw, &journal) != nil || journal.Private {
+			return nil, &trackerError{Status: http.StatusNotFound, Body: "comment not found on the assigned issue"}
+		}
 		if method == http.MethodDelete {
-			if _, err := r.call(ctx, http.MethodPut, "/journals/"+parts[3]+".json", nil, map[string]any{"journal": map[string]string{"notes": ""}},
+			if _, err := p.Client.call(ctx, http.MethodPut, "/journals/"+parts[3]+".json", nil, map[string]any{"journal": map[string]string{"notes": ""}},
 				redmineItemLimit, http.StatusNoContent, http.StatusOK); err != nil {
 				return nil, err
 			}

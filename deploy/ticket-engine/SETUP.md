@@ -238,8 +238,10 @@ configuration lacks ([section 4](#settings-the-requester-will-notice)).
 With an unfiltered Backlog project, anyone who can create an issue can make
 the engine read the repository, change it and merge the change. With GitHub,
 anyone who can add the intake label can hand an open issue over, whoever filed
-it, if it meets the creation-time boundary. Its roles can reach public
-addresses. So:
+it, if it meets the creation-time boundary. With Redmine, anyone who may add
+issues to the project can, and in a public project that may include people
+without an account ([Redmine](#redmine), "Who may file and write"). Its roles
+can reach public addresses. So:
 
 1. Deliver to an integration branch that nothing deploys to production by
    itself.
@@ -483,7 +485,7 @@ so repeat the read check of section 7 against yours.
    | Add notes | Redmine answers 204 and records no note; the engine reads the issue again, finds none, and says in its log that the post is not confirmed |
    | Edit issues | `intake.statuses` and `intake.assign` do nothing: Redmine answers 204 and leaves the status and the assignee as they were |
    | Edit own notes | the engine posts a new note instead of rewriting its own, and the earlier posts of a role with `comment` access stay |
-   | View private notes (optional) | a private note, an answer or a `停止` included, is invisible to the engine |
+   | View private notes (optional) | a private note, an answer or a `停止` included, is invisible to the engine; with it, a private note by the requester or by a user in `intake.stop_user_ids` counts as an answer or a stop like any other. Roles never see a private note either way: the engine leaves them out of what a role reads, since a role's own comments are public |
 
    Redmine moves an issue only along the role's workflow (Administration,
    Workflow, for that role and each tracker the project uses). Allow every
@@ -493,8 +495,20 @@ so repeat the read check of section 7 against yours.
    the workflow does not allow is also answered with 204 and not made. The
    engine reads the issue back after each change, writes the refusal in its
    log ("tracker did not confirm the status change ...") and asks again later.
-   Set the role's issue visibility to all issues if requesters may file
-   private issues. Grant nothing else: not Delete issues, not Manage members.
+   Do not make a field required for this role in the workflow's field
+   permissions: the engine sends only its note or the one field it changes,
+   so Redmine refuses every note and every status change on an issue where
+   that field is empty, with 422 (for example "Due date cannot be blank").
+   An empty required custom field did not refuse them on 5.1.12 or 6.0.11.
+   Set the role's issue visibility to all issues. With "Issues created by or
+   assigned to the user", the engine sees only the issues assigned to it:
+   Redmine answers 403 for one the requester filed, and for one the engine
+   has handed back to the requester, so it loses a request at the first
+   hand-over; with "All non private issues" it never sees a private one.
+   Its users visibility must let it see the requesters and the users in
+   `intake.stop_user_ids` (members of the project always are): an author the
+   engine cannot look up is nobody to it (see "Who may file and write"). Grant nothing else: not Delete issues,
+   not Manage members.
 4. **The key.** Logged in as the engine's account, open My account, API
    access key, Show. This is `TRACKER_API_KEY`; `redmine.key_env` is that
    variable's name, never the key itself (a value that looks like a 40-digit
@@ -524,8 +538,26 @@ entries, and a request that is worked again would be counted twice.
 Comments are notes. A change of a field is a note without words and is not an
 answer. Use the requester's own account to file requests: their notes, and
 those of the users in `intake.stop_user_ids`, are the only ones that count as
-an answer or a stop (`停止` on the first nonblank line). Closing the issue
-does not stop an accepted request. Redmine 5.0 and later sends mail to an
+an answer or a stop (`停止` on the first nonblank line). Redmine 6.0 names in
+its API who edited a note, and a note someone else edited counts as the
+editor's words, not as its first author's. Redmine 5.x does not say in its API
+that a note was edited (checked on 5.1.12), so there an edited note counts as
+its first author's: on 5.x, give the permission to edit others' notes (Edit
+notes) only to people who may also stop requests. Closing the issue does not
+stop an accepted request.
+
+**Who may file and write.** Keep the intake project private, or give the
+Anonymous and Non member roles neither Add issues nor Add notes. In a public
+project where they have them, anyone can file a request and write in its
+issue, and everyone without an account writes as the same anonymous author.
+The engine takes no issue that Redmine's anonymous user filed, and counts no
+note by it as an answer or a stop: it looks each author up
+(`GET /users/<id>.json` with its own key) and acts only for one that is an
+account with a login. Redmine 5.1.12 and 6.0.11 answer 404 for the anonymous
+user to a key that is not an administrator's, and give an administrator's an
+empty login. Its id and its name (translated into the account's language)
+differ from one Redmine to the next, so neither is used. An author the
+engine's account may not look up is treated the same way. Redmine 5.0 and later sends mail to an
 account named after an `@` in a note; the engine puts an invisible word
 joiner after each `@` in the failure detail it quotes, so a diagnostic line
 names nobody. What roles post is sent as they wrote it.

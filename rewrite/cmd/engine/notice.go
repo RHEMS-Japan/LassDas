@@ -178,8 +178,9 @@ type noticeRecord struct {
 }
 
 // commentEditor is a tracker that can replace the words of a comment its own
-// account posted. Backlog can; on any other tracker a notice that would
-// rewrite one is posted as a new comment.
+// account posted. Backlog can, and so can Redmine 5.0 and later; on a tracker
+// that cannot, or when the edit is refused, a notice that would rewrite one is
+// posted as a new comment.
 type commentEditor interface {
 	EditComment(ctx context.Context, issue tracker.Issue, id int64, text string) error
 }
@@ -998,12 +999,14 @@ func noticeDetail(cfg config, text string) string {
 		line = strings.ReplaceAll(line, value, "[credential]")
 		line = strings.ReplaceAll(line, url.QueryEscape(value), "[credential]")
 	}
-	line = textclip.Clip(strings.TrimSpace(line), 200)
+	line = strings.TrimSpace(line)
 	if cfg.Redmine != nil {
 		// Redmine 5.0 and later notifies the account an @ names in a note,
-		// inside inline code too. A word joiner after the @ names nobody.
-		return strings.ReplaceAll(line, "@", "@\u2060")
+		// inside inline code too. A word joiner after the @ names nobody. It
+		// goes in before the cut, so the detail stays within its bound.
+		line = strings.ReplaceAll(line, "@", "@\u2060")
 	}
+	line = textclip.Clip(line, 200)
 	if cfg.GitHub == nil || line == "" {
 		return line
 	}

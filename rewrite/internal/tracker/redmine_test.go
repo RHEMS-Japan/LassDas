@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +59,9 @@ type fakeRedmine struct {
 	refuse map[string]int
 	// lose keeps a note from being stored, as a note lost on the way.
 	lose bool
+	// users are the accounts GET /users/<id>.json finds, by login; any other
+	// id is answered 404, as Redmine answers for its anonymous user.
+	users map[int64]string
 	// before runs ahead of the fake's own handling; true when it answered.
 	before func(w http.ResponseWriter, r *http.Request) bool
 }
@@ -64,14 +69,39 @@ type fakeRedmine struct {
 func redmineFixture(t *testing.T) (*fakeRedmine, RedmineProject) {
 	t.Helper()
 	t.Setenv("REDMINE_TEST_KEY", redmineTestKey)
-	fake := &fakeRedmine{t: t, issue: redmineRecord(t), next: 900, ignore: map[string]bool{}, refuse: map[string]int{}}
+	fake := &fakeRedmine{t: t, issue: redmineRecord(t), next: 900, ignore: map[string]bool{}, refuse: map[string]int{},
+		users: map[int64]string{5: "engine-bot", 6: "requester", 7: "operator"}}
 	for _, raw := range redmineTestdata(t, "issue-journals.json")["issue"].(map[string]any)["journals"].([]any) {
 		fake.journals = append(fake.journals, raw.(map[string]any))
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(fake.serve))
-	t.Cleanup(server.Close)
+	// The process keeps what it learned about an address, and a later server
+	// can be given this one's port: it starts with none and leaves none.
+	forgetRedmine(server.URL)
+	t.Cleanup(func() {
+		server.Close()
+		forgetRedmine(server.URL)
+	})
 	return fake, RedmineProject{Client: Redmine{BaseURL: server.URL, KeyEnv: "REDMINE_TEST_KEY", Client: server.Client()}, ProjectID: 1}
 }
+
+// forgetRedmine drops what the process keeps for the Redmine at base.
+func forgetRedmine(base string) {
+	redmineKnown.Lock()
+	defer redmineKnown.Unlock()
+	for place := range redmineKnown.me {
+		if strings.HasPrefix(place, base+"\x00") {
+			delete(redmineKnown.me, place)
+		}
+	}
+	for place := range redmineKnown.persons {
+		if strings.HasPrefix(place, base+"\x00") {
+			delete(redmineKnown.persons, place)
+		}
+	}
+}
+
+var redmineUserPath = regexp.MustCompile(`^/users/([0-9]+)\.json$`)
 
 func (f *fakeRedmine) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
@@ -83,6 +113,20 @@ func (f *fakeRedmine) serve(w http.ResponseWriter, r *http.Request) {
 		f.t.Error("the key is in the address")
 	}
 	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
+	if r.Method == http.MethodGet && redmineUserPath.MatchString(r.URL.Path) {
+		if status := f.refuse[r.Method+" "+r.URL.Path]; status != 0 {
+			w.WriteHeader(status)
+			return
+		}
+		id, _ := strconv.ParseInt(redmineUserPath.FindStringSubmatch(r.URL.Path)[1], 10, 64)
+		login, found := f.users[id]
+		if !found {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"id": id, "login": login, "firstname": login, "lastname": "Check"}})
+		return
+	}
 	if f.before != nil && f.before(w, r) {
 		return
 	}
@@ -153,10 +197,18 @@ func (f *fakeRedmine) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// called lists the requests made, leaving out the look-ups of authors, which
+// the process keeps and so asks once.
 func (f *fakeRedmine) called() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.calls...)
+	calls := []string{}
+	for _, call := range f.calls {
+		if !redmineUserPath.MatchString(strings.TrimPrefix(call, "GET ")) {
+			calls = append(calls, call)
+		}
+	}
+	return calls
 }
 
 func TestRedmineAsksWithItsKeyHeaderAndKeepsTheKeyOutOfErrors(t *testing.T) {
@@ -214,13 +266,34 @@ func TestRedmineRefusesAnAddressThatIsNotItsOwnHTTPSOne(t *testing.T) {
 	}
 }
 
-// servedIssues answers a list of n issues of project 1, a hundred at a time,
-// by the offset and limit asked.
+// servedIssues answers a list of the issues 1 to n of project 1.
 func servedIssues(t *testing.T, n int, w http.ResponseWriter, r *http.Request, change func(int, map[string]any)) {
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	ids := make([]int, n)
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	serveIssueList(t, ids, w, r, change)
+}
+
+// serveIssueList answers a list of issues of project 1 as Redmine does: in
+// ascending id, narrowed by issue_id=>=N when asked, then by offset and
+// limit, with the count of all that the narrowing leaves.
+func serveIssueList(t *testing.T, ids []int, w http.ResponseWriter, r *http.Request, change func(int, map[string]any)) {
+	q := r.URL.Query()
+	from := 0
+	if cursor, found := strings.CutPrefix(q.Get("issue_id"), ">="); found {
+		from, _ = strconv.Atoi(cursor)
+	}
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	listed := []int{}
+	for _, id := range ids {
+		if id >= from {
+			listed = append(listed, id)
+		}
+	}
 	page := []any{}
-	for id := offset + 1; id <= min(offset+limit, n); id++ {
+	for _, id := range listed[min(offset, len(listed)):min(offset+limit, len(listed))] {
 		record := redmineRecord(t)
 		record["id"] = id
 		if change != nil {
@@ -228,7 +301,7 @@ func servedIssues(t *testing.T, n int, w http.ResponseWriter, r *http.Request, c
 		}
 		page = append(page, record)
 	}
-	json.NewEncoder(w).Encode(map[string]any{"issues": page, "total_count": n, "offset": offset, "limit": limit})
+	json.NewEncoder(w).Encode(map[string]any{"issues": page, "total_count": len(listed), "offset": offset, "limit": limit})
 }
 
 func TestRedmineReadsEveryPageOfTheProjectsOpenIssues(t *testing.T) {
@@ -238,8 +311,12 @@ func TestRedmineReadsEveryPageOfTheProjectsOpenIssues(t *testing.T) {
 	pages := 0
 	fake.before = func(w http.ResponseWriter, r *http.Request) bool {
 		q := r.URL.Query()
+		cursor := ""
+		if pages > 0 {
+			cursor = ">=" + strconv.Itoa(pages*100+1)
+		}
 		if r.URL.Path != "/issues.json" || q.Get("project_id") != "1" || q.Get("subproject_id") != "!*" || q.Get("status_id") != "open" ||
-			q.Get("sort") != "id" || q.Get("limit") != "100" || q.Get("offset") != strconv.Itoa(pages*100) ||
+			q.Get("sort") != "id" || q.Get("limit") != "100" || q.Get("issue_id") != cursor || q.Has("offset") ||
 			q.Get("created_on") != ">=2026-10-19T19:00:00Z" || q.Get("category_id") != "1|4" {
 			t.Errorf("a page was asked as %s", r.URL)
 		}
@@ -267,8 +344,9 @@ func TestRedmineReadsEveryPageOfTheProjectsOpenIssues(t *testing.T) {
 		servedIssues(t, 100, w, r, nil)
 		return true
 	}
-	if rows, err := redmine.Issues(context.Background()); err != nil || len(rows) != 100 || pages != 1 {
-		t.Fatalf("a full last page was followed or lost: issues=%d pages=%d error=%v", len(rows), pages, err)
+	// A full page may be the last; the page after it, empty, says so.
+	if rows, err := redmine.Issues(context.Background()); err != nil || len(rows) != 100 || pages != 2 {
+		t.Fatalf("a full last page was lost: issues=%d pages=%d error=%v", len(rows), pages, err)
 	}
 	redmine.ProjectID = 0
 	if _, err := redmine.Issues(context.Background()); err == nil {
@@ -277,8 +355,8 @@ func TestRedmineReadsEveryPageOfTheProjectsOpenIssues(t *testing.T) {
 }
 
 func TestRedmineReturnsNoListThatIsPartialOrNotTheProjects(t *testing.T) {
-	for _, failure := range []string{"another project", "repeated issue", "second page outage", "moved", "not a list",
-		"no count", "oversized page", "over a hundred", "ended early"} {
+	for _, failure := range []string{"another project", "cursor ignored", "repeated issue", "second page outage", "moved", "not a list",
+		"oversized page", "over a hundred"} {
 		t.Run(failure, func(t *testing.T) {
 			fake, redmine := redmineFixture(t)
 			pages := 0
@@ -291,12 +369,13 @@ func TestRedmineReturnsNoListThatIsPartialOrNotTheProjects(t *testing.T) {
 							record["project"] = map[string]any{"id": 2, "name": "Intake sub"}
 						}
 					})
+				case "cursor ignored":
+					// A server that does not narrow by issue_id gives the first
+					// page again.
+					r.URL.RawQuery = strings.ReplaceAll(r.URL.RawQuery, "issue_id=", "ignored=")
+					servedIssues(t, 101, w, r, nil)
 				case "repeated issue":
-					servedIssues(t, 101, w, r, func(id int, record map[string]any) {
-						if id == 101 {
-							record["id"] = 3
-						}
-					})
+					serveIssueList(t, []int{1, 2, 2, 3}, w, r, nil)
 				case "second page outage":
 					if pages == 2 {
 						w.WriteHeader(http.StatusServiceUnavailable)
@@ -309,22 +388,9 @@ func TestRedmineReturnsNoListThatIsPartialOrNotTheProjects(t *testing.T) {
 					w.WriteHeader(http.StatusFound)
 				case "not a list":
 					fmt.Fprint(w, `{"issue":{"id":1}}`)
-				case "no count":
-					fmt.Fprint(w, `{"issues":[]}`)
 				case "oversized page":
 					fmt.Fprint(w, `{"issues":[],"total_count":0}`+strings.Repeat(" ", 32<<20))
-				case "ended early":
-					if pages == 2 {
-						fmt.Fprint(w, `{"issues":[],"total_count":101}`)
-						return true
-					}
-					servedIssues(t, 101, w, r, nil)
-				}
-				return true
-			}
-			if failure == "over a hundred" {
-				fake.before = func(w http.ResponseWriter, r *http.Request) bool {
-					pages++
+				case "over a hundred":
 					page := []any{}
 					for id := 1; id <= 101; id++ {
 						record := redmineRecord(t)
@@ -332,14 +398,14 @@ func TestRedmineReturnsNoListThatIsPartialOrNotTheProjects(t *testing.T) {
 						page = append(page, record)
 					}
 					json.NewEncoder(w).Encode(map[string]any{"issues": page, "total_count": 300})
-					return true
 				}
+				return true
 			}
 			rows, err := redmine.Issues(context.Background())
-			want := map[string]string{"another project": "outside the configured project", "repeated issue": "repeated an issue",
-				"second page outage": "503: second page unavailable", "moved": "HTTP 302, a redirect to", "not a list": "not a bounded issue list",
-				"no count": "not a bounded issue list", "oversized page": "exceeds 32 MiB", "over a hundred": "not a bounded issue list",
-				"ended early": "ended before the count"}[failure]
+			want := map[string]string{"another project": "outside the configured project", "cursor ignored": "ascending id after the last one read",
+				"repeated issue": "ascending id after the last one read", "second page outage": "503: second page unavailable",
+				"moved": "HTTP 302, a redirect to", "not a list": "not a bounded issue list", "oversized page": "exceeds 32 MiB",
+				"over a hundred": "not a bounded issue list"}[failure]
 			if err == nil || rows != nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), redmineTestKey) {
 				t.Fatalf("a list was returned, or for another reason: rows=%d pages=%d error=%v", len(rows), pages, err)
 			}
@@ -477,17 +543,17 @@ func TestRedmineReadsJournalsInOrderAndPlacesThemByTheirIssue(t *testing.T) {
 	}
 	// A journal that names an issue of its own keeps it, and one that is
 	// empty still gets its place.
-	fake.journals = []map[string]any{{"id": 1}, {"id": 2, "issue": map[string]any{"id": 9}}}
+	fake.journals = []map[string]any{{"id": 1, "user": map[string]any{"id": 6}}, {"id": 2, "issue": map[string]any{"id": 9}, "user": map[string]any{"id": 6}}}
 	rows, err = redmine.Comments(context.Background(), issue)
-	if err != nil || string(rows[0]) != `{"issue":{"id":5},"id":1}` || string(rows[1]) != `{"id":2,"issue":{"id":9}}` {
+	if err != nil || string(rows[0]) != `{"issue":{"id":5},"id":1,"user":{"id":6}}` || string(rows[1]) != `{"id":2,"issue":{"id":9},"user":{"id":6}}` {
 		t.Fatalf("placed as %s (%v)", rows, err)
 	}
 	for name, journals := range map[string][]map[string]any{
-		"descending": {{"id": 2}, {"id": 1}}, "repeated": {{"id": 2}, {"id": 2}}, "no id": {{"notes": "x"}},
+		"repeated": {{"id": 2}, {"id": 2}}, "no id": {{"notes": "x"}},
 	} {
 		fake.journals = journals
 		if rows, err := redmine.Comments(context.Background(), issue); err == nil || rows != nil {
-			t.Errorf("%s: an unordered or unreadable list was returned: %s", name, rows)
+			t.Errorf("%s: an unreadable list was returned: %s", name, rows)
 		}
 	}
 	fake.before = func(w http.ResponseWriter, r *http.Request) bool {
@@ -512,7 +578,8 @@ func TestRedmineRefusesAnOversizedRecordWithoutCuttingIt(t *testing.T) {
 	}
 	// An issue with every note on it is read up to the list's bound.
 	fake.before = func(w http.ResponseWriter, r *http.Request) bool {
-		record, _ := json.Marshal(map[string]any{"issue": map[string]any{"id": 5, "journals": []any{map[string]any{"id": 1, "notes": strings.Repeat("x", 5<<20)}}}})
+		record, _ := json.Marshal(map[string]any{"issue": map[string]any{"id": 5, "project": map[string]any{"id": 1},
+			"journals": []any{map[string]any{"id": 1, "user": map[string]any{"id": 6}, "notes": strings.Repeat("x", 5<<20)}}}})
 		w.Write(record)
 		return true
 	}
@@ -526,5 +593,91 @@ func TestRedmineRefusesAnOversizedRecordWithoutCuttingIt(t *testing.T) {
 	}
 	if _, err := redmine.Comments(context.Background(), Issue{ID: 5, Key: "5"}); err == nil || !strings.Contains(err.Error(), "exceeds 32 MiB") {
 		t.Fatalf("an oversized journal list was read: %v", err)
+	}
+}
+
+// Redmine lists journals by their time and then their id. A clock set back
+// lists a later journal first; the engine reads them in the order Redmine
+// stored them, by id, and a stop among them is read. (Fails at b997c63,
+// which refused such a list for good.)
+func TestRedmineOrdersJournalsByIDWhateverTheirTimes(t *testing.T) {
+	fake, redmine := redmineFixture(t)
+	fake.journals = []map[string]any{
+		{"id": 276, "user": map[string]any{"id": 6}, "notes": "停止", "created_on": "2026-10-20T04:00:00Z"},
+		{"id": 274, "user": map[string]any{"id": 5}, "notes": "question", "created_on": "2026-10-20T04:01:00Z"},
+		{"id": 275, "user": map[string]any{"id": 6}, "notes": "answer", "created_on": "2026-10-20T04:02:00Z"},
+	}
+	issue := Issue{ID: 5, Key: "5"}
+	rows, err := redmine.Comments(context.Background(), issue)
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("journals=%d error=%v", len(rows), err)
+	}
+	var order []int64
+	for _, raw := range rows {
+		comment, err := redmine.ReadComment(raw, issue)
+		if err != nil || !comment.OnIssue {
+			t.Fatalf("%s: %+v %v", raw, comment, err)
+		}
+		order = append(order, comment.ID)
+	}
+	if fmt.Sprint(order) != "[274 275 276]" {
+		t.Fatalf("read in the order %v", order)
+	}
+}
+
+// An issue closed between two pages does not shift another one out of the
+// list: each page asks for the issues after the last one read. (Fails at
+// b997c63, which paged by position and lost issue 101 here.)
+func TestRedmineListsEveryIssueWhenOneLeavesTheListBetweenPages(t *testing.T) {
+	fake, redmine := redmineFixture(t)
+	ids := []int{}
+	for id := 1; id <= 205; id++ {
+		ids = append(ids, id)
+	}
+	pages := 0
+	fake.before = func(w http.ResponseWriter, r *http.Request) bool {
+		serveIssueList(t, ids, w, r, nil)
+		if pages++; pages == 1 {
+			ids = slices.DeleteFunc(ids, func(id int) bool { return id == 50 }) // closed meanwhile
+		}
+		return true
+	}
+	rows, err := redmine.Issues(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[int64]bool{}
+	for _, raw := range rows {
+		issue, _ := redmine.ReadIssue(raw)
+		listed[issue.ID] = true
+	}
+	if len(rows) != 205 || !listed[101] || !listed[205] {
+		t.Fatalf("issues=%d, 101 listed: %v, pages=%d", len(rows), listed[101], pages)
+	}
+}
+
+// A request moved to another project stops there: nothing is read from the
+// issue and nothing is written to it. (Fails at b997c63, which checked the
+// project only when the intake listed the issue.)
+func TestRedmineStopsAtAnIssueMovedToAnotherProject(t *testing.T) {
+	fake, redmine := redmineFixture(t)
+	redmine.Statuses = map[string]int64{Processing: 2}
+	fake.issue["project"] = map[string]any{"id": 2, "name": "Elsewhere"}
+	issue := Issue{ID: 5, Key: "5"}
+	ctx := context.Background()
+	_, request := redmine.Request(ctx, "5")
+	_, comments := redmine.Comments(ctx, issue)
+	_, post := redmine.AddComment(ctx, issue, "a notice")
+	edit := redmine.EditComment(ctx, issue, 274, "new words")
+	for name, err := range map[string]error{"request": request, "comments": comments, "post": post, "edit": edit,
+		"move": redmine.Move(ctx, issue, Processing), "assign": redmine.Assign(ctx, issue, Account{ID: 6})} {
+		if err == nil || !strings.Contains(err.Error(), "no longer in the configured project 1") {
+			t.Errorf("%s went on in another project: %v", name, err)
+		}
+	}
+	for _, call := range fake.called() {
+		if !strings.HasPrefix(call, "GET ") {
+			t.Fatalf("a change was sent to an issue in another project: %v", fake.called())
+		}
 	}
 }

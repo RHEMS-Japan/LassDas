@@ -404,7 +404,7 @@ func samePage(address string) string {
 	return strings.ToLower(given.Host) + given.EscapedPath() + "?" + given.Query().Encode()
 }
 
-// Both adapters carry refusals in the common representation. Adapter-local
+// Every adapter carries refusals in the common representation. Adapter-local
 // callers may use this name; the scoped server need not know the adapter.
 type githubError = trackerError
 

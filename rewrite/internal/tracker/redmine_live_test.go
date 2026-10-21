@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -254,6 +255,140 @@ func TestRedmineLiveAdapter(t *testing.T) {
 	if err := project.EditComment(ctx, Issue{ID: other, Key: strconv.FormatInt(other, 10)}, posted, "elsewhere"); err == nil {
 		t.Fatal("a note was edited through another issue")
 	}
+
+	// An administrator rewrites the requester's note: the words are the
+	// administrator's now, not the requester's.
+	status, data := live.as("admin", http.MethodPut, "/journals/"+strconv.FormatInt(theirs, 10)+".json", map[string]any{"journal": map[string]any{"notes": "停止"}})
+	if status != http.StatusNoContent {
+		t.Fatalf("the administrator's edit answered %d: %s", status, data)
+	}
+	rows, _ = project.Comments(ctx, issue)
+	for _, raw := range rows {
+		comment, _ := project.ReadComment(raw, issue)
+		if comment.ID != theirs {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		json.Unmarshal(raw, &fields)
+		if _, named := fields["updated_by"]; !named {
+			// Redmine 5.x does not say in its API that a note was edited, or
+			// by whom (6.0 does): the limit SETUP.md states.
+			t.Logf("this Redmine names no editor; the edited note stays its first author's: %+v", comment)
+			if comment.Author.ID != requester {
+				t.Fatalf("an edited note read as %+v", comment)
+			}
+			continue
+		}
+		if comment.Author.ID == requester {
+			t.Fatalf("an edited note is still credited to its first author: %+v", comment)
+		}
+	}
+
+	// The issue is moved to the subproject: the engine stops there.
+	status, data = live.as("admin", http.MethodPut, "/issues/"+issue.Key+".json", map[string]any{"issue": map[string]any{"project_id": live.number("project", "sub_id")}})
+	if status != http.StatusNoContent {
+		t.Fatalf("moving the issue answered %d: %s", status, data)
+	}
+	if _, err := project.Comments(ctx, issue); err == nil || !strings.Contains(err.Error(), "no longer in the configured project") {
+		t.Fatalf("the engine read an issue moved to another project: %v", err)
+	}
+	if _, err := project.AddComment(ctx, issue, "after the move"); err == nil {
+		t.Fatal("the engine wrote to an issue moved to another project")
+	}
+}
+
+// The list goes past a page of a hundred by asking for the issues after the
+// last one read.
+func TestRedmineLivePagesPastAHundred(t *testing.T) {
+	live, project := redmineLiveSetup(t)
+	// The start is the first issue's own creation time, by Redmine's clock,
+	// which need not agree with this machine's; the issues other tests filed
+	// are seconds older.
+	time.Sleep(2 * time.Second)
+	project.Categories = []int64{live.number("categories", "other")}
+	var filed []int64
+	for n := range 105 {
+		filed = append(filed, live.file("requester", project.ProjectID, project.Categories[0], fmt.Sprintf("Live page %d", n)))
+	}
+	var first struct {
+		Issue struct {
+			Created time.Time `json:"created_on"`
+		}
+	}
+	if _, data := live.as("admin", http.MethodGet, "/issues/"+strconv.FormatInt(filed[0], 10)+".json", nil); json.Unmarshal(data, &first) != nil {
+		t.Fatal("the first issue could not be read")
+	}
+	project.Since = first.Issue.Created
+	rows, err := project.Issues(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed []int64
+	for _, raw := range rows {
+		issue, _ := project.ReadIssue(raw)
+		listed = append(listed, issue.ID)
+		if !slices.Contains(filed, issue.ID) {
+			t.Logf("listed besides those filed: %.200s", raw)
+		}
+	}
+	if fmt.Sprint(listed) != fmt.Sprint(filed) {
+		t.Fatalf("listed %d of the %d filed", len(listed), len(filed))
+	}
+}
+
+// An issue filed without an account is not taken, and a note written
+// without one is nobody's. It runs where the Redmine has a public project
+// "public-check" in which the Anonymous role may add issues and notes, and
+// the engine's account is a member.
+func TestRedmineLiveAnonymousAuthor(t *testing.T) {
+	live, project := redmineLiveSetup(t)
+	status, data := live.as("engine-bot", http.MethodGet, "/projects/public-check.json", nil)
+	var found struct{ Project struct{ ID int64 } }
+	if status != http.StatusOK || json.Unmarshal(data, &found) != nil {
+		t.Skip("the Redmine has no public project public-check")
+	}
+	project.ProjectID = found.Project.ID
+	project.Since = time.Now().UTC().Truncate(time.Second).Add(-time.Second)
+	anonymous := func(method, path string, body any) []byte {
+		encoded, _ := json.Marshal(body)
+		request, _ := http.NewRequest(method, live.target.String()+path, bytes.NewReader(encoded))
+		request.Header.Set("Content-Type", "application/json")
+		response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		answer, _ := io.ReadAll(response.Body)
+		if response.StatusCode >= 300 {
+			t.Fatalf("%s %s without an account answered %d: %s", method, path, response.StatusCode, answer)
+		}
+		return answer
+	}
+	var created struct{ Issue struct{ ID int64 } }
+	json.Unmarshal(anonymous(http.MethodPost, "/issues.json", map[string]any{"issue": map[string]any{"project_id": project.ProjectID,
+		"subject": "Filed without an account", "description": "x"}}), &created)
+	byRequester := live.file("requester", project.ProjectID, 0, "Filed by the requester")
+	rows, err := project.Issues(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed []int64
+	for _, raw := range rows {
+		issue, _ := project.ReadIssue(raw)
+		listed = append(listed, issue.ID)
+	}
+	if fmt.Sprint(listed) != fmt.Sprint([]int64{byRequester}) {
+		t.Fatalf("listed %v; only %d (not the anonymous %d) must be", listed, byRequester, created.Issue.ID)
+	}
+	key := strconv.FormatInt(byRequester, 10)
+	anonymous(http.MethodPut, "/issues/"+key+".json", map[string]any{"issue": map[string]any{"notes": "停止"}})
+	journals, err := project.Comments(context.Background(), Issue{ID: byRequester, Key: key})
+	if err != nil || len(journals) != 1 {
+		t.Fatalf("journals %d (%v)", len(journals), err)
+	}
+	if comment, _ := project.ReadComment(journals[0], Issue{ID: byRequester, Key: key}); comment.Author.ID != 0 {
+		t.Fatalf("a note written without an account is credited to %d", comment.Author.ID)
+	}
 }
 
 func TestRedmineLiveScopeForRoles(t *testing.T) {
@@ -304,9 +439,8 @@ func TestRedmineLiveScopeForRoles(t *testing.T) {
 		json.Unmarshal(raw, &comment)
 		contents = append(contents, comment.Content)
 	}
-	// The engine's account may see private notes here; its role sees what it
-	// sees.
-	if got := strings.Join(contents, "|"); got != "Requester context.|Operator private note.|trial line|the role's question" {
+	// The engine's account may see private notes here; its roles never do.
+	if got := strings.Join(contents, "|"); got != "Requester context.|trial line|the role's question" {
 		t.Fatalf("the role read %q", got)
 	}
 	after, err := role.Comments(ctx, key, stored[0])

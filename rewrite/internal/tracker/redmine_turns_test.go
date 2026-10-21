@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRedmineFindsItsNewNoteByReadingTheJournalsAgain(t *testing.T) {
@@ -43,19 +46,26 @@ func TestRedmineFindsItsNewNoteByReadingTheJournalsAgain(t *testing.T) {
 	}
 }
 
-func TestRedmineCommentThatCannotBeConfirmedSaysItMayBePosted(t *testing.T) {
-	for _, failure := range []string{"refused", "lost", "unreadable after"} {
+// A refusal says the note was not saved; a failure that leaves it unknown
+// says it may already be posted. (The 4xx case fails at b997c63, which said
+// "may already be posted" for every failure.)
+func TestRedmineCommentThatCannotBeConfirmedSaysWhetherItMayBePosted(t *testing.T) {
+	for _, failure := range []string{"refused", "server error", "unreadable after", "nothing new"} {
 		t.Run(failure, func(t *testing.T) {
 			fake, redmine := redmineFixture(t)
 			reads := 0
 			switch failure {
 			case "refused":
-				fake.refuse["PUT /issues/5.json"] = http.StatusUnprocessableEntity
-			case "lost":
-				// The same words posted earlier by the same account are not
-				// this post.
-				fake.lose = true
-				fake.journals = append(fake.journals, map[string]any{"id": 284, "user": map[string]any{"id": 5}, "notes": "a question"})
+				fake.before = func(w http.ResponseWriter, r *http.Request) bool {
+					if r.Method != http.MethodPut {
+						return false
+					}
+					w.WriteHeader(http.StatusUnprocessableEntity)
+					fmt.Fprint(w, `{"errors":["Due date cannot be blank"]}`)
+					return true
+				}
+			case "server error":
+				fake.refuse["PUT /issues/5.json"] = http.StatusBadGateway
 			case "unreadable after":
 				fake.before = func(w http.ResponseWriter, r *http.Request) bool {
 					if r.URL.Path == "/issues/5.json" && r.Method == http.MethodGet {
@@ -66,10 +76,21 @@ func TestRedmineCommentThatCannotBeConfirmedSaysItMayBePosted(t *testing.T) {
 					}
 					return false
 				}
+			case "nothing new":
+				// Redmine answers 204 and stores nothing when the role lacks
+				// Add notes. The same words posted earlier by the same
+				// account are not this post.
+				fake.lose = true
+				fake.journals = append(fake.journals, map[string]any{"id": 284, "user": map[string]any{"id": 5}, "notes": "a question"})
 			}
 			_, err := redmine.AddComment(context.Background(), Issue{ID: 5, Key: "5"}, "a question")
-			if err == nil || !strings.Contains(err.Error(), "may already be posted; inspect comments before retrying") {
-				t.Fatalf("an unconfirmed note was not said to be possibly posted: %v", err)
+			saved := map[string]bool{"refused": false, "server error": true, "unreadable after": true, "nothing new": false}[failure]
+			if err == nil || saved != strings.Contains(err.Error(), "may already be posted; inspect comments before retrying") ||
+				!saved && !strings.Contains(err.Error(), "comment was not saved") {
+				t.Fatalf("the failure misstates whether the note may be posted: %v", err)
+			}
+			if failure == "refused" && !strings.Contains(err.Error(), "Due date cannot be blank") {
+				t.Fatalf("Redmine's reason was lost: %v", err)
 			}
 			if puts := slices.Index(fake.called(), "PUT /issues/5.json"); puts < 0 || slices.Contains(fake.called()[puts+1:], "PUT /issues/5.json") {
 				t.Fatalf("the note was not sent once: %v", fake.called())
@@ -189,5 +210,98 @@ func TestRedmineTurnsSetStatusesAndAssigneesOnlyAsTheIssueReadsBack(t *testing.T
 		if strings.HasPrefix(call, "PUT") || strings.HasPrefix(call, "POST") || strings.HasPrefix(call, "DELETE") {
 			t.Fatalf("a change other than the issue's fields was sent: %s", call)
 		}
+	}
+}
+
+// The account the key belongs to does not change while the engine runs: it is
+// asked once, not before every note. (Fails at b997c63, which asked each time.)
+func TestRedmineAsksForItsOwnAccountOnce(t *testing.T) {
+	fake, redmine := redmineFixture(t)
+	for _, words := range []string{"first", "second"} {
+		if _, err := redmine.AddComment(context.Background(), Issue{ID: 5, Key: "5"}, words); err != nil {
+			t.Fatal(err)
+		}
+	}
+	asked := 0
+	for _, call := range fake.called() {
+		if call == "GET /users/current.json" {
+			asked++
+		}
+	}
+	if asked != 1 {
+		t.Fatalf("asked for its own account %d times: %v", asked, fake.called())
+	}
+}
+
+// Redmine keeps a note in other words than sent (a database that cannot hold
+// every character, a length limit, a plugin). The only new note by the
+// engine's account is that note; two new ones that cannot be told apart leave
+// it saved without an id, which is not to be posted again. (The first fails
+// at b997c63, which found no note and said it may be posted; the second too.)
+func TestRedmineFindsANoteRedmineKeptInOtherWords(t *testing.T) {
+	for _, others := range []int{0, 1} {
+		fake, redmine := redmineFixture(t)
+		fake.before = func(w http.ResponseWriter, r *http.Request) bool {
+			if r.Method != http.MethodPut {
+				return false
+			}
+			for range others {
+				fake.next++
+				fake.journals = append(fake.journals, map[string]any{"id": fake.next, "user": map[string]any{"id": 5}, "notes": "a role's note"})
+			}
+			fake.next++
+			fake.journals = append(fake.journals, map[string]any{"id": fake.next, "user": map[string]any{"id": 5}, "notes": "a notice ????"})
+			w.WriteHeader(http.StatusNoContent)
+			return true
+		}
+		id, err := redmine.AddComment(context.Background(), Issue{ID: 5, Key: "5"}, "a notice 😀😀😀😀")
+		want := map[int]int64{0: 901, 1: 0}[others]
+		if err != nil || id != want {
+			t.Fatalf("with %d other new notes: id=%d (%v), want %d", others, id, err, want)
+		}
+	}
+}
+
+// A role's client gives up after 30 seconds; a note it sent is still read
+// back and its id recorded for the launch, so the launch's cleanup knows it
+// and the role is not left to post it again unseen. (Fails at b997c63, whose
+// read back stopped with the role's request and recorded nothing.)
+func TestRedmineRecordsAPostWhoseRoleStoppedWaiting(t *testing.T) {
+	fake, redmine := redmineFixture(t)
+	var recorded []int64
+	scope, err := NewIssueScope(redmine, "5", true, ObserveStoredPost(func(id int64) error {
+		recorded = append(recorded, id)
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sent := false
+	fake.before = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPut {
+			sent = true
+		} else if sent && r.Method == http.MethodGet && r.URL.Path == "/issues/5.json" {
+			cancel() // the role's client gives up while the note is read back
+			time.Sleep(50 * time.Millisecond)
+		}
+		return false
+	}
+	form := url.Values{"content": {"the role's question"}}.Encode()
+	request := httptest.NewRequest(http.MethodPost, "/issues/5/comments?apiKey="+scope.Key(), strings.NewReader(form)).WithContext(ctx)
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	scope.ServeHTTP(httptest.NewRecorder(), request)
+	if len(recorded) != 1 || recorded[0] != 901 {
+		t.Fatalf("recorded %v; the note's id 901 was lost with the role's request", recorded)
+	}
+	notes := 0
+	for _, journal := range fake.journals {
+		if journal["notes"] == "the role's question" {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("the note was stored %d times", notes)
 	}
 }

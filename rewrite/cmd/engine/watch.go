@@ -289,7 +289,7 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 func intakeScope(cfg config, since time.Time) string {
 	scope := fmt.Sprintf("intake: project %d, issues created at or after %s", cfg.Intake.ProjectID, since.Format(time.RFC3339Nano))
 	if cfg.Redmine != nil {
-		scope = fmt.Sprintf("intake: Redmine project %d without its subprojects, open issues created at or after %s", cfg.Intake.ProjectID, since.Format(time.RFC3339Nano))
+		scope = fmt.Sprintf("intake: Redmine project %d without its subprojects, open issues created at or after %s by an account (not Redmine's anonymous user)", cfg.Intake.ProjectID, since.Format(time.RFC3339Nano))
 	}
 	if cfg.GitHub != nil {
 		scope = fmt.Sprintf("intake: repository %s, open issues created at or after %s carrying label %q; pull requests are excluded",

@@ -203,3 +203,41 @@ func TestRedmineScopeLeavesOnlyTheLaunchsLastPost(t *testing.T) {
 		}
 	}
 }
+
+// A private note never reaches a role, whatever the engine's account may see:
+// the role's own comments are public, and it could quote one into them.
+// (Fails at b997c63, which gave roles every note the account could see.)
+func TestRedmineScopeKeepsPrivateNotesFromRoles(t *testing.T) {
+	fake, redmine, worker, _ := redmineScopeFixture(t, true)
+	fake.journals = append(fake.journals, map[string]any{"id": 290, "user": map[string]any{"id": 7}, "notes": "an operator's private note", "private_notes": true})
+	ctx := context.Background()
+	rows, err := worker.Comments(ctx, "5", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range rows {
+		if bytes.Contains(raw, []byte("private note")) {
+			t.Fatalf("a role read a private note: %s", raw)
+		}
+	}
+	if len(rows) != 10 {
+		t.Fatalf("the role read %d notes, want the 10 public ones", len(rows))
+	}
+	if raw, err := worker.Comment(ctx, "5", 290); err == nil {
+		t.Fatalf("a role read a private note by its id: %s", raw)
+	}
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		_, err := redmine.Forward(ctx, method, "/issues/5/comments/290", nil, nil, http.StatusOK)
+		if refusal, ok := err.(*trackerError); !ok || refusal.Status != http.StatusNotFound {
+			t.Fatalf("%s of a private note: %v", method, err)
+		}
+	}
+	if slices.Contains(fake.called(), "PUT /journals/290.json") {
+		t.Fatal("a private note was emptied through the scope")
+	}
+	// The engine's own reads still see it, for an answer or a stop.
+	all, err := redmine.Comments(ctx, Issue{ID: 5, Key: "5"})
+	if err != nil || len(all) != 11 {
+		t.Fatalf("the engine read %d notes (%v)", len(all), err)
+	}
+}

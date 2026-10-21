@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -50,7 +51,14 @@ type redmineQueueFake struct {
 	reads    int
 	// listed is called with each list query; nil lists every issue.
 	listed func(query map[string][]string) []map[string]any
+	// keep, when set, changes the words of a note as Redmine keeps them.
+	keep func(string) string
 }
+
+// redmineFixtureAccounts are the accounts the fake's GET /users/<id>.json
+// finds; Redmine's anonymous user (here 4) is not one, as Redmine answers it
+// to a key that is not an administrator's.
+var redmineFixtureAccounts = map[string]string{"55": "requester", "77": "operator", "88": "someone", "99": "engine-bot"}
 
 func newRedmineQueueFake(t *testing.T, cfg config, issues ...map[string]any) *redmineQueueFake {
 	return &redmineQueueFake{t: t, base: cfg.Redmine.BaseURL, issues: issues, journals: map[string][]map[string]any{}, next: 899}
@@ -79,10 +87,18 @@ func (f *redmineQueueFake) roundTrip(r *http.Request) (*http.Response, error) {
 	switch {
 	case r.Method == "GET" && path == "/users/current.json":
 		return selectionReply(r, 200, map[string]any{"user": map[string]any{"id": 99, "login": "engine-bot"}}), nil
+	case r.Method == "GET" && strings.HasPrefix(path, "/users/"):
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/users/"), ".json")
+		login, found := redmineFixtureAccounts[id]
+		if !found {
+			return catalogReply(r, 404, ""), nil
+		}
+		number, _ := strconv.Atoi(id)
+		return selectionReply(r, 200, map[string]any{"user": map[string]any{"id": number, "login": login}}), nil
 	case r.Method == "GET" && path == "/issues.json":
 		f.reads++
 		q := r.URL.Query()
-		if q.Get("project_id") != "17" || q.Get("subproject_id") != "!*" || q.Get("status_id") != "open" || q.Get("offset") != "0" {
+		if q.Get("project_id") != "17" || q.Get("subproject_id") != "!*" || q.Get("status_id") != "open" || q.Get("sort") != "id" || q.Has("issue_id") {
 			f.t.Errorf("discovery was not scoped to the project's own open issues: %s", r.URL)
 		}
 		rows := f.issues
@@ -111,6 +127,9 @@ func (f *redmineQueueFake) roundTrip(r *http.Request) (*http.Response, error) {
 				switch name {
 				case "notes":
 					f.next++
+					if f.keep != nil {
+						value = f.keep(value.(string))
+					}
 					f.journals[key] = append(f.journals[key], map[string]any{"id": f.next, "user": map[string]any{"id": 99, "name": "Engine"},
 						"notes": value, "created_on": "2026-01-03T00:00:00Z", "private_notes": false, "details": []any{}})
 				case "status_id":
@@ -190,7 +209,10 @@ func TestRedmineWatchPassesOnlyMarkedIssuesThroughQuestionAnswerAndWork(t *testi
 	}
 	old := redmineIssueRow(14, 4)
 	old["created_on"] = "2026-01-01T00:00:00Z"
-	fake := newRedmineQueueFake(t, cfg, redmineIssueRow(11, 4), redmineIssueRow(12, 0), old)
+	// Filed without an account: Redmine's anonymous user (4 here).
+	anonymous := redmineIssueRow(15, 4)
+	anonymous["author"] = map[string]any{"id": 4, "name": "Anonymous"}
+	fake := newRedmineQueueFake(t, cfg, redmineIssueRow(11, 4), redmineIssueRow(12, 0), old, anonymous)
 	closed := false
 	fake.listed = func(q map[string][]string) []map[string]any {
 		if fmt.Sprint(q["category_id"]) != "[4]" || fmt.Sprint(q["created_on"]) != "[>=2026-01-02T00:00:00Z]" {
@@ -254,7 +276,7 @@ func TestRedmineWatchPassesOnlyMarkedIssuesThroughQuestionAnswerAndWork(t *testi
 	if err != nil || len(state.History) != 3 || state.History[1].Output != requesterAnswer || state.History[1].Speaker != "requester" {
 		t.Fatalf("lost reply: %+v %v", state, err)
 	}
-	for _, id := range []string{"12", "14"} {
+	for _, id := range []string{"12", "14", "15"} {
 		if _, err := os.Stat(filepath.Join(root, "jobs", id)); !os.IsNotExist(err) {
 			t.Fatalf("out-of-scope issue %s admitted", id)
 		}
@@ -437,5 +459,113 @@ func TestRedmineStallNoticeIsPostedOnceAndKeptWithItsNotesID(t *testing.T) {
 	}
 	if !strings.HasSuffix(records[0].Text, "（直近の失敗: failed for @⁠example）。") {
 		t.Fatalf("the failure names someone: %q", records[0].Text)
+	}
+}
+
+// Words someone else edited are the editor's; a note by an author that is not
+// a person's account is nobody's; a list that Redmine gives out of id order
+// is read in id order. Each decides whether a note is an answer or a stop.
+// (Each case fails at b997c63: it credited edits to the first author, took
+// the anonymous user's notes for the requester's, and refused the list.)
+func TestRedmineAnswersAndStopsComeOnlyFromTheirAuthors(t *testing.T) {
+	cfg := redmineConfiguration(t)
+	edited := func(user, editor int64, text string) json.RawMessage {
+		raw, _ := json.Marshal(map[string]any{"issue": map[string]any{"id": 51}, "id": 701, "user": map[string]any{"id": user},
+			"updated_by": map[string]any{"id": editor}, "notes": text})
+		return raw
+	}
+	issue := sourceIssue{ID: 51, Key: "51", Creator: tracker.Account{ID: 55}}
+	for _, test := range []struct {
+		name         string
+		row          json.RawMessage
+		stop, answer bool
+	}{
+		{"edited by a manager", edited(55, 66, "停止"), false, false},
+		{"answer edited by a manager", edited(55, 66, requesterAnswer), false, false},
+		{"edited by its author", edited(55, 55, "停止"), true, false},
+		{"edited by an operator", edited(55, 77, "停止"), true, false},
+	} {
+		rows := []json.RawMessage{test.row}
+		stopped, err := stopInstruction(cfg.source(), rows, issue, []int64{77})
+		if err != nil || (stopped != nil) != test.stop {
+			t.Errorf("%s: stop=%s err=%v", test.name, stopped, err)
+		}
+		id, _, err := answerToQuestion(cfg.source(), rows, issue, []int64{77}, 700)
+		if err != nil || (id > 0) != test.answer {
+			t.Errorf("%s: answer=%d err=%v", test.name, id, err)
+		}
+	}
+
+	// Read through the tracker: an anonymous author's 停止 on an issue whose
+	// author was anonymous, and the requester's 停止 listed before an older
+	// note.
+	fake := newRedmineQueueFake(t, cfg, redmineIssueRow(51, 0))
+	useCatalogTransport(t, fake.roundTrip)
+	fake.journals["51"] = []map[string]any{{"id": 702, "user": map[string]any{"id": 4}, "notes": "停止"}}
+	rows, err := cfg.source().Comments(context.Background(), issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anonymousIssue := sourceIssue{ID: 51, Key: "51", Creator: tracker.Account{ID: 4}}
+	if stopped, err := stopInstruction(cfg.source(), rows, anonymousIssue, nil); err != nil || stopped != nil {
+		t.Fatalf("the anonymous user's 停止 stopped an issue it filed: %s %v", stopped, err)
+	}
+	fake.journals["51"] = []map[string]any{
+		{"id": 704, "user": map[string]any{"id": 55}, "notes": "停止", "created_on": "2026-01-03T00:00:00Z"},
+		{"id": 703, "user": map[string]any{"id": 99}, "notes": "a question", "created_on": "2026-01-03T00:01:00Z"},
+	}
+	rows, err = cfg.source().Comments(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("a list out of id order was refused: %v", err)
+	}
+	if stopped, err := stopInstruction(cfg.source(), rows, issue, nil); err != nil || stopped == nil {
+		t.Fatalf("the requester's 停止 was not read: %v", err)
+	}
+}
+
+// Redmine keeps a notice in other words than sent; the notice is the only new
+// note by the engine's account, and it is posted once however many ticks pass.
+// (Fails at b997c63, which found no note in the sent words and posted the
+// notice again on every tick.)
+func TestRedmineNoticeIsPostedOnceWhenRedmineKeepsOtherWords(t *testing.T) {
+	cfg := redmineConfiguration(t)
+	start := time.Now().UTC().Add(-3 * time.Hour)
+	root, directory := noticeJob(t, chain.State{History: []chain.Result{
+		{Role: "implement", Speaker: "worker", Output: "previous work", StartedAt: start, FinishedAt: start.Add(time.Minute)},
+		{Role: "router", Speaker: "runtime", Error: "failed 😀", StartedAt: start.Add(time.Hour), FinishedAt: start.Add(time.Hour)},
+	}})
+	queueRanSince(t, root, cfg, start)
+	fake := newRedmineQueueFake(t, cfg, redmineIssueRow(51, 0))
+	// A database that cannot hold four-byte characters keeps them as ?.
+	fake.keep = func(text string) string { return strings.ReplaceAll(text, "😀", "?") }
+	useCatalogTransport(t, fake.roundTrip)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	n := requestNotices(cfg, sourceIssue{ID: 51, Key: "51"}, directory)
+	if err := noteStall(ctx, cfg, n, directory, true, start); err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		if err := n.flush(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records := readNotices(t, directory).Notices
+	if len(fake.puts) != 1 || len(records) != 1 || records[0].CommentID != 900 || records[0].PostedAt == nil {
+		t.Fatalf("notice posted %d times: %q %+v", len(fake.puts), fake.puts, records)
+	}
+}
+
+// The word joiners go in before the cut: the detail stays within the bound
+// the other trackers keep. (Fails at b997c63, which added them after the cut.)
+func TestRedmineNoticeDetailStaysWithinItsBound(t *testing.T) {
+	failure := strings.Repeat("@x ", 150)
+	redmine := []rune(noticeDetail(redmineConfiguration(t), failure))
+	backlog := []rune(noticeDetail(watchConfiguration(t), failure))
+	if len(redmine) > len(backlog) {
+		t.Fatalf("the Redmine detail runs to %d code points, past the bound the others keep (%d)", len(redmine), len(backlog))
+	}
+	if strings.Contains(string(redmine), "@x") {
+		t.Fatal("an @ before a name was left as it was")
 	}
 }
