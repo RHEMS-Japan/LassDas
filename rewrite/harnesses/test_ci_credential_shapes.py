@@ -6,6 +6,7 @@ file too, and it has no exceptions.
 """
 import os
 from pathlib import Path
+from fixture_git import fixture_git_environment
 import re
 import shutil
 import subprocess
@@ -77,12 +78,13 @@ PASSED = (
 def environment(**settings):
     """No personal configuration and no guessed identity, as the other suites
     run Git, and nothing of a CI run (GITHUB_REF, the range) unless given."""
-    return dict({"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
+    values = dict({"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
                  "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
                  "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly",
                  "GIT_CONFIG_VALUE_0": "true", "GIT_AUTHOR_NAME": "Fixture",
                  "GIT_AUTHOR_EMAIL": "fixture@example.invalid", "GIT_COMMITTER_NAME": "Fixture",
                  "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}, **settings)
+    return fixture_git_environment(values)
 
 
 @unittest.skipUnless(SCRIPT.is_file() and shutil.which("git"), "requires the repository's CI scripts and Git")

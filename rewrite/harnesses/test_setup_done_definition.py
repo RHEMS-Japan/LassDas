@@ -14,6 +14,8 @@ retrying deletion while a detached writer can still recreate files.
 import json
 import os
 from pathlib import Path
+from fixture_git import fixture_git_environment
+import re
 import shlex
 import subprocess
 import sys
@@ -151,13 +153,12 @@ class DefinitionOfDoneCheckTests(unittest.TestCase):
         git = ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
                "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
         for command in (git + ["init", "--quiet", str(origin)],
-                        git + ["-C", str(origin), "config", "maintenance.autoDetach", "false"],
                         git + ["-C", str(origin), "add", "."],
                         git + ["-C", str(origin), "commit", "--quiet", "-m", "fixture"],
                         git + ["init", "--quiet", "--bare", str(self.mirror)],
-                        git + ["-C", str(self.mirror), "config", "maintenance.autoDetach", "false"],
                         git + ["-C", str(origin), "push", "--quiet", str(self.mirror), "HEAD:refs/heads/integration"]):
-            subprocess.run(command, check=True, capture_output=True, timeout=30)
+            subprocess.run(command, check=True, capture_output=True, timeout=30,
+                           env=fixture_git_environment(os.environ))
         self.record = root / "launch.json"
         self.launcher = root / "launcher.py"
         self.launcher.write_text(LAUNCHER % str(self.record))
@@ -180,7 +181,8 @@ class DefinitionOfDoneCheckTests(unittest.TestCase):
         if self.record.exists():
             self.record.unlink()
         result = subprocess.run(["/bin/sh", "-s"], input=script,
-                                env=dict(os.environ, **(environment or {}), COMMAND=command, BREAK=breaking),
+                                env=fixture_git_environment(dict(os.environ, **(environment or {}),
+                                                                 COMMAND=command, BREAK=breaking)),
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(list(self.scratch.iterdir()), [], "the check left its copy behind")
         source = subprocess.run(["git", "--git-dir", str(self.mirror), "show", "integration:src/app.py"],
@@ -252,7 +254,30 @@ class DefinitionOfDoneCheckTests(unittest.TestCase):
 
 
 class FixtureCleanupTests(unittest.TestCase):
+    def test_old_git_skips_only_the_trace_check(self):
+        from test_git_workspace import WorkspaceTests
+        real_run = subprocess.run
+
+        def old_version(command, *arguments, **options):
+            if command == ["git", "--version"]:
+                return subprocess.CompletedProcess(command, 0, "git version 2.46.4\n", "")
+            return real_run(command, *arguments, **options)
+
+        result = unittest.TestResult()
+        cases = [FixtureCleanupTests("test_git_maintenance_finishes_before_fixture_cleanup"),
+                 WorkspaceTests("test_template_free_workspace_finishes_maintenance_before_cleanup"),
+                 DefinitionOfDoneCheckTests("test_an_unbroken_copy_passes")]
+        with patch("subprocess.run", side_effect=old_version):
+            unittest.TestSuite(cases).run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        self.assertEqual(result.testsRun, 3)
+        self.assertEqual(len(result.skipped), 2)
+
     def test_git_maintenance_finishes_before_fixture_cleanup(self):
+        version = subprocess.run(["git", "--version"], check=True, capture_output=True, text=True, timeout=10)
+        major, minor = re.search(r"git version (\d+)\.(\d+)", version.stdout).groups()
+        if (int(major), int(minor)) < (2, 47):
+            self.skipTest("foreground maintenance trace requires Git 2.47 or newer")
         with tempfile.TemporaryDirectory(prefix="done-trace-") as temporary:
             trace = Path(temporary) / "events.json"
             config = Path(temporary) / "gitconfig"

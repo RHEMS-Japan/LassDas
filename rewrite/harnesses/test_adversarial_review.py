@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+from fixture_git import fixture_git_environment
 import shutil
 import subprocess
 import sys
@@ -23,9 +24,10 @@ IDENTITY = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid
 
 
 def git_environment():
-    return {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
+    environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly", "GIT_CONFIG_VALUE_0": "true"}
+    return fixture_git_environment(environment)
 
 
 class ModelStandIn:
