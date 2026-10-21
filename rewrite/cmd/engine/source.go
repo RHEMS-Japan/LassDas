@@ -10,6 +10,9 @@ func (cfg config) source() tracker.Tracker {
 	if cfg.GitHub != nil {
 		return *cfg.GitHub
 	}
+	if cfg.Redmine != nil {
+		return cfg.redmineProject()
+	}
 	project := tracker.BacklogProject{Client: cfg.Backlog}
 	if cfg.Intake == nil {
 		return project

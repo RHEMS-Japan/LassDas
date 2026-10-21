@@ -52,7 +52,7 @@ func gatewayExample(t *testing.T) config {
 }
 
 func TestExamplesAskForObservedResultsSeparateFromTestsAndLiveChecks(t *testing.T) {
-	for _, name := range []string{"operator.json", "operator-gateway.json", "operator-github.json", "operator-stages.json", "operator-github-stages.json"} {
+	for _, name := range []string{"operator.json", "operator-gateway.json", "operator-github.json", "operator-stages.json", "operator-github-stages.json", "operator-redmine-stages.json"} {
 		cfg := loadExample(t, "../../examples/"+name)
 		for _, role := range cfg.Roles {
 			if !slices.Contains([]string{"work", "implement", "report", "draft_report"}, role.Name) {
@@ -73,7 +73,7 @@ func TestExamplesAskForObservedResultsSeparateFromTestsAndLiveChecks(t *testing.
 // operator's guidance names it, and has the report open with each item it
 // applies, checked or not, without calling the request finished while one is
 // not. The engine reads no definition; these sentences are the only place the
-// shipped configuration asks for one, so this holds all five examples to them.
+// shipped configuration asks for one, so this holds all six examples to them.
 func TestExamplesReadTheDefinitionOfDoneAndOpenTheReportWithWhatWasNotChecked(t *testing.T) {
 	work := []string{"definition of done at the location the shared instructions name",
 		"say for each item whether you checked it", "only when the shared instructions allow additions",
@@ -90,7 +90,7 @@ func TestExamplesReadTheDefinitionOfDoneAndOpenTheReportWithWhatWasNotChecked(t 
 		"confirm_change": {"definition of done", "how a person operates the product, what a screen shows or does, or the public API",
 			"no reason to ask before delivery", "the report says it was not checked"},
 	}
-	for _, name := range []string{"operator.json", "operator-gateway.json", "operator-github.json", "operator-stages.json", "operator-github-stages.json"} {
+	for _, name := range []string{"operator.json", "operator-gateway.json", "operator-github.json", "operator-stages.json", "operator-github-stages.json", "operator-redmine-stages.json"} {
 		cfg := loadExample(t, "../../examples/"+name)
 		first, _, _ := strings.Cut(cfg.Instructions, ". ")
 		if !strings.HasPrefix(first, "Operator setup is incomplete:") || !strings.Contains(first, "where the project's definition of done is written and whether roles may add to it") {
@@ -647,7 +647,7 @@ func exampleIntakeToArtifact(t *testing.T, path string) {
 // Every shipped example's entrance actions carry the standard in the same
 // words; a copy that drifted would tell its decision something different.
 func TestEveryExampleAsksAnswerableQuestionsTogetherAndRestatesTheGoal(t *testing.T) {
-	for _, path := range []string{"../../examples/operator.json", "../../examples/operator-gateway.json", "../../examples/operator-stages.json", "../../examples/operator-github.json", "../../examples/operator-github-stages.json"} {
+	for _, path := range []string{"../../examples/operator.json", "../../examples/operator-gateway.json", "../../examples/operator-stages.json", "../../examples/operator-github.json", "../../examples/operator-github-stages.json", "../../examples/operator-redmine-stages.json"} {
 		cfg := loadExample(t, path)
 		for _, role := range cfg.Roles {
 			var phrases []string
@@ -675,7 +675,7 @@ func TestEveryExampleAsksAnswerableQuestionsTogetherAndRestatesTheGoal(t *testin
 }
 
 func TestEveryExampleCarriesTheEntranceStandard(t *testing.T) {
-	for _, path := range []string{"../../examples/operator.json", "../../examples/operator-gateway.json", "../../examples/operator-github.json", "../../examples/operator-stages.json", "../../examples/operator-github-stages.json"} {
+	for _, path := range []string{"../../examples/operator.json", "../../examples/operator-gateway.json", "../../examples/operator-github.json", "../../examples/operator-stages.json", "../../examples/operator-github-stages.json", "../../examples/operator-redmine-stages.json"} {
 		cfg := loadExample(t, path)
 		roles := map[string]chain.Role{}
 		for _, role := range cfg.Roles {

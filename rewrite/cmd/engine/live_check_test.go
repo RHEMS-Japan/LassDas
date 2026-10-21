@@ -531,7 +531,7 @@ func documentedLiveCheck(t *testing.T) chain.Process {
 // nothing in the checkout, starts no shell and is launched like the tests.
 func TestTheDocumentedLiveCheckJoinsTheShippedVerifyStage(t *testing.T) {
 	documented := documentedLiveCheck(t)
-	for _, name := range []string{"operator-stages", "operator-github-stages"} {
+	for _, name := range []string{"operator-stages", "operator-github-stages", "operator-redmine-stages"} {
 		t.Run(name, func(t *testing.T) {
 			data, err := os.ReadFile("../../examples/" + name + ".json")
 			if err != nil {

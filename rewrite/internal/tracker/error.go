@@ -14,7 +14,7 @@ type trackerError struct {
 }
 
 func (e *trackerError) Error() string {
-	// Both adapters redact before storing the body. Keep it whole for refusal
+	// Every adapter redacts before storing the body. Keep it whole for refusal
 	// handling, but do not put the entire response into logs or notices.
 	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, clip(e.Body, 200))
 }

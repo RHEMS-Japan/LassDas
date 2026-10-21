@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -193,7 +194,7 @@ func (q questionProcesses) posted(ctx context.Context) (chain.QuestionObservatio
 			// Once a notice has its id, identical words in another post do
 			// not make it that notice. An own POST receipt also resolves that.
 			unconfirmed := record.CommentID == 0 && !record.Predates
-			notice = notice || comment.ID == record.CommentID || unconfirmed && !knownPost && comment.Body == record.Text
+			notice = notice || slices.Contains(record.ids(), comment.ID) || unconfirmed && !knownPost && comment.Body == record.Text
 		}
 		if !notice {
 			candidates = append(candidates, comment)
@@ -260,7 +261,7 @@ func (q questionProcesses) reply(ctx context.Context, after int64) (string, erro
 		return "", err
 	}
 	for _, record := range log.Notices {
-		notices = append(notices, record.CommentID)
+		notices = append(notices, record.ids()...)
 		if record.CommentID == 0 && !record.Predates {
 			for _, raw := range rows {
 				comment, readErr := source.ReadComment(raw, issue)
@@ -387,7 +388,7 @@ func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	}
 	var notices []int64
 	for _, record := range log.Notices {
-		notices = append(notices, record.CommentID)
+		notices = append(notices, record.ids()...)
 	}
 	controls, err := pauseReplyIDs(source, directory, issue, cfg.Intake.StopUserIDs, rows)
 	if err != nil {

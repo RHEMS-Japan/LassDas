@@ -92,7 +92,7 @@ there.
 ### tracker / 課題管理
 
 The issue tracking service the engine takes requests from and posts comments
-to: Backlog or GitHub Issues, one of them per configuration.
+to: Backlog, GitHub Issues or Redmine, one of them per configuration.
 
 - Used in: README.md:175, START.md:55
 - Avoid: `トラッカー`

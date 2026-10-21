@@ -288,6 +288,9 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 // engine understood it that way before the first issue is accepted.
 func intakeScope(cfg config, since time.Time) string {
 	scope := fmt.Sprintf("intake: project %d, issues created at or after %s", cfg.Intake.ProjectID, since.Format(time.RFC3339Nano))
+	if cfg.Redmine != nil {
+		scope = fmt.Sprintf("intake: Redmine project %d without its subprojects, open issues created at or after %s by an account (not Redmine's anonymous user)", cfg.Intake.ProjectID, since.Format(time.RFC3339Nano))
+	}
 	if cfg.GitHub != nil {
 		scope = fmt.Sprintf("intake: repository %s, open issues created at or after %s carrying label %q; pull requests are excluded",
 			cfg.GitHub.Repository, since.Format(time.RFC3339Nano), cfg.GitHub.IntakeLabel)
@@ -719,6 +722,13 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	source := cfg.source()
+	// A tracker that leaves an issue out of the intake for a reason the
+	// operator should read says so in the engine's log.
+	if observed, ok := source.(interface {
+		ObservedBy(func(string)) tracker.Tracker
+	}); ok {
+		source = observed.ObservedBy(observe)
+	}
 	for ctx.Err() == nil {
 		rows, err := source.Issues(ctx)
 		changed := false

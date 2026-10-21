@@ -23,7 +23,7 @@ for guide in START RUNTIME README OPERATING WORKSPACE-RETENTION; do
   cp "$source_dir/$guide.md" "$output_dir/$guide.md"
 done
 cp "$source_dir/THIRD-PARTY-NOTICES.txt" "$output_dir/THIRD-PARTY-NOTICES.txt"
-for example in operator operator-gateway operator-stages operator-github operator-github-stages; do
+for example in operator operator-gateway operator-stages operator-github operator-github-stages operator-redmine-stages; do
   cp "$source_dir/examples/$example.json" "$output_dir/examples/$example.json"
 done
 printf '%s\n' "$output_dir"

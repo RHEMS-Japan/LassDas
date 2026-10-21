@@ -16,6 +16,7 @@ Kubernetes に導入する場合は、[設定を写す前の a / b / c の選択
 - `examples/operator-github.json`: 同じ役・進み方で、受付と報告先を GitHub Issues にした例。
 - `examples/operator-stages.json`: 順番を決めた工程を Backlog で受け付ける例。Kubernetes への導入で使います。
 - `examples/operator-github-stages.json`: 同じ順次工程・権限・質問と知識の追記を保持し、GitHub Issues で受け付ける例。Kubernetes で GitHub を使う場合はこちらから始めます。
+- `examples/operator-redmine-stages.json`: `operator-stages.json` の課題管理だけを Redmine の 1 プロジェクトに替えた例。Kubernetes で Redmine を使う場合はこちらから始めます。
 - `examples/operator-gateway.json`: モデルの接続を gateway 経由にした例。
 - `RUNTIME.md`: SDK、隔離、ネットワーク、監督機能の前提と未検証事項。
 - `OPERATING.md`: 質問への回答、コメント編集、分割回答、代理回答、停止の扱い。
@@ -52,10 +53,10 @@ SDKやコンテナimageはダウンロード・同梱しません。macOS用バ�
 | `/etc/ticket-automation/operator.json` | 実設定。役割には公開しない |
 | `/var/lib/ticket-automation/queue` | 再起動後にも残る履歴と作業場所。親ディレクトリを役割に公開しない |
 
-接続した役からモデルが次を選ぶ例は、Backlog なら `examples/operator.json`、GitHub Issues なら `examples/operator-github.json` です。Kubernetes の順次工程は、Backlog なら `examples/operator-stages.json`、GitHub Issues なら `examples/operator-github-stages.json` から実設定を作ります。[SETUP.md の設定手順](../deploy/ticket-engine/SETUP.md#4-writing-the-operator-configuration) を使い、受付 repo と納品先をそれぞれ設定してください。課題管理を選ぶために接続型と順次工程を入れ替える必要はありません。未編集の例は受付を開始できません。
+接続した役からモデルが次を選ぶ例は、Backlog なら `examples/operator.json`、GitHub Issues なら `examples/operator-github.json` です。Kubernetes の順次工程は、Backlog なら `examples/operator-stages.json`、GitHub Issues なら `examples/operator-github-stages.json`、Redmine なら `examples/operator-redmine-stages.json` から実設定を作ります (Redmine の例は順次工程だけです)。[SETUP.md の設定手順](../deploy/ticket-engine/SETUP.md#4-writing-the-operator-configuration) を使い、受付 repo と納品先をそれぞれ設定してください。課題管理を選ぶために接続型と順次工程を入れ替える必要はありません。未編集の例は受付を開始できません。
 
-1. Backlog は `backlog.base_url`、GitHub は `github.repository` (owner/repository) と `github.intake_label`。github.com では `github.api_url` を削除します (既定 `https://api.github.com`)。Enterprise Server では HTTPS の API base (`https://tracker.example/api/v3` の形) に置換します。github.com に `/api/v3` を付けないでください。
-2. `intake.created_since`: 受付開始日時（RFC3339、境界を含む）。最初は遠い将来にして閉じ、設定確認後に開きます。Backlog だけは `intake.project_id` も必要です。GitHub の例では project_id / category_ids / category_on_accept / statuses を足さず、backlog も同居させません。
+1. Backlog は `backlog.base_url`、Redmine は `redmine.base_url` (チケットの画面が `/issues/<番号>` になる HTTPS のアドレス)、GitHub は `github.repository` (owner/repository) と `github.intake_label`。github.com では `github.api_url` を削除します (既定 `https://api.github.com`)。Enterprise Server では HTTPS の API base (`https://tracker.example/api/v3` の形) に置換します。github.com に `/api/v3` を付けないでください。
+2. `intake.created_since`: 受付開始日時（RFC3339、境界を含む）。最初は遠い将来にして閉じ、設定確認後に開きます。Backlog と Redmine は `intake.project_id` も必要です。GitHub の例では project_id / category_ids / category_on_accept / statuses を足さず、backlog も同居させません。Redmine では category_on_accept を足さず、backlog・github も同居させません。
 3. `intake.min_model_credit`: 共有しているモデル鍵の残り (米ドル) が、これを下回ったら作業を止める値。未設定か `0` なら残りを問い合わせません。`0` 以外にすると、`router.decision.key_env` の鍵の残りを、依頼の開始前と実行中の毎回確認します。問い合わせ先は `intake.model_credit_url` (既定は OpenRouter の鍵照会 URL、HTTPS のみ)。gateway を指すこともできます。
 4. `intake.stall_notice_minutes`: 実行中の依頼で工程が 1 つも完了しない時間がこれを超えたら、依頼者へ 1 回知らせる分数。未設定は 90 分、`0` で知らせません。
 5. 各processの `TASK_REPOSITORY`: 承認済みのソース。私有repoの認証は実行環境で準備します。再開時は既存の作業を上書きcloneしません。
@@ -64,6 +65,7 @@ SDKやコンテナimageはダウンロード・同梱しません。macOS用バ�
 
 GitHub は受付ラベルと工程ラベルを先に作り、`automation` が既存の用途に使われていないか確認します。重なるなら別名を選びます。そのラベルを付けられる人は、日時条件内の open issue を本体へ渡せます。PR は対象外です。`intake.issue_ids` で絞る場合は issue の番号を指定します。
 課題管理用の PAT は専用アカウント・受付 repo 限定で Issues の read/write を持たせます。設定の `github.key_env` は `TRACKER_API_KEY` のような**変数名だけ**です。納品用の資格情報とは別です。権限の根拠と未確認事項は [SETUP.md](../deploy/ticket-engine/SETUP.md#github-issues) にあります。
+Redmine は 5.0 以上で REST API を有効にし、本体専用のアカウントを受付プロジェクトのメンバーにします。そのロールには View issues・Add notes・Edit issues・Edit own notes の権限と、`intake.statuses` で使う状態の間を移れるワークフローが要ります。足りないと Redmine は変更をせずに成功を返すので、本体は課題を読み直して確かめ、ログに書いて後でやり直します。`redmine.key_env` も**変数名だけ**です。権限の根拠は [SETUP.md](../deploy/ticket-engine/SETUP.md#redmine) にあります。
 `REPLACE_WITH_`・`example.invalid`・`<...>` をすべて置換し、`bin/ticket-engine --config <実設定> --check` で受付範囲を読みます。これは通信も queue 作成もせず、PAT の権限や外部コマンドの動作までは確認しません。トラッカーや受付 repo を替える場合は新しい queue を使います。
 
 `--write .` は作業場所全体の書込許可ですが、checkout 自身の管理情報 `.git` は `.git` を名指しで許可しない限り読み取り専用のまま残ります (役が hook や設定を仕込み、鍵を持つ納品プロセスに実行させる経路を塞ぐため。納品プロセスだけが `.git` を名指しで受け取ります)。
@@ -113,7 +115,7 @@ exec /opt/ticket-automation/bundle/bin/ticket-engine \
 
 回答を編集する場合や代理で答える場合は、[コメントの運用手順](OPERATING.md)を先に読んでください。最初の回答 1 件だけが履歴に入り、後からの編集で自動的に差し替わるわけではありません。
 
-以下の category / statuses / 実績時間の設定は Backlog 専用です。GitHub では `github.labels` で工程を示し、担当者の切替は行いますが実績時間は送りません。GitHub issue を閉じたり受付ラベルを外したりしても、受付済みの依頼は止まりません。停止は同じ `停止` コメントです。
+以下の category / statuses / 実績時間の設定は Backlog 用です。Redmine では statuses と担当者の切替が同じように使えますが、category_on_accept は使えず、実績時間は送りません。GitHub では `github.labels` で工程を示し、担当者の切替は行いますが実績時間は送りません。GitHub issue を閉じたり受付ラベルを外したりしても、受付済みの依頼は止まりません。停止は同じ `停止` コメントです。
 GitHub が待ち時間を返している間は要求を送りません。停止確認の読み取りが 3 回続けて失敗すると、動いている役のプロセスも止め、読めるようになってから同じ依頼を起動し直します。プロセスを動かしたまま待つ仕組みではありません。
 
 - 通常の再起動では同じ設定と**同じqueue**を使います。新しいqueueに替えると重複受付になり得ます。

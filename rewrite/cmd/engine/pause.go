@@ -359,7 +359,7 @@ func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			}
 			var excluded []int64
 			for _, posted := range log.Notices {
-				excluded = append(excluded, posted.CommentID)
+				excluded = append(excluded, posted.ids()...)
 			}
 			raw, err := resumeInstruction(source, rows, issue, cfg.Intake.StopUserIDs, pause.NoticeID, excluded)
 			if err != nil || raw == nil {

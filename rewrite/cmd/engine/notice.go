@@ -175,11 +175,31 @@ type noticeRecord struct {
 	// with its new count. A tracker that cannot edit, or a comment that is not
 	// the engine's or no longer reads as recorded, gets a new comment.
 	Edits int64 `json:"edits,omitempty"`
+	// Also are the other new comments by the engine's own account that the
+	// tracker could not tell this notice apart from (Redmine, when it kept
+	// the words otherwise and another note by the account landed with it).
+	// They are held for the engine's own, as CommentID is: none of them is
+	// anyone's answer or instruction. A notice with any is never rewritten,
+	// since CommentID itself may be another's.
+	Also []int64 `json:"also_comment_ids,omitempty"`
+}
+
+// ids are the comments a notice was confirmed as: its own and those the
+// tracker could not tell it apart from.
+func (r noticeRecord) ids() []int64 {
+	return append([]int64{r.CommentID}, r.Also...)
+}
+
+// commentPoster is a tracker that can say which other new comments by its own
+// account a post could not be told apart from.
+type commentPoster interface {
+	PostComment(ctx context.Context, issue tracker.Issue, text string) (int64, []int64, error)
 }
 
 // commentEditor is a tracker that can replace the words of a comment its own
-// account posted. Backlog can; on any other tracker a notice that would
-// rewrite one is posted as a new comment.
+// account posted. Backlog can, and so can Redmine 5.0 and later; on a tracker
+// that cannot, or when the edit is refused, a notice that would rewrite one is
+// posted as a new comment.
 type commentEditor interface {
 	EditComment(ctx context.Context, issue tracker.Issue, id int64, text string) error
 }
@@ -602,7 +622,14 @@ func (n notices) settle(ctx context.Context, log *noticeLog, i int, fresh bool) 
 			return n.confirm(log, i, id)
 		}
 	}
-	stored, err := n.source.AddComment(ctx, n.issue, record.Text)
+	var stored int64
+	var also []int64
+	var err error
+	if poster, ok := n.source.(commentPoster); ok {
+		stored, also, err = poster.PostComment(ctx, n.issue, record.Text)
+	} else {
+		stored, err = n.source.AddComment(ctx, n.issue, record.Text)
+	}
 	if err != nil {
 		id, readErr := n.postedAfter(ctx, record.Text, after)
 		if readErr != nil || id == 0 {
@@ -610,6 +637,7 @@ func (n notices) settle(ctx context.Context, log *noticeLog, i int, fresh bool) 
 		}
 		return n.confirm(log, i, id)
 	}
+	log.Notices[i].Also = also
 	return n.confirm(log, i, stored)
 }
 
@@ -998,7 +1026,14 @@ func noticeDetail(cfg config, text string) string {
 		line = strings.ReplaceAll(line, value, "[credential]")
 		line = strings.ReplaceAll(line, url.QueryEscape(value), "[credential]")
 	}
-	line = textclip.Clip(strings.TrimSpace(line), 200)
+	line = strings.TrimSpace(line)
+	if cfg.Redmine != nil {
+		// Redmine 5.0 and later notifies the account an @ names in a note,
+		// inside inline code too. A word joiner after the @ names nobody. It
+		// goes in before the cut, so the detail stays within its bound.
+		line = strings.ReplaceAll(line, "@", "@\u2060")
+	}
+	line = textclip.Clip(line, 200)
 	if cfg.GitHub == nil || line == "" {
 		return line
 	}

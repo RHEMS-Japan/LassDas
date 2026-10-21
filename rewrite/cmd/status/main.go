@@ -97,6 +97,10 @@ type server struct {
 	password     string
 	location     *time.Location
 	templates    *template.Template
+
+	// redmineBase is the configured Redmine's address for one issue's page,
+	// up to the id; empty without a usable redmine.base_url.
+	redmineBase string
 }
 
 func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error) {
@@ -114,6 +118,11 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 		if backlog, ok := s.config["backlog"].(map[string]any); ok {
 			if base, ok := backlog["base_url"].(string); ok {
 				s.issueBase = issueLinkBase(base)
+			}
+		}
+		if redmine, ok := s.config["redmine"].(map[string]any); ok {
+			if base, ok := redmine["base_url"].(string); ok {
+				s.redmineBase = redmineLinkBase(base)
 			}
 		}
 	}
@@ -196,6 +205,32 @@ func (s *server) githubPageAllowed(page string) bool {
 	}
 	address, err := url.Parse(page)
 	return err == nil && address.Scheme == "https" && address.User == nil && strings.EqualFold(address.Host, host)
+}
+
+// redmineIssue says whether a record is a Redmine issue's: one with a
+// positive id, a subject and a project, and no Backlog issue key. It gives
+// the id.
+func redmineIssue(issue map[string]any) (string, bool) {
+	value, isNumber := issue["id"].(float64)
+	_, isSubject := issue["subject"].(string)
+	_, isProject := issue["project"].(map[string]any)
+	_, isBacklog := issue["issueKey"]
+	if !isNumber || value <= 0 || value != float64(int64(value)) || !isSubject || !isProject || isBacklog {
+		return "", false
+	}
+	return strconv.FormatInt(int64(value), 10), true
+}
+
+// redmineLinkBase turns the configured Redmine address into the prefix of one
+// issue's page, or empty for an address that is not an HTTPS one without
+// credentials, query or fragment: a stored record never chooses where its
+// link goes.
+func redmineLinkBase(base string) string {
+	address, err := url.Parse(base)
+	if err != nil || address.Scheme != "https" || address.Hostname() == "" || address.User != nil || address.RawQuery != "" || address.ForceQuery || address.Fragment != "" || strings.Contains(base, "#") {
+		return ""
+	}
+	return strings.TrimRight(base, "/") + "/issues/"
 }
 
 // issueLinkBase turns a tracker API base such as https://space.example/api/v2
@@ -301,6 +336,9 @@ type job struct {
 	// GitHub says the issue is a GitHub issue, so the page names GitHub
 	// where it says where the requester wrote.
 	GitHub bool
+
+	// Redmine says the same of a Redmine issue.
+	Redmine bool
 }
 
 // stageMark is one stage on a card: passed, current or ahead.
@@ -711,6 +749,18 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 			}
 			if s.githubPageAllowed(page) {
 				j.Link = page
+			}
+		} else if id, redmine := redmineIssue(issue); redmine {
+			// A Redmine issue is named by its id, as Redmine names it, and
+			// opened under the configured address only.
+			j.Redmine = true
+			j.Key = "#" + id
+			j.Title, j.Created = stringOf(issue["subject"]), stringOf(issue["created_on"])
+			if user, ok := issue["author"].(map[string]any); ok {
+				j.Requester = stringOf(user["name"])
+			}
+			if s.redmineBase != "" {
+				j.Link = s.redmineBase + id
 			}
 		} else {
 			j.Key, j.Title, j.Created = stringOf(issue["issueKey"]), stringOf(issue["summary"]), stringOf(issue["created"])
@@ -1959,7 +2009,7 @@ var japanese = map[string]string{
 	"returned": "完了", "failed": "失敗", "could not start": "起動できず", "interrupted": "中断", "answer from the requester": "依頼者の返答", "note by the runtime": "本体の記録",
 	"why it ended so": "理由", "what the worker was handed": "担当 (LLM) に渡したもの", "what the worker wrote": "担当がしたこと・書いたこと", "what the runtime observed": "本体が観察したこと",
 	"written by": "書いた者", "the requester": "依頼者", "the runtime": "本体", "the worker": "担当", "the command": "コマンド", "the operator's settings": "運用者の設定",
-	"your ticket text, as written at the tracker (shown above as the request)": "あなたが Backlog に書いた本文 (上の「依頼の原文」)", "your issue text, as written on GitHub (shown above as the request)": "あなたが GitHub の issue に書いた本文 (上の「依頼の原文」)", "the runtime's own words about this stage and the role": "本体が添えた説明 (工程と役)",
+	"your ticket text, as written at the tracker (shown above as the request)": "あなたが Backlog に書いた本文 (上の「依頼の原文」)", "your issue text, as written on GitHub (shown above as the request)": "あなたが GitHub の issue に書いた本文 (上の「依頼の原文」)", "your issue text, as written in Redmine (shown above as the request)": "あなたが Redmine のチケットに書いた本文 (上の「依頼の原文」)", "the runtime's own words about this stage and the role": "本体が添えた説明 (工程と役)",
 	"the record up to this launch, as shown on this page": "それまでの記録 (このページの前の起動)", "no output: the process could not start": "出力なし: 起動できず", "the worker's own stderr": "担当の stderr",
 	"the process ended with an error": "プロセスが失敗で終わった",
 	"no output":                       "出力なし", "what the requester wrote": "依頼者が書いたこと",

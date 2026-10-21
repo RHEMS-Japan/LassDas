@@ -88,6 +88,8 @@ type Tracker interface {
 	CommentText(raw json.RawMessage) (int64, string, error)
 	// AddComment posts the text once and returns the new comment's id. A
 	// failure may still have posted it: read the comments before trying again.
+	// An id of zero without an error says the tracker saved the comment but
+	// its id could not be read back; it is not to be posted again.
 	AddComment(ctx context.Context, issue Issue, text string) (int64, error)
 	// Myself is the account the credential belongs to.
 	Myself(ctx context.Context) (Account, error)
