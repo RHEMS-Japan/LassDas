@@ -711,7 +711,7 @@ func rerunNoticeText(cfg config, directory, role string, before []chain.Result, 
 // runtime recorded of it and never from what a role wrote.
 func endingText(cfg config, ending chain.Ending) string {
 	if ending.ApprovalFailure != "" {
-		return japaneseStage(ending.Role) + ": " + chain.ApprovalFailureText(ending.ApprovalFailure) + "。"
+		return japaneseStage(ending.Role) + ": " + ending.Error + "。"
 	}
 	name := japaneseStage(ending.Role)
 	if stage, known := orderedStage(cfg, ending.Role); known && stage.Kind == chain.CommandStage && !ending.Interrupted {

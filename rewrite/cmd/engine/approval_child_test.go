@@ -428,13 +428,39 @@ func TestApprovalChildConsumptionConditions(t *testing.T) {
 }
 func TestApprovalFailureNoticeAndQuestionIsolation(t *testing.T) {
 	cfg := approvalConfiguration()
-	text := endingText(cfg, chain.Ending{Role: "c", ApprovalFailure: "post_fence"})
+	text := endingText(cfg, chain.Ending{Role: "c", ApprovalFailure: "post_fence", Error: chain.ApprovalFailureText("post_fence")})
 	if strings.Contains(text, "通りません") || !strings.Contains(text, "post_fence") {
 		t.Fatal(text)
 	}
 	state := chain.State{Waiting: true, AwaitingApproval: &chain.AwaitingApproval{Stage: "c"}}
 	if resume, answered, err := resumeWaitingRequest(context.Background(), cfg, sourceIssue{}, t.TempDir(), "", state, time.Millisecond); err != nil || resume || answered {
 		t.Fatal("question released approval")
+	}
+}
+
+func TestApprovalFailureEndingTextPreservesRecordedError(t *testing.T) {
+	for _, tc := range []struct{ name, text string }{
+		{"receipt_credential", "起動した・結果は読めない (効果不明): bundle_credential"},
+		{"bundle_credential", "承認条件が成立しなかった: bundle_credential"},
+		{"receipt_unreadable", "起動した・結果は読めない (効果不明): receipt_unreadable"},
+		{"post_fence", "承認条件が成立しなかった: post_fence"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := approvalConfiguration()
+			state := chain.State{Workflow: cfg.Workflow, History: []chain.Result{{Role: "c", Speaker: "p"}, {Role: "c", Speaker: "runtime"}, {Role: "c", Speaker: "runtime", Error: tc.text}}}
+			ending, ok := state.LastEnding()
+			if !ok {
+				t.Fatal("missing ending")
+			}
+			want := "c: " + tc.text + "。"
+			if text := endingText(cfg, ending); text != want {
+				t.Fatalf("ending = %q, want %q", text, want)
+			}
+			text, _ := rerunNoticeText(cfg, t.TempDir(), "a", state.History, "test-model")
+			if !strings.HasPrefix(text, want) {
+				t.Fatalf("rerun notice = %q, want prefix %q", text, want)
+			}
+		})
 	}
 }
 
@@ -712,7 +738,7 @@ func TestApprovalChildConfirmedNoticeAfterCommentRead(t *testing.T) {
 				if variant != "new_id" {
 					id = 850
 				}
-				if variant != "new_time" {
+				if variant == "old_missing" {
 					posted = posted.Add(-time.Hour)
 				}
 				n := a.notice()
@@ -758,6 +784,44 @@ func TestApprovalChildConfirmedNoticeAfterCommentRead(t *testing.T) {
 			}
 			if _, err := a.read(context.Background(), s, "c"); err != nil {
 				t.Fatalf("second read: %v", err)
+			}
+		})
+	}
+}
+
+func TestApprovalChildDeletedLatestNoticeDoesNotRetry(t *testing.T) {
+	for _, afterPost := range []bool{false, true} {
+		t.Run(fmt.Sprintf("after_post_%t", afterPost), func(t *testing.T) {
+			a, f, s := approvalFixture(t)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if afterPost {
+				if err := a.before(ctx, &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) {
+					t.Fatal(err)
+				}
+				s.AwaitingApproval = nil
+			}
+			postsBefore := len(f.all())
+			posted := time.Now().UTC().Add(-time.Hour)
+			n := a.notice()
+			log, err := n.load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			log.Notices = append(log.Notices, noticeRecord{Kind: startedNotice, Text: "latest notification", CommentID: 960, PostedAt: &posted})
+			if err := n.save(log); err != nil {
+				t.Fatal(err)
+			}
+			approvalAdd(t, f, 960, 99, "latest notification", nil)
+			if _, err := a.source.Comments(ctx, a.issue); err != nil {
+				t.Fatal(err)
+			}
+			f.set(func(f *noticeTracker) { f.rows = f.rows[:len(f.rows)-1] })
+			reads := 0
+			a.source = recordTrackerComments(approvalAfterComments{Tracker: a.cfg.unrecordedSource(), after: func() { reads++ }}, a.cfg.commentJobs)
+			err = a.before(ctx, &s, chain.Assignment{Role: "c"})
+			if !errors.Is(err, errApprovalTampered) || reads != 1 || len(f.all()) != postsBefore {
+				t.Fatalf("err = %v, reads = %d, new posts = %d", err, reads, len(f.all())-postsBefore)
 			}
 		})
 	}

@@ -317,14 +317,29 @@ func TestApprovalReceiptAndPrepareCleanup(t *testing.T) {
 	}
 }
 func TestApprovalFailureEnding(t *testing.T) {
-	state := State{Workflow: &Workflow{Stages: []Stage{{Name: "plan", Kind: ModelStage}, {Name: "execute", Kind: CommandStage, OnFailure: "plan", Approval: &Approval{}}}}, History: []Result{{Role: "execute", Speaker: "p"}, {Role: "execute", Speaker: "runtime"}, ApprovalFailureRecord("execute", "receipt_unreadable")}}
-	ending, ok := state.LastEnding()
-	if !ok || ending.ApprovalFailure != "receipt_unreadable" || ending.Attempt != 1 {
-		t.Fatalf("%+v", ending)
-	}
-	text := state.stageInstruction("plan")
-	if !strings.Contains(text, "効果不明") || strings.Contains(text, "did not exit 0") {
-		t.Fatal(text)
+	for _, tc := range []struct{ name, reason, text string }{
+		{"receipt_unreadable", "receipt_unreadable", "起動した・結果は読めない (効果不明): receipt_unreadable"},
+		{"receipt_credential", "bundle_credential", "起動した・結果は読めない (効果不明): bundle_credential"},
+		{"bundle_credential", "bundle_credential", "承認条件が成立しなかった: bundle_credential"},
+		{"post_fence", "post_fence", "承認条件が成立しなかった: post_fence"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record := ApprovalFailureRecord("execute", tc.reason)
+			record.Error = tc.text
+			state := State{Workflow: &Workflow{Stages: []Stage{{Name: "plan", Kind: ModelStage}, {Name: "execute", Kind: CommandStage, OnFailure: "plan", Approval: &Approval{}}}}, History: []Result{{Role: "execute", Speaker: "p"}, {Role: "execute", Speaker: "runtime"}, record}}
+			ending, ok := state.LastEnding()
+			if !ok || ending.ApprovalFailure != tc.reason || ending.Error != tc.text || ending.Attempt != 1 {
+				t.Fatalf("%+v", ending)
+			}
+			want := "execute: " + tc.text + "\n"
+			if text := ending.instruction(); text != want {
+				t.Fatalf("instruction = %q, want %q", text, want)
+			}
+			text := state.stageInstruction("plan")
+			if !strings.Contains(text, want) || strings.Contains(text, "did not exit 0") {
+				t.Fatal(text)
+			}
+		})
 	}
 }
 
@@ -392,6 +407,12 @@ func TestApprovalReceiptFailureIsRecordedAfterStage(t *testing.T) {
 			last := store.state.History[len(store.state.History)-1]
 			if variant == "bundle_credential" && last.Error != approvalReceiptPrefix+reason {
 				t.Fatalf("receipt result: %s", last.Error)
+			}
+			if role == "execute" {
+				ending, ok := store.state.LastEnding()
+				if !ok || ending.Error != last.Error {
+					t.Fatalf("ending = %+v, record = %+v", ending, last)
+				}
 			}
 			if variant == "predecessor_unreadable" {
 				if ApprovalFailureReason(last) != "" {

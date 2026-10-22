@@ -175,22 +175,22 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 		}
 	}
 	byID := map[int64]tracker.Comment{}
-	var maxCommentID int64
 	for _, c := range decoded {
 		if !c.OnIssue || c.ID <= 0 || c.Author.ID <= 0 {
 			return v, errApprovalTampered
 		}
-		maxCommentID = max(maxCommentID, c.ID)
 		byID[c.ID] = c
 		v.comments = append(v.comments, c)
 	}
 	// A watcher readback may also have recorded the new comment in seen.
 	// Retry before comparing that ledger against this older comment snapshot.
+	// Only confirmation after this read started proves the snapshot is stale;
+	// even the highest comment ID may have been deleted before the read.
 	for _, record := range v.log.Notices {
 		if record.Predates || record.Obsolete || record.PostedAt == nil || record.CommentID <= 0 {
 			continue
 		}
-		if _, ok := byID[record.CommentID]; !ok && (record.CommentID > maxCommentID || record.PostedAt.After(readStarted)) {
+		if _, ok := byID[record.CommentID]; !ok && record.PostedAt.After(readStarted) {
 			return v, errApprovalRetry
 		}
 	}
