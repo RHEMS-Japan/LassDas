@@ -810,6 +810,9 @@ The next assignment is the first stage that is not yet satisfied.
   command, a delivery above all, has to be safe to run twice (the shipped
   delivery process reuses its commit, branch and pull request). There is
   no counter and no ending: a command that keeps failing keeps cycling.
+  With an optional `approval` condition, each new launch first requires a
+  current approver's GO on the runtime's complete bundle post. Rejection returns
+  to `on_failure`; expiry pauses before returning there on resume.
 - A **model stage** is satisfied when its processes ran without a process
   error. What the model wrote is never read, decoded or compared, so writing
   "done", "verified" or "delivered" advances nothing. The command stage that
@@ -820,7 +823,7 @@ The next assignment is the first stage that is not yet satisfied.
   error or an interrupted launch simply runs that stage again, with the
   runtime's usual note about the interruption in the record.
 
-#### Approval conditions (not yet available)
+#### Approval conditions
 
 A command stage can declare the following optional `approval` object:
 
@@ -859,9 +862,8 @@ The following checks apply to the current configuration before intake:
 The saved workflow is checked again on every child start with checks 3, 5, 6,
 and 7; checks 1, 2, and 10 run only once before the first copy.
 
-Configurations with approval stages cannot start in this version:
-`approval stages are not available yet` is returned after these checks.
-The remaining startup guards require watch mode, a successful `Myself()` read,
+Approval stages are usable end to end in watch mode.
+The startup guards require watch mode, a successful `Myself()` read,
 no runtime account among approvers, and project `textFormattingRule` equal to
 `markdown`. `--check` reads no remote services. Comment recording is enabled
 only for Backlog configurations with approval, with parent and child sharing
@@ -2140,7 +2142,7 @@ It keeps the first values read for each comment id, never overwrites them on a
 later read, and does not delete earlier entries.
 Reads with an issue id of zero and comments with an empty body are not recorded.
 Recording is currently disabled by an internal flag.
-A later change enables it only for settings with approval conditions.
+It is enabled only for settings with approval conditions.
 
 ### Requester stop in watch mode
 
@@ -4129,10 +4131,10 @@ Tests use real local Git repositories and a local API fixture that must
 receive zero requests. Real hosting permissions, branch protection, triggered
 CI, live credentials and deployment behavior remain installation checks.
 
-### 承認の子側の記録（親側の実装まで受付は無効）
+### 承認の待ち・GO・記録
 
-承認条件のある設定は引き続き `approval stages are not available yet` で拒む。
-子側は投稿と複製・照合・消費を担当し、GO の受理、差し戻し、期限切れの処理は親側で追加する。
+承認条件のある command 工程は、直前の command の後に束の全文を投稿し、実行枠を返して承認を待つ。
+子側は投稿と複製・照合・消費、親側は各 tick の GO の受理・差し戻し・期限切れを担当する。
 承認者の設定は、親は見張りが読み込んだ設定、子は起動時に渡された `engine.json` の設定を使う。照合のたびに設定ファイルを読み直さない。
 通常の設定の動きは変えない。全役の process が隔離起動器を通り、終了時に子 process も消えることが前提。
 
@@ -4141,7 +4143,7 @@ JSON は一時ファイルを同期して rename し、ディレクトリも同�
 
 - `bundle-<n>/`: n 回目の投稿のファイルを、そのまま複製したもの。
 - `post-<n>.json`: `n`, `stage`, `comment_id`, `sent_text_sha256`, `digest`（小文字64桁）, `digest_prefix`（先頭8桁）, `deadline`, `created_at`, `files`（`path`, `size`, `sha256`）。時刻は本体の UTC、RFC3339。読み戻しが一致してから保存する。送った全文と準備中の投稿メタデータ（`approval` 欄）は `notices.json` に保持し、再起動時も同じ複製・文・期限を使う。
-- `go-<comment_id>.json`: 親（PR5）が処理した全コメント（GO・読めない GO・差し戻し）を同じ形で保存する。`result` は `"go"` / `"unreadable_go"` / `"rejection"`。共通欄は `post_n`, `post_comment_id`, `go_comment_id`, `author_id`, `body`, `digest`。`result="go"` では `accepted_at`, `launch_history_len`, `pending_since` を記録し（他の結果ではゼロ値）、子はこの結果だけに `consumed_at` または `expired_at` を書く。起動位置は消費の runtime 行を含む、起動直前の History の長さと PendingSince。消費を先に保存し、Pending 保存前に落ちた場合も同じ GO を再利用しない。全結果のコメント id を承認者の除外から外すが、編集・削除の照合を免除するのは受理した GO だけ。
+- `go-<comment_id>.json`: 親が受理した GO と読めない GO を保存する。差し戻しと受理しなかった GO の処理済み id は投稿の記録にも保持する。`result` は `"go"` / `"unreadable_go"` / `"rejection"`。共通欄は `post_n`, `post_comment_id`, `go_comment_id`, `author_id`, `body`, `digest`。`result="go"` では `accepted_at`, `launch_history_len`, `pending_since` を記録し（他の結果ではゼロ値）、消費時に `consumed_at`、失効時に `expired_at` を書く。起動位置は消費の runtime 行を含む、起動直前の History の長さと PendingSince。消費を先に保存し、Pending 保存前に落ちた場合も同じ GO を再利用しない。GO 記録と投稿記録の処理済みコメント id を承認者の除外から外すが、編集・削除の照合を免除するのは受理した GO だけ。
 
 State の `awaiting_approval` は `stage`, `post_n`, `post_comment_id`, `deadline`。
 問いの `waiting` とは別で、問いの回答や通常の再開では解けない。
@@ -4149,7 +4151,62 @@ State の `awaiting_approval` は `stage`, `post_n`, `post_comment_id`, `deadlin
 空の束は拒む。共通の JSON 試験ベクトルは `internal/chain/testdata/approval-digest-*.json`。
 
 不成立は Role=工程名、Speaker=`runtime`、Error=固定文と理由名。
-理由は `bundle_name`, `bundle_kind`, `bundle_limit`, `bundle_credential`, `show_missing`, `post_size`, `post_fence`, `post_masked`, `digest_collision`, `receipt_unreadable`。
+理由は `rejected`, `expired`, `bundle_name`, `bundle_kind`, `bundle_limit`, `bundle_credential`, `show_missing`, `post_size`, `post_fence`, `post_masked`, `digest_collision`, `receipt_unreadable`。
 `receipt_unreadable` と、起動済みの承認条件の工程の receipt に資格の値があった場合の `bundle_credential` は「起動した・結果は読めない (効果不明)」と記録する。
 不正 UTF-8・書式文字・禁止制御文字は `post_fence`、空の束は `bundle_limit` とする。
 深さは束からのパス要素数、行長は Unicode の文字数、空白は空白とタブ、空行は空白とタブだけの行（末尾改行自体は数えない）。本文の固定文も含め32 KiBを超えたら投稿しない。
+
+
+承認者は Web 上の本体名義の承認投稿の全文を読み、`GO <先頭8桁>` の半角1行を新しいコメントで返す。
+先頭8桁は小文字16進、空白は1つ。末尾の半角空白・タブ・CR・LFだけを除く。
+本体は複製の64桁を再計算し、現在の投稿の id と結ぶ。GO は1回の起動にだけ使い、
+受理・消費の両方で本体の時計が投稿の期限 D より前でなければならない。
+同じ全文の再投稿にも新しい GO が必要。失敗・中断後は `on_failure` の計画工程へ戻り、
+直前の command と投稿をやり直す。再投稿には前回の終了状態だけを載せ、receipt 本文は載せない。
+
+承認者は課題の作成者・本体アカウント・投稿までに本体が読んだ本文のあるコメントの作者にはなれない。
+承認者の「停止」「再開」と承認待ち中に処理したコメントは除外に数えない。
+投稿前の普通のコメントは承認資格を失わせる。投稿後の普通のコメントは差し戻しになる。
+同じ読み取りの複数コメントは1件の差し戻しにまとめ、GO と同時なら差し戻しを優先する。
+差し戻しは工程の失敗と本文を記録して計画へ戻すが、起動の試行回数や開始通知には数えない。
+全角・大小違い等の1行 GO と承認待ち中の先頭行「再開」は固定文で知らせて待つ。
+末尾を除いても複数行の GO や引用は差し戻し。誤った先頭8桁も受理しない。
+
+停止は全ての判定より優先し、実行中にも効く。GO 自身の受理後の編集・削除は取り消しにならない。
+受理後の停止・一時停止・再開・承認者の普通のコメントは未消費 GO を失効させる。
+承認待ちの催促はない。担当先は現在の設定の先頭承認者（停止や完了の担当変更は既存の規則）になる。
+
+投稿の直前・受理・消費の3時点で、課題の題・説明、変更履歴、書式、読んだコメントを照合する。
+本体が一度読んだコメントの最初の本文の指紋・作者・作成時刻・更新時刻を保存し、上書きしない。
+自分のコメントでも編集・削除すれば止まる。読めない GO の修正も新しいコメントで行う。
+最初の承認投稿より後の第三者の本文・添付や、送った通知以外の本体名義の本文でも止まる。
+本体の通知と承認投稿は編集せず、送った全文と未編集の時刻を確かめる。
+承認条件のある列では、停止中や環境不足の通知へ役の文を引用しない。
+
+一時停止は history の最後の Role=`router`, Speaker=`runtime`, Error が空の固定文で表す。
+
+| 理由 | 再開の扱い |
+|---|---|
+| `approval_expired` | 期限切れの不成立から計画へ戻り再投稿する |
+| `approval_post_mismatch` | 投稿の読み戻し不一致。停止して起票し直す |
+| `approval_tampered` | 課題・コメント等の照合不一致。停止して起票し直す |
+| `approval_no_approver` | 承認できる人がいない。停止して起票し直す |
+| `approval_config_mismatch` | 保存した工程の写しが今の設定で承認できない。停止して起票し直す |
+
+後ろの4種は「再開」で検査を飛ばせない。親が照合・承認者・写しを再検査し、通らなければ
+子を起動せず一時停止へ戻す。編集された投稿の読み戻し不一致は照合不一致になる。
+承認条件を足す前に作られ、写しに承認条件がない依頼も設定不一致で止める。
+[ADR 0014](docs/adr/0014-approval-binds-one-launch-to-a-verified-post.md) は通常の一時停止との違いを記録する。
+
+`post-<n>.json` の任意欄 `processed_comment_ids` は受理しなかったコメントも処理済みとして保持する。
+`resolution`（`rejected` / `expired`）、`resolution_body`、`resolved_at` は差し戻し・期限切れを
+history へ1回だけ反映するための記録。欄の無い既存の投稿も読み込める。
+再開の記録の任意欄 `approval_checked` は、親の再検査が通った事実を保持する。
+受理しなかった GO は編集・削除の照合から免除しない。
+
+保証するのは、役が書けない複製と投稿を確認した新しい GO がなければ承認工程を起動しないこと。
+全役が隔離起動器を通り、起動終了時に子 process も消えることが前提。
+操作の種類・SQL・対象・dry-run の意味・資格情報は運用者の command の責任である。
+起動器は複製を読み取り専用で渡す。承認者名義の鍵を本体・役・script に渡さない。
+管理者や開発支援エージェントの別経路での操作、添付内容・カスタム属性の照合、
+本番の操作結果や冪等性はこの承認機構の保証の外である。

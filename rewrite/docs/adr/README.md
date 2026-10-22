@@ -32,6 +32,8 @@ by the section name given beside the lines.
 | [0012](0012-forced-exits-in-a-row-at-one-stage-pause-a-request-without-a-time-limit.md) | Without a time limit, forced exits in a row at one stage pause a request | README, "Active-work limits and recovery" |
 | [0013](0013-remove-only-declared-regenerable-directories.md) | Remove only operator-declared regenerable directories at safe role/request boundaries | README, "Opt-in removal of regenerated install directories" |
 
+| [0014](0014-approval-binds-one-launch-to-a-verified-post.md) | Approval binds one launch to a verified post; four pauses require revalidation | README, "Approval conditions" |
+
 ## Considered and not recorded
 
 - Routing with Jev or with an ordinary chat model. The README calls Jev routing

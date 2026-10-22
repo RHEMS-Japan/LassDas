@@ -20,6 +20,9 @@ operations, verification target and acceptance checks. Distinguish permission
 to merge from permission to verify a person's merge, and both from permission
 to change an environment. Keep any existing approval requirements in the
 operator's own procedure; an earlier command returning zero is not approval.
+For a human GO before a command, use the optional [approval condition](README.md#approval-conditions).
+It requires Backlog Markdown, watch mode, and every role process to use the
+isolating launcher; all child processes must end with their launch.
 
 The release of several changes to another environment is a separate task unless
 it was explicitly included. Finishing an evaluation environment must neither
@@ -62,9 +65,10 @@ completion, ends the run.
 | Report and confirm | Report the observed target, commit/artifact, checks, omissions and remaining work in ordinary prose; read back the matching report on the assigned issue. |
 
 The engine records exit statuses and configured receipt text. It does not
-interpret artifact identities, provider responses or approval semantics. A
-missing `receipt` file is only recorded as missing by the runtime: commands
-must themselves fail when a record needed for their operation is unavailable.
+interpret artifact identities or provider responses. An approval condition
+binds one command launch to a verified full bundle and a current approver's GO; it does not decide whether the proposed operation is appropriate.
+An unreadable approval-stage receipt is recorded as an unknown effect.
+Other commands must fail themselves when a required receipt is unavailable.
 
 ## Reuse verification without overstating it
 
@@ -91,7 +95,9 @@ operator command even when the local receipt or a preceding command says zero.
 
 To continue through a person's merge, connect the existing PR service's
 observation command and verify the resulting integration target. This guide
-adds no human-merge watcher or approval service. Polling inside a command uses
+adds no human-merge watcher. The optional approval condition instead waits
+for a GO on the runtime's full bundle post and frees the execution slot.
+Approval waits have a deadline and no reminders. Polling inside a command uses
 an execution slot and counts as active work; it does not free the slot while
 waiting. Do not reopen a Done run just to simulate such a watcher.
 
@@ -156,7 +162,7 @@ verified source from a different local workspace and later branch updates.
 
 Mutating these test-only commands tests the boundaries of this composition,
 not a new universal environment guarantee in the engine. Real CI/provider
-authentication, approvals, idempotency, artifact provenance/signatures, Linux
+authentication, the appropriateness of approved operations, idempotency, artifact provenance/signatures, Linux
 credential isolation, browser behavior and model judgment are not established
 by these tests. Validate the chosen operator commands and permissions against
 the actual project's agreed environment before treating its setup as complete.
