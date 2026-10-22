@@ -39,6 +39,9 @@ type config struct {
 	// runtimeUser is the tracker account the credential belongs to, read at
 	// start when issues are handed over.
 	runtimeUser tracker.Account
+	// PR2 enables recording only for settings with approval conditions.
+	recordComments bool
+	commentJobs    string
 }
 
 // Give the dispatcher the same configured work instructions as its workers.
@@ -424,6 +427,8 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		return err
 	}
 	defer store.Close()
+	// The run is jobs/<id>/run; comments belong beside that run.
+	cfg.commentJobs = filepath.Dir(filepath.Dir(store.Dir))
 	executor := chain.Processes{Roles: roles, Prepare: prepareAccess, HistoryPath: filepath.Join(store.Dir, "history.json"),
 		EnvironmentFacts: environmentFacts}
 	if cfg.ModelSelection != nil {

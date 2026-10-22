@@ -101,15 +101,39 @@ func (p BacklogProject) Comments(ctx context.Context, issue Issue) ([]json.RawMe
 // ReadComment places a comment by the issue and the project its record names.
 func (p BacklogProject) ReadComment(raw json.RawMessage, issue Issue) (Comment, error) {
 	var record struct {
-		ID, IssueID, ProjectID int64
-		Content                string
-		CreatedUser            struct{ ID int64 }
+		ID, IssueID, ProjectID      int64
+		Content                     string
+		CreatedUser                 struct{ ID int64 }
+		Created, Updated, ChangeLog json.RawMessage
 	}
 	if err := json.Unmarshal(raw, &record); err != nil || record.ID <= 0 {
 		return Comment{}, errors.New("the comment record could not be read")
 	}
-	return Comment{ID: record.ID, Body: record.Content, Author: Account{ID: record.CreatedUser.ID},
-		OnIssue: record.IssueID == issue.ID && record.ProjectID == p.ProjectID}, nil
+	comment := Comment{ID: record.ID, Body: record.Content, Author: Account{ID: record.CreatedUser.ID},
+		OnIssue: record.IssueID == issue.ID && record.ProjectID == p.ProjectID}
+	// Optional metadata must not break stop monitoring on existing settings.
+	if json.Unmarshal(record.Created, &comment.Created) != nil {
+		comment.Created = time.Time{}
+	}
+	if json.Unmarshal(record.Updated, &comment.Updated) != nil {
+		comment.Updated = time.Time{}
+	}
+	var changes []json.RawMessage
+	if json.Unmarshal(record.ChangeLog, &changes) == nil {
+		for _, raw := range changes {
+			var change struct{ Field string }
+			if json.Unmarshal(raw, &change) != nil {
+				continue
+			}
+			switch change.Field {
+			case "summary", "description":
+				comment.ChangedTitleOrDescription = true
+			case "attachment":
+				comment.HasAttachment = true
+			}
+		}
+	}
+	return comment, nil
 }
 
 func (p BacklogProject) CommentText(raw json.RawMessage) (int64, string, error) {
@@ -206,4 +230,16 @@ func (p BacklogProject) RecordHours(ctx context.Context, issue Issue, hours floa
 
 func (p BacklogProject) Forward(ctx context.Context, method, path string, query, form url.Values, expected int) ([]byte, error) {
 	return p.Client.call(ctx, method, path, query, form, expected)
+}
+
+func (p BacklogProject) TextFormattingRule(ctx context.Context) (string, error) {
+	data, err := p.Client.call(ctx, http.MethodGet, "/projects/"+strconv.FormatInt(p.ProjectID, 10), nil, nil, http.StatusOK)
+	if err != nil {
+		return "", err
+	}
+	var project struct{ TextFormattingRule string }
+	if err := json.Unmarshal(data, &project); err != nil {
+		return "", errors.New("the project text formatting rule could not be read")
+	}
+	return project.TextFormattingRule, nil
 }

@@ -511,3 +511,5 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 	}
 	return data, response.Header, nil
 }
+
+func (g GitHub) TextFormattingRule(context.Context) (string, error) { return "", nil }

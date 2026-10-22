@@ -49,6 +49,11 @@ type Comment struct {
 	// OnIssue says the record names the issue it was read for as its own.
 	// A comment it places elsewhere is nobody's instruction or answer.
 	OnIssue bool
+	// Metadata is zero when absent or unreadable.
+	Created                   time.Time
+	Updated                   time.Time
+	ChangedTitleOrDescription bool
+	HasAttachment             bool
 }
 
 // Tracker is what the engine asks of the tracker that holds its requests.
@@ -60,6 +65,8 @@ type Tracker interface {
 	// CredentialEnv names the environment variable holding the account's
 	// credential, so the engine can keep that value out of what it writes.
 	CredentialEnv() string
+	// TextFormattingRule reads the project markup format; unused trackers return empty.
+	TextFormattingRule(ctx context.Context) (string, error)
 	// Issues lists the issues in the configured scope, oldest first, each as
 	// the tracker's own record. A list that cannot be read whole is not
 	// returned at all.

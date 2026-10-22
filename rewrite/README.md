@@ -2069,6 +2069,17 @@ instruction of a pending action and the delivery receipt; while a process runs
 the page reloads every ten seconds and shows, beside the live output, the
 native agent's own log as it grows.
 
+### Recording comments read by the engine
+
+The comment recorder retains each nonempty comment's id, author id, hexadecimal
+SHA-256 body digest, creation time and update time in
+`<queue>/jobs/<id>/comments-seen.json`.
+It keeps the first values read for each comment id, never overwrites them on a
+later read, and does not delete earlier entries.
+Reads with an issue id of zero and comments with an empty body are not recorded.
+Recording is currently disabled by an internal flag; PR2 will enable it only
+for configurations with approval conditions.
+
 ### Requester stop in watch mode
 
 The issue's original creator can stop its queued or running work by posting a
