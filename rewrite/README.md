@@ -520,6 +520,12 @@ questions, accepted answers and reports through this reference as needed.
 This is the saved answer the runtime accepted, not a later edit fetched from
 the tracker. The reference grants no additional authority and does not mean
 that a model actually read or understood every older record.
+When `TASK_APPROVED_BUNDLE` is present, the launcher pins that directory and
+exposes it read-only at the same path, refusing missing paths, files, symlinks
+and overlap with workspace, home, runtime or history mounts.
+`TASK_APPROVED_BUNDLE` and `TASK_APPROVED_DIGEST` are reserved environment names;
+the launcher passes the digest through without interpreting it and adds no
+bundle mount when the bundle variable is absent.
 Watch mode also supplies `TASK_ACTIVITY`, a file named `task-activity.json` in
 the process's own `TASK_HOME`, where the launcher already lets it write. A
 harness may keep rewriting it with what it is running: the command it started

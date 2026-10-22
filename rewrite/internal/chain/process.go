@@ -227,13 +227,19 @@ func (b *boundedBuffer) String() string {
 	return fmt.Sprintf("[the first %d bytes of this stream are not kept in the record; the live copy had them]\n", b.dropped) + b.buf.String()
 }
 
-// HistoryEnvironmentConflict reports a reserved-name collision without reading
-// any credential value. Configuration checks and launch preparation both use it.
+// HistoryEnvironmentConflict reports a history or approval reserved-name collision
+// without reading any credential value. Configuration checks and launch
+// preparation both use it.
 func (p Process) HistoryEnvironmentConflict() bool {
-	_, configured := p.Env["TASK_HISTORY"]
-	_, secret := p.Secrets["TASK_HISTORY"]
-	_, issued := p.Credentials["TASK_HISTORY"]
-	return configured || secret || issued || p.ModelEnv == "TASK_HISTORY"
+	for _, name := range []string{"TASK_HISTORY", "TASK_APPROVED_BUNDLE", "TASK_APPROVED_DIGEST"} {
+		_, configured := p.Env[name]
+		_, secret := p.Secrets[name]
+		_, issued := p.Credentials[name]
+		if configured || secret || issued || p.ModelEnv == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (p Process) run(ctx context.Context, role Role, assignment Assignment, state State) Result {

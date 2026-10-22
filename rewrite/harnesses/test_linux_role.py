@@ -96,6 +96,133 @@ class ConfigurationTests(unittest.TestCase):
                         os.fstat(descriptor)
 
 
+class ApprovedBundleTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.work, self.home, self.bundle = [self.root / name for name in ("work", "home", "bundle")]
+        for path in (self.work, self.home, self.bundle):
+            path.mkdir()
+        (self.bundle / "plan").write_text("approved", encoding="utf-8")
+        self.args = argparse.Namespace(program=["--", "/bin/true"], write=["."], create=[], runtime=[], network="none")
+        self.environment = {"TASK_WORKSPACE": str(self.work), "TASK_HOME": str(self.home),
+                            "TASK_APPROVED_BUNDLE": str(self.bundle), "TASK_APPROVED_DIGEST": "opaque digest"}
+
+    def command(self):
+        # Real path traversal with readable descriptors on macOS; only the
+        # Linux tests below claim that bubblewrap enforces mount permissions.
+        with patch.object(sys, "platform", "linux"), patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"), \
+                patch.object(os, "O_PATH", os.O_RDONLY, create=True):
+            argv, environment, descriptors = launcher.command(self.args, self.environment)
+        for descriptor in descriptors:
+            self.addCleanup(os.close, descriptor)
+        return argv, environment
+
+    def test_directory_is_pinned_read_only_at_its_environment_path(self):
+        argv, environment = self.command()
+        index = argv.index(str(self.bundle))
+        self.assertEqual(argv[index - 2], "--ro-bind-fd")
+        descriptor = int(argv[index - 1])
+        self.assertEqual(os.fstat(descriptor).st_ino, self.bundle.stat().st_ino)
+        plan = os.open("plan", os.O_RDONLY, dir_fd=descriptor)
+        self.addCleanup(os.close, plan)
+        self.assertEqual(os.read(plan, 100), b"approved")
+        self.assertEqual(environment["TASK_APPROVED_BUNDLE"], str(self.bundle))
+        self.assertEqual(environment["TASK_APPROVED_DIGEST"], "opaque digest")
+
+    def test_absent_bundle_adds_no_mount(self):
+        del self.environment["TASK_APPROVED_BUNDLE"]
+        argv, environment = self.command()
+        self.assertNotIn(str(self.bundle), argv)
+        self.assertNotIn("TASK_APPROVED_BUNDLE", environment)
+        self.assertEqual(environment["TASK_APPROVED_DIGEST"], "opaque digest")
+
+    def test_file_missing_and_symlink_paths_refuse_launch(self):
+        link = self.root / "link"
+        link.symlink_to(self.bundle, target_is_directory=True)
+        for path in (self.bundle / "plan", self.root / "missing", link, link / "child"):
+            with self.subTest(path=path), self.assertRaises((OSError, ValueError)):
+                self.environment["TASK_APPROVED_BUNDLE"] = str(path)
+                self.command()
+
+    def test_overlaps_and_invalid_paths_refuse_before_mounts_are_opened(self):
+        runtime, history = self.root / "runtime", self.root / "run" / "history.json"
+        self.args.runtime = [str(runtime)]
+        self.environment["TASK_HISTORY"] = str(history)
+        paths = ["", "/", "relative", str(self.root / "bundle" / ".." / "other")]
+        for mount in (self.work, self.home, runtime, history):
+            paths.extend([str(mount), str(mount / "child"), str(mount.parent)])
+        with patch.object(launcher, "open_path", side_effect=AssertionError("overlap reached a mount")):
+            for path in paths:
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    self.environment["TASK_APPROVED_BUNDLE"] = path
+                    self.command()
+
+    def test_replacement_keeps_the_original_directory_descriptor(self):
+        argv, _ = self.command()
+        descriptor = int(argv[argv.index(str(self.bundle)) - 1])
+        self.bundle.rename(self.root / "original")
+        self.bundle.mkdir()
+        (self.bundle / "plan").write_text("replacement", encoding="utf-8")
+        plan = os.open("plan", os.O_RDONLY, dir_fd=descriptor)
+        self.addCleanup(os.close, plan)
+        self.assertEqual(os.read(plan, 100), b"approved")
+        self.assertEqual((self.bundle / "plan").read_text(), "replacement")
+
+
+@unittest.skipUnless(sys.platform == "linux" and shutil.which("bwrap"), "requires real Linux bubblewrap isolation")
+class ApprovedBundleIsolationTests(unittest.TestCase):
+    def test_absent_bundle_is_not_visible_to_the_role(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            work, home, bundle = [root / name for name in ("work", "home", "bundle")]
+            for path in (work, home, bundle):
+                path.mkdir()
+            args = argparse.Namespace(program=["--", "/bin/sh", "-c",
+                                               'test "${TASK_APPROVED_BUNDLE-unset}" = unset && test ! -e "$1"',
+                                               "reader", str(bundle)], write=[], create=[], runtime=[], network="none")
+            argv, environment, descriptors = launcher.command(args, {
+                "TASK_WORKSPACE": str(work), "TASK_HOME": str(home), "PATH": os.environ["PATH"]})
+            try:
+                result = subprocess.run(argv, env=environment, pass_fds=descriptors, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+
+    def test_role_reads_original_bundle_but_cannot_write_even_after_replacement(self):
+        for replace in (False, True):
+            with self.subTest(replace=replace), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                root = Path(temporary)
+                work, home, bundle = [root / name for name in ("work", "home", "bundle")]
+                for path in (work, home, bundle):
+                    path.mkdir()
+                (bundle / "plan").write_text("approved", encoding="utf-8")
+                program = ["--", "/bin/sh", "-c",
+                           'test "$(cat "$TASK_APPROVED_BUNDLE/plan")" = approved && '
+                           'test "$TASK_APPROVED_DIGEST" = "opaque digest" && '
+                           '! (printf changed > "$TASK_APPROVED_BUNDLE/plan") && '
+                           '! touch "$TASK_APPROVED_BUNDLE/new" && ! rm "$TASK_APPROVED_BUNDLE/plan"']
+                args = argparse.Namespace(program=program, write=["."], create=[], runtime=[], network="none")
+                argv, environment, descriptors = launcher.command(args, {
+                    "TASK_WORKSPACE": str(work), "TASK_HOME": str(home), "TASK_APPROVED_BUNDLE": str(bundle),
+                    "TASK_APPROVED_DIGEST": "opaque digest", "PATH": os.environ["PATH"]})
+                try:
+                    if replace:
+                        bundle.rename(root / "original")
+                        bundle.mkdir()
+                        (bundle / "plan").write_text("replacement", encoding="utf-8")
+                    result = subprocess.run(argv, env=environment, pass_fds=descriptors, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                finally:
+                    for descriptor in descriptors:
+                        os.close(descriptor)
+                original = root / "original" if replace else bundle
+                self.assertEqual((original / "plan").read_text(), "approved")
+                self.assertFalse((original / "new").exists())
+
+
 class CreatePathTests(unittest.TestCase):
     def test_a_created_directory_never_follows_a_link_in_any_component(self):
         with tempfile.TemporaryDirectory() as root:
