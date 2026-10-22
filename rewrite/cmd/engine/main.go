@@ -414,9 +414,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		}
 		assigned = *issue
 	}
-	// Bind the record directory before roleAccess captures the tracker wrapper.
-	setRunCommentJobs(&cfg, *directory)
-	prepareAccess, err := roleAccess(cfg, assigned)
+	prepareAccess, err := prepareRunAccess(&cfg, *directory, assigned, roleAccess)
 	if err != nil {
 		return err
 	}

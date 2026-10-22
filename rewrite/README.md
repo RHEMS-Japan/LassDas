@@ -849,6 +849,9 @@ The following checks apply to the current configuration before intake:
 9. The fields meet the constraints above; a model stage cannot declare approval.
 10. Every `on_failure` after approval stays after that approval stage.
 
+The saved workflow is checked again on every child start with checks 3, 5, 6,
+and 7; checks 1, 2, and 10 run only once before the first copy.
+
 Configurations with approval stages cannot start in this version:
 `approval stages are not available yet` is returned after these checks.
 The remaining startup guards require watch mode, a successful `Myself()` read,

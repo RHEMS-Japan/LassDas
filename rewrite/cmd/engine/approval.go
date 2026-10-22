@@ -290,7 +290,20 @@ func setRunCommentJobs(cfg *config, runDirectory string) {
 	cfg.commentJobs = filepath.Dir(filepath.Dir(filepath.Clean(runDirectory)))
 }
 
+type roleAccessFactory func(config, string, ...func(*tracker.IssueScope)) (func(context.Context, chain.Process) (chain.Process, func(), error), error)
+
+func prepareRunAccess(cfg *config, runDirectory, issue string, access roleAccessFactory) (func(context.Context, chain.Process) (chain.Process, func(), error), error) {
+	// Bind before passing a configuration copy to roleAccess, which captures
+	// its tracker. The caller also keeps this directory for runtime reads.
+	setRunCommentJobs(cfg, runDirectory)
+	return access(*cfg, issue)
+}
+
 func prepareStoredApprovals(cfg *config, store *chain.FileStore) error {
+	// Ordinary runs leave history loading and retries entirely to Chain.Run.
+	if !hasApproval(cfg.Workflow) {
+		return nil
+	}
 	state, err := store.Load()
 	if err != nil {
 		return err
@@ -310,6 +323,5 @@ func prepareStoredApprovals(cfg *config, store *chain.FileStore) error {
 			return err
 		}
 	}
-	// Also refuse an older copy with approval if current settings removed it.
 	return rejectUnavailableApproval(state.Workflow)
 }

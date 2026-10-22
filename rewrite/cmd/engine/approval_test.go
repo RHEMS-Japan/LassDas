@@ -74,6 +74,14 @@ func TestApprovalCheck2Failure(t *testing.T) {
 			t.Fatalf("accepted %s", target)
 		}
 	}
+	// Check 2 independently rejects returning to the immediately preceding
+	// model, even without running check 1 first.
+	cfg := approvalConfiguration()
+	cfg.Workflow.Stages[1].Kind = chain.ModelStage
+	cfg.Workflow.Stages[2].OnFailure = "b"
+	if validateApprovalFailure(cfg) == nil {
+		t.Fatal("accepted immediately preceding model as failure target")
+	}
 }
 func TestApprovalCheck3Secrets(t *testing.T) {
 	t.Setenv("APPROVAL_TEST_A", "synthetic-a")
@@ -254,8 +262,11 @@ func TestApprovalJSONAndCheckHaveNoRemoteReads(t *testing.T) {
 			t.Fatal("unknown or duplicate approval field accepted")
 		}
 	}
+	readCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
 		t.Error("check made a remote read")
+		cancel()
 		return nil, errors.New("unexpected read")
 	})
 	path := filepath.Join(t.TempDir(), "operator.json")
@@ -265,7 +276,7 @@ func TestApprovalJSONAndCheckHaveNoRemoteReads(t *testing.T) {
 	for _, mode := range []string{"check", "watch", "single", "child"} {
 		t.Run(mode, func(t *testing.T) {
 			var out bytes.Buffer
-			ctx := context.Background()
+			ctx := readCtx
 			args := []string{"--config", path}
 			directory := filepath.Join(t.TempDir(), "unstarted")
 			switch mode {
@@ -327,6 +338,7 @@ func TestApprovalWatchStartup(t *testing.T) {
 					return selectionReply(r, tt.formatStatus, map[string]any{"textFormattingRule": tt.rule}), nil
 				default:
 					t.Errorf("startup reached intake: %s", r.URL.Path)
+					cancel()
 					return nil, context.Canceled
 				}
 			})
@@ -425,6 +437,7 @@ func TestApprovalStoredChecksUseCurrentRolesOnEveryStart(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			current := approvalConfiguration()
 			// Current order differs; protected names must come from the saved copy.
+			current.Workflow.Stages[4].Approval = current.Workflow.Stages[2].Approval
 			current.Workflow.Stages[2].Approval = nil
 			tt.change(&current)
 			for attempt := 0; attempt < 2; attempt++ {
@@ -438,7 +451,7 @@ func TestApprovalStoredChecksUseCurrentRolesOnEveryStart(t *testing.T) {
 		t.Fatalf("saved copy: %v", err)
 	}
 	cfg.Workflow = nil
-	if err := prepareStoredApprovals(&cfg, store); err == nil || err.Error() != "approval stages are not available yet" {
+	if err := prepareStoredApprovals(&cfg, store); err != nil {
 		t.Fatalf("removed current approval: %v", err)
 	}
 	cfg = approvalConfiguration()
@@ -448,6 +461,52 @@ func TestApprovalStoredChecksUseCurrentRolesOnEveryStart(t *testing.T) {
 	}
 	if err := prepareStoredApprovals(&cfg, store); err == nil || !strings.Contains(err.Error(), "new request") {
 		t.Fatalf("old copy: %v", err)
+	}
+}
+
+func TestApprovalAbsentLeavesHistoryRetriesToRun(t *testing.T) {
+	cfg := approvalConfiguration()
+	cfg.Workflow.Stages[2].Approval = nil
+	// An ordinary run does not need a store at this preparation step.
+	if err := prepareStoredApprovals(&cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	store, err := chain.Open(filepath.Join(t.TempDir(), "run"), "request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := os.WriteFile(filepath.Join(store.Dir, "history.json"), []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareStoredApprovals(&cfg, store); err != nil {
+		t.Fatal("ordinary run stopped before history retry", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	retries := 0
+	engine := chain.Chain{
+		Router: chain.OneRoleRouter{Role: "a"}, Executor: chain.Processes{}, Store: store,
+		Workflow: cfg.Workflow, RetryDelay: time.Millisecond,
+		Observe: func(message string) {
+			if !strings.HasPrefix(message, "loading request history: ") {
+				t.Errorf("unexpected observation: %s", message)
+				cancel()
+				return
+			}
+			retries++
+			if err := store.Save(chain.State{Request: "request", Done: true}); err != nil {
+				t.Error(err)
+				cancel()
+			}
+		},
+	}
+	// Use the same prepareStoredApprovals -> Chain.Run sequence as main.
+	if err := engine.Run(ctx); err != nil {
+		t.Fatal("history retry did not recover", err)
+	}
+	if retries != 1 {
+		t.Fatalf("history retries=%d, want 1", retries)
 	}
 }
 
@@ -490,7 +549,7 @@ func TestApprovalParentAndChildRecordSameJob(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	parentRead := false
+	commentReads := int64(0)
 	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {
 		case "/api/v2/users/myself":
@@ -500,16 +559,14 @@ func TestApprovalParentAndChildRecordSameJob(t *testing.T) {
 		case "/api/v2/issues":
 			return selectionReply(r, 200, []any{}), nil
 		case "/api/v2/issues/EXAMPLE-51/comments":
-			id, body := int64(701), "parent saw this"
-			if parentRead {
-				id, body = 702, "child saw this"
-			} else {
-				parentRead = true
+			commentReads++
+			if commentReads == 1 {
 				cancel()
 			}
-			return selectionReply(r, 200, []json.RawMessage{seenTestRaw(id, 88, body, 0)}), nil
+			return selectionReply(r, 200, []json.RawMessage{seenTestRaw(700+commentReads, 88, "observed comment", 0)}), nil
 		default:
 			t.Errorf("unexpected request: %s", r.URL.Path)
+			cancel()
 			return nil, errors.New("unexpected request")
 		}
 	})
@@ -521,15 +578,24 @@ func TestApprovalParentAndChildRecordSameJob(t *testing.T) {
 	if got := readSeenTest(t, jobs); len(got) != 1 || got[0].ID != 701 {
 		t.Fatalf("parent record: %+v", got)
 	}
-	// Same setup called by run with --run-dir, before making access wrappers. No test-only
-	// bypass of the preflight gate is exposed to operators.
+	// The shared run setup hands roleAccess a configuration copy. Read through
+	// the source captured at that boundary as well as the runtime's later source.
+	// Role HTTP forwarding is unchanged; it is outside the recording contract.
 	store, err = chain.Open(runDir, request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
 	cfg.commentJobs = filepath.Join(root, "wrong-child")
-	setRunCommentJobs(&cfg, runDir+string(filepath.Separator))
+	var roleSource tracker.Tracker
+	prepareAccess, err := prepareRunAccess(&cfg, runDir+string(filepath.Separator), "EXAMPLE-51",
+		func(bound config, assigned string, options ...func(*tracker.IssueScope)) (func(context.Context, chain.Process) (chain.Process, func(), error), error) {
+			roleSource = bound.source()
+			return roleAccess(bound, assigned, options...)
+		})
+	if err != nil || prepareAccess == nil || roleSource == nil {
+		t.Fatalf("child access preparation: %v", err)
+	}
 	if err := prepareStoredApprovals(&cfg, store); err != nil {
 		t.Fatal(err)
 	}
@@ -537,11 +603,17 @@ func TestApprovalParentAndChildRecordSameJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := roleSource.Comments(context.Background(), issue); err != nil {
+		t.Fatal("role access source", err)
+	}
+	if got := readSeenTest(t, jobs); len(got) != 2 || got[0].ID != 701 || got[1].ID != 702 {
+		t.Fatalf("role access record: %+v", got)
+	}
 	if _, err := cfg.source().Comments(context.Background(), issue); err != nil {
 		t.Fatal(err)
 	}
 	got := readSeenTest(t, jobs)
-	if len(got) != 2 || got[0].ID != 701 || got[1].ID != 702 {
+	if len(got) != 3 || got[0].ID != 701 || got[1].ID != 702 || got[2].ID != 703 {
 		t.Fatalf("shared record: %+v", got)
 	}
 	for _, path := range []string{filepath.Join(root, "wrong-parent"), filepath.Join(root, "wrong-child"), filepath.Join(job, "51"), filepath.Join(runDir, "comments-seen.json")} {
