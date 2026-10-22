@@ -271,3 +271,93 @@ func TestABacklogProjectAsksTheTrackerWhatTheEngineAskedBefore(t *testing.T) {
 		t.Fatalf("requests:\n%s", strings.Join(seen, "\n"))
 	}
 }
+
+// Synthetic fixtures use the public API response shape, never live records:
+// https://developer.nulab.com/docs/backlog/api/2/get-comment-list/
+// https://developer.nulab.com/docs/backlog/api/2/get-comment/
+func TestBacklogCommentMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name, metadata    string
+		title, attachment bool
+		created, updated  bool
+	}{
+		{"summary", `"created":"2026-01-03T00:00:00Z","updated":"2026-01-03T01:00:00Z","changeLog":[{"field":"summary","newValue":"New title","originalValue":"Old title","attachmentInfo":null,"attributeInfo":null,"notificationInfo":null}]`, true, false, true, true},
+		{"description", `"created":"2026-01-03T00:00:00Z","updated":"2026-01-03T01:00:00Z","changeLog":[{"field":"description","newValue":"New text","originalValue":"Old text","attachmentInfo":null,"attributeInfo":null,"notificationInfo":null}]`, true, false, true, true},
+		{"attachment", `"created":"2026-01-03T00:00:00Z","updated":"2026-01-03T01:00:00Z","changeLog":[{"field":"attachment","newValue":null,"originalValue":null,"attachmentInfo":{"id":81,"name":"example.txt"},"attributeInfo":null,"notificationInfo":null}]`, false, true, true, true},
+		{"assigner", `"created":"2026-01-03T00:00:00Z","updated":"2026-01-03T01:00:00Z","changeLog":[{"field":"assigner","newValue":"56","originalValue":"55","attachmentInfo":null,"attributeInfo":null,"notificationInfo":null}]`, false, false, true, true},
+		{"missing", `"stars":[]`, false, false, false, false},
+		{"null", `"created":null,"updated":null,"changeLog":null`, false, false, false, false},
+		{"unreadable", `"created":42,"updated":"not a time","changeLog":{}`, false, false, false, false},
+		{"independent fields", `"created":"not a time","updated":"2026-01-03T01:00:00Z","changeLog":[{"field":42},{"field":"summary"},{"field":"attachment"}]`, true, true, false, true},
+		{"independent updated", `"created":"2026-01-03T00:00:00Z","updated":[],"changeLog":[{"field":"assigner"}]`, false, false, true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := json.RawMessage(`{"id":701,"projectId":17,"issueId":51,"content":"Example comment","createdUser":{"id":55,"userId":"example","name":"Example","roleType":2,"lang":"en","mailAddress":"example@example.invalid"},"notifications":[],` + test.metadata + `}`)
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("method: %s", r.Method)
+				}
+				switch r.URL.Path {
+				case "/api/v2/issues/EXAMPLE-51/comments":
+					fmt.Fprintf(w, "[%s]", raw)
+				case "/api/v2/issues/EXAMPLE-51/comments/701":
+					w.Write(raw)
+				default:
+					t.Errorf("unexpected path: %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			t.Setenv("COMMENT_METADATA_TEST_KEY", "fixture")
+			project := BacklogProject{ProjectID: 17, Client: Backlog{BaseURL: server.URL + "/api/v2", KeyEnv: "COMMENT_METADATA_TEST_KEY", Client: server.Client()}}
+			issue := Issue{ID: 51, Key: "EXAMPLE-51"}
+			rows, err := project.Comments(context.Background(), issue)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("list: %d rows (%v)", len(rows), err)
+			}
+			single, err := project.Client.Comment(context.Background(), issue.Key, 701)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, record := range append(rows, single) {
+				got, err := project.ReadComment(record, issue)
+				want := Comment{ID: 701, Body: "Example comment", Author: Account{ID: 55}, OnIssue: true,
+					ChangedTitleOrDescription: test.title, HasAttachment: test.attachment}
+				if test.created {
+					want.Created = time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
+				}
+				if test.updated {
+					want.Updated = time.Date(2026, 1, 3, 1, 0, 0, 0, time.UTC)
+				}
+				if err != nil || got != want {
+					t.Fatalf("got %+v (%v), want %+v", got, err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestTrackerTextFormattingRule(t *testing.T) {
+	for _, rule := range []string{"markdown", "backlog"} {
+		t.Run(rule, func(t *testing.T) {
+			// https://developer.nulab.com/docs/backlog/api/2/get-project/
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api/v2/projects/17" {
+					t.Errorf("request: %s %s", r.Method, r.URL.Path)
+				}
+				fmt.Fprintf(w, `{"id":17,"projectKey":"EXAMPLE","name":"Example","textFormattingRule":%q,"archived":false}`, rule)
+			}))
+			defer server.Close()
+			t.Setenv("FORMATTING_TEST_KEY", "fixture")
+			project := BacklogProject{ProjectID: 17, Client: Backlog{BaseURL: server.URL + "/api/v2", KeyEnv: "FORMATTING_TEST_KEY", Client: server.Client()}}
+			if got, err := project.TextFormattingRule(context.Background()); err != nil || got != rule {
+				t.Fatalf("format: %q (%v)", got, err)
+			}
+		})
+	}
+	for _, source := range []Tracker{GitHub{}, RedmineProject{}} {
+		if got, err := source.TextFormattingRule(context.Background()); err != nil || got != "" {
+			t.Fatalf("%T format: %q (%v)", source, got, err)
+		}
+	}
+}

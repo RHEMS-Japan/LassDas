@@ -679,3 +679,5 @@ func (r Redmine) call(ctx context.Context, method, path string, query url.Values
 	}
 	return nil, &trackerError{Status: response.StatusCode, Body: redact(string(data))}
 }
+
+func (p RedmineProject) TextFormattingRule(context.Context) (string, error) { return "", nil }

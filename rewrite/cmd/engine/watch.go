@@ -315,6 +315,7 @@ func intakeScope(cfg config, since time.Time) string {
 // tell it which already-run engines chose done. Pending histories are resumed
 // by the same engine; the collector does not make a new completion judgment.
 func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, capacity int, log io.Writer) error {
+	cfg.commentJobs = jobs
 	source := cfg.source()
 	if cfg.Intake != nil && cfg.Intake.Assign {
 		// The runtime's own account, to hand an issue back to itself. Without

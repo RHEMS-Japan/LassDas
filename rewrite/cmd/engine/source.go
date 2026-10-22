@@ -7,6 +7,14 @@ import "ticket-runner/internal/tracker"
 // kept beside it, so every copy of a configuration, and every change made to
 // one, reaches it.
 func (cfg config) source() tracker.Tracker {
+	source := cfg.unrecordedSource()
+	if !cfg.recordComments {
+		return source
+	}
+	return recordTrackerComments(source, cfg.commentJobs)
+}
+
+func (cfg config) unrecordedSource() tracker.Tracker {
 	if cfg.GitHub != nil {
 		return *cfg.GitHub
 	}
