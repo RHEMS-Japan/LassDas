@@ -15,6 +15,7 @@ import (
 // setting the graph form uses; attaching it here keeps the accepted run
 // self-describing without asking operators to write the same name twice.
 func prepareStages(cfg *config) error {
+	cfg.recordComments = hasApproval(cfg.Workflow) && cfg.GitHub == nil && cfg.Redmine == nil
 	staged := cfg.Workflow != nil && len(cfg.Workflow.Stages) > 0
 	if (cfg.Router.Mode == "stages") != staged {
 		return errors.New("router.mode stages and workflow.stages are one setting; configure both or neither")
@@ -48,5 +49,5 @@ func prepareStages(cfg *config) error {
 			return fmt.Errorf("model stage %q launches no model", stage.Name)
 		}
 	}
-	return nil
+	return validateApprovalStages(*cfg)
 }

@@ -30,9 +30,10 @@ const EnvironmentPause = "pause_for_environment"
 // command runs again; a model stage takes none, because a process error simply
 // launches it again.
 type Stage struct {
-	Name      string `json:"name"`
-	Kind      string `json:"kind"`
-	OnFailure string `json:"on_failure,omitempty"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"`
+	OnFailure string    `json:"on_failure,omitempty"`
+	Approval  *Approval `json:"approval,omitempty"`
 	// Confirm marks a model stage whose role reads the change before it is
 	// delivered. When it finishes, the decision service chooses as after the
 	// first stage: the first stage, the question role or the next stage. A

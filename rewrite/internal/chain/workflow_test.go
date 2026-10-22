@@ -414,3 +414,81 @@ func TestTheRequestersAnswerReachesTheNextDecisionWithOnlyItsConnections(t *test
 		}
 	}
 }
+
+func TestApprovalConfigurationValues(t *testing.T) {
+	fresh := func() Stage {
+		return Stage{Name: "c", Kind: CommandStage, OnFailure: "a", Approval: &Approval{ApproverUserIDs: []int64{7}, Bundle: "ops/bundle", Show: []string{"dry-run.txt"}, ExpiryHours: 72}}
+	}
+	tests := []struct {
+		name   string
+		change func(*Stage)
+		valid  bool
+	}{
+		{"valid", func(*Stage) {}, true},
+		{"no approval", func(s *Stage) { s.Approval = nil }, true},
+		{"multiple approvers", func(s *Stage) { s.Approval.ApproverUserIDs = []int64{7, 8} }, true},
+		{"local show", func(s *Stage) { s.Approval.Show = []string{"sub/../dry-run.txt"} }, true},
+		{"no approvers", func(s *Stage) { s.Approval.ApproverUserIDs = nil }, false},
+		{"zero id", func(s *Stage) { s.Approval.ApproverUserIDs = []int64{0} }, false},
+		{"negative id", func(s *Stage) { s.Approval.ApproverUserIDs = []int64{-1} }, false},
+		{"empty bundle", func(s *Stage) { s.Approval.Bundle = "" }, false},
+		{"absolute bundle", func(s *Stage) { s.Approval.Bundle = "/bundle" }, false},
+		{"parent bundle", func(s *Stage) { s.Approval.Bundle = "../bundle" }, false},
+		{"internal parent bundle", func(s *Stage) { s.Approval.Bundle = "ops/../bundle" }, false},
+		{"empty show", func(s *Stage) { s.Approval.Show = nil }, false},
+		{"empty show path", func(s *Stage) { s.Approval.Show = []string{""} }, false},
+		{"absolute show", func(s *Stage) { s.Approval.Show = []string{"/file"} }, false},
+		{"parent show", func(s *Stage) { s.Approval.Show = []string{"../file"} }, false},
+		{"zero expiry", func(s *Stage) { s.Approval.ExpiryHours = 0 }, false},
+		{"negative expiry", func(s *Stage) { s.Approval.ExpiryHours = -1 }, false},
+		{"model approval", func(s *Stage) { s.Kind = ModelStage }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stage := fresh()
+			tt.change(&stage)
+			err := stage.ValidateApproval()
+			if (err == nil) != tt.valid {
+				t.Fatalf("valid=%t, error=%v", tt.valid, err)
+			}
+		})
+	}
+	w := &Workflow{Stages: []Stage{{Name: "a", Kind: ModelStage}, fresh()}}
+	roles := map[string]string{"a": "first", "c": "last"}
+	if err := w.Validate(roles); err != nil {
+		t.Fatal(err)
+	}
+	w.Stages[1].Approval.ExpiryHours = 0
+	if err := w.Validate(roles); err == nil {
+		t.Fatal("workflow accepted invalid approval")
+	}
+}
+
+func TestWorkflowCloneOmitsApprovalAuthority(t *testing.T) {
+	original := &Workflow{Stages: []Stage{{Name: "c", Kind: CommandStage, Approval: &Approval{ApproverUserIDs: []int64{7}, Bundle: "ops/bundle", Show: []string{"dry-run.txt"}, ExpiryHours: 72}}}}
+	copied := original.clone()
+	if !reflect.DeepEqual(original.Stages[0].Approval.ApproverUserIDs, []int64{7}) {
+		t.Fatal("clone changed current approvers")
+	}
+	want := &Approval{Bundle: "ops/bundle", Show: []string{"dry-run.txt"}, ExpiryHours: 72}
+	if !reflect.DeepEqual(copied.Stages[0].Approval, want) {
+		t.Fatalf("copy: %+v", copied.Stages[0].Approval)
+	}
+	raw, err := json.Marshal(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "approver_user_ids") {
+		t.Fatal("saved approver authority")
+	}
+	original.Stages[0].Approval.Bundle = "different"
+	original.Stages[0].Approval.Show[0] = "changed"
+	original.Stages[0].Approval.ExpiryHours = 1
+	if !reflect.DeepEqual(copied.Stages[0].Approval, want) {
+		t.Fatal("copy shares mutable approval settings")
+	}
+	copied.Stages[0].Approval.Show[0] = "copy-only"
+	if original.Stages[0].Approval.Show[0] != "changed" {
+		t.Fatal("copy mutated current settings")
+	}
+}

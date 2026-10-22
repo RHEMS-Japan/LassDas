@@ -3,6 +3,7 @@ package chain
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -72,6 +73,49 @@ type Preview struct {
 	HoldHours *int `json:"hold_hours,omitempty"`
 }
 
+// Approval describes the operator's conditions for a command stage. The run's
+// copy omits approvers: authority always comes from the current configuration.
+type Approval struct {
+	ApproverUserIDs []int64  `json:"approver_user_ids,omitempty"`
+	Bundle          string   `json:"bundle"`
+	Show            []string `json:"show"`
+	ExpiryHours     int      `json:"expiry_hours"`
+}
+
+// ValidateApproval checks current configuration, never a saved run's copy.
+func (s Stage) ValidateApproval() error {
+	a := s.Approval
+	if a == nil {
+		return nil
+	}
+	if s.Kind != CommandStage {
+		return fmt.Errorf("stage %q: approval requires a command stage", s.Name)
+	}
+	if len(a.ApproverUserIDs) == 0 {
+		return fmt.Errorf("stage %q: approval needs approver_user_ids", s.Name)
+	}
+	for _, id := range a.ApproverUserIDs {
+		if id <= 0 {
+			return fmt.Errorf("stage %q: approval approver_user_ids must be positive", s.Name)
+		}
+	}
+	if !filepath.IsLocal(a.Bundle) || slices.Contains(strings.Split(a.Bundle, string(filepath.Separator)), "..") {
+		return fmt.Errorf("stage %q: approval bundle must be a local relative path without parent components", s.Name)
+	}
+	if len(a.Show) == 0 {
+		return fmt.Errorf("stage %q: approval needs show paths", s.Name)
+	}
+	for _, path := range a.Show {
+		if !filepath.IsLocal(path) {
+			return fmt.Errorf("stage %q: approval show paths must be local to bundle", s.Name)
+		}
+	}
+	if a.ExpiryHours <= 0 {
+		return fmt.Errorf("stage %q: approval expiry_hours must be positive", s.Name)
+	}
+	return nil
+}
+
 func (w *Workflow) Validate(roles map[string]string) error {
 	if w == nil {
 		return nil
@@ -91,6 +135,11 @@ func (w *Workflow) Validate(roles map[string]string) error {
 	if len(w.Stages) > 0 {
 		if len(w.LaunchLimit) > 0 {
 			return errors.New("workflow.launch_limit belongs to connected roles; an ordered run advances on observed results")
+		}
+		for _, stage := range w.Stages {
+			if err := stage.ValidateApproval(); err != nil {
+				return err
+			}
 		}
 		return w.validateStages(roles)
 	}
@@ -157,6 +206,11 @@ func (w *Workflow) clone() *Workflow {
 	copy := &Workflow{Start: slices.Clone(w.Start), After: map[string][]string{}, Recover: map[string][]string{},
 		Stages: slices.Clone(w.Stages), Question: w.Question, EntranceReworkLimit: w.EntranceReworkLimit,
 		ConfirmationReworkLimit: w.ConfirmationReworkLimit, EnvironmentPauseLimit: w.EnvironmentPauseLimit}
+	for i, stage := range w.Stages {
+		if a := stage.Approval; a != nil {
+			copy.Stages[i].Approval = &Approval{Bundle: a.Bundle, Show: slices.Clone(a.Show), ExpiryHours: a.ExpiryHours}
+		}
+	}
 	if w.Preview != nil {
 		// The run launches only the up role; the queue takes the page down
 		// with the operator's current setting.

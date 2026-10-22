@@ -317,7 +317,11 @@ func intakeScope(cfg config, since time.Time) string {
 func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, capacity int, log io.Writer) error {
 	cfg.commentJobs = jobs
 	source := cfg.source()
-	if cfg.Intake != nil && cfg.Intake.Assign {
+	if hasApproval(cfg.Workflow) {
+		if err := startApprovalWatch(ctx, &cfg, source); err != nil {
+			return err
+		}
+	} else if cfg.Intake != nil && cfg.Intake.Assign {
 		// The runtime's own account, to hand an issue back to itself. Without
 		// it the work still runs; only the hand-overs wait for a later start.
 		if me, err := source.Myself(ctx); err != nil {

@@ -319,6 +319,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 	environmentFacts, routerInstructions := "", cfg.Instructions
 	if !*watch && !*check {
 		timeFacts, supervised := ctx.Value(acceptedTimeFactsKey{}).(string)
+		if err := validateApprovalRun(cfg, supervised); err != nil {
+			return err
+		}
 		if !supervised {
 			// A direct invocation, or the report after an authorized stop:
 			// no saved cap of an accepted request applies to this run.
@@ -411,7 +414,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		}
 		assigned = *issue
 	}
-	prepareAccess, err := roleAccess(cfg, assigned)
+	prepareAccess, err := prepareRunAccess(&cfg, *directory, assigned, roleAccess)
 	if err != nil {
 		return err
 	}
@@ -427,8 +430,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		return err
 	}
 	defer store.Close()
-	// The run is jobs/<id>/run; comments belong beside that run.
-	cfg.commentJobs = filepath.Dir(filepath.Dir(store.Dir))
+	if err := prepareStoredApprovals(&cfg, store); err != nil {
+		return err
+	}
 	executor := chain.Processes{Roles: roles, Prepare: prepareAccess, HistoryPath: filepath.Join(store.Dir, "history.json"),
 		EnvironmentFacts: environmentFacts}
 	if cfg.ModelSelection != nil {
