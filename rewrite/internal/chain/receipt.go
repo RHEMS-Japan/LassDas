@@ -11,50 +11,40 @@ import (
 
 const receiptBytes = 1 << 20
 
-func readReceipt(directory, name string) ([]byte, error) {
-	if !filepath.IsLocal(name) {
-		return nil, errors.New("receipt must be inside the process directory")
+func readReceipt(workspace, directory, name string) ([]byte, error) {
+	if name == "" || filepath.IsAbs(name) {
+		return nil, errors.New("receipt must be a relative path")
 	}
-	for _, part := range strings.Split(name, string(filepath.Separator)) {
-		if part == ".." {
-			return nil, errors.New("receipt must not contain a parent component")
-		}
+	directory, err := filepath.Abs(directory)
+	if err != nil {
+		return nil, err
 	}
-	if !filepath.IsAbs(directory) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return nil, err
-		}
-		directory = cwd + string(filepath.Separator) + directory
+	if workspace == "" {
+		workspace = directory
 	}
-	root, err := os.OpenRoot(string(filepath.Separator))
+	workspace, err = filepath.Abs(workspace)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := filepath.Rel(workspace, directory)
+	if err != nil {
+		return nil, err
+	}
+	if !filepath.IsLocal(rel) {
+		return nil, errors.New("process directory must be inside the workspace")
+	}
+	rel = filepath.Clean(filepath.Join(rel, name))
+	if !filepath.IsLocal(rel) {
+		return nil, errors.New("receipt must be inside the workspace")
+	}
+	// The operator chooses the workspace location; links above this boundary
+	// are allowed. Inspect every directory below it without following links.
+	root, err := os.OpenRoot(workspace)
 	if err != nil {
 		return nil, err
 	}
 	defer root.Close()
-	// Do not clean the process path: even a link followed by /.. must be
-	// rejected. Keep opened parents so ordinary /.. still resolves safely.
-	parents := []*os.Root{root}
-	for _, part := range strings.Split(directory, string(filepath.Separator)) {
-		switch part {
-		case "", ".":
-			continue
-		case "..":
-			if len(parents) > 1 {
-				parents = parents[:len(parents)-1]
-			}
-			root = parents[len(parents)-1]
-			continue
-		}
-		next, err := receiptDirectory(root, part)
-		if err != nil {
-			return nil, err
-		}
-		defer next.Close()
-		parents = append(parents, next)
-		root = next
-	}
-	parts := strings.Split(filepath.Clean(name), string(filepath.Separator))
+	parts := strings.Split(rel, string(filepath.Separator))
 	for _, part := range parts[:len(parts)-1] {
 		next, err := receiptDirectory(root, part)
 		if err != nil {

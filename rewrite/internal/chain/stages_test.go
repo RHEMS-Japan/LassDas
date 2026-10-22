@@ -666,11 +666,7 @@ func TestOrderedRunRejectsConfigurationThatWouldLetWordsDecide(t *testing.T) {
 // operator's own receipt file, so the next stage reads facts rather than a
 // claim. It is plain text and nothing has to answer in its shape.
 func TestRuntimeRecordsWhatEachStageReturnedAndTheReceiptItReadBack(t *testing.T) {
-	// This case needs an ordinary path, including above the process directory.
-	directory, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	directory := t.TempDir()
 	if err := os.WriteFile(filepath.Join(directory, "receipt.txt"), []byte("delivered 1 file"), 0600); err != nil {
 		t.Fatal(err)
 	}

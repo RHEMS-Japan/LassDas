@@ -27,20 +27,22 @@ func TestProcessReceiptRead(t *testing.T) {
 		{"over_limit", false},
 		{"at_limit", true},
 		{"hardlink", false},
-		{"parent_component", false},
-		{"cleanable_parent_component", false},
+		{"parent_component_inside_workspace", true},
+		{"parent_component_outside_workspace", false},
+		{"process_directory_outside_workspace", false},
+		{"workspace_linked_parent", true},
+		{"cleanable_parent_component", true},
 		{"absolute", false},
 		{"directory", false},
 		{"missing", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			// Resolve the test runner's temporary-directory aliases (such as
-			// /var on Darwin) before creating the deliberately unsafe paths.
-			base, err := filepath.EvalSymlinks(t.TempDir())
-			if err != nil {
+			base := t.TempDir()
+			workspace := filepath.Join(base, "workspace")
+			if err := os.Mkdir(workspace, 0700); err != nil {
 				t.Fatal(err)
 			}
-			directory := filepath.Join(base, "work")
+			directory := filepath.Join(workspace, "work")
 			if err := os.Mkdir(directory, 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -89,10 +91,10 @@ func TestProcessReceiptRead(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "process_directory_symlink", "process_directory_ancestor_symlink":
-				alias := filepath.Join(base, "alias")
+				alias := filepath.Join(workspace, "alias")
 				target := directory
 				if test.name == "process_directory_ancestor_symlink" {
-					target = base
+					target = workspace
 				}
 				if err := os.Symlink(target, alias); err != nil {
 					t.Fatal(err)
@@ -105,6 +107,7 @@ func TestProcessReceiptRead(t *testing.T) {
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
 				}
+				var err error
 				if test.name == "fifo" {
 					err = syscall.Mkfifo(path, 0600)
 				} else if test.name == "directory" {
@@ -113,15 +116,36 @@ func TestProcessReceiptRead(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-			case "parent_component":
+			case "parent_component_inside_workspace":
+				report := filepath.Join(workspace, "report")
+				if err := os.Mkdir(report, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(path, filepath.Join(report, "result.json")); err != nil {
+					t.Fatal(err)
+				}
+				receipt = "../report/result.json"
+			case "parent_component_outside_workspace":
 				if err := os.Rename(path, filepath.Join(base, receipt)); err != nil {
 					t.Fatal(err)
 				}
-				receipt = "../receipt.txt"
+				receipt = "../../receipt.txt"
+			case "process_directory_outside_workspace":
+				// Even a receipt pointing back inside cannot authorize an
+				// out-of-workspace process directory.
+				directory = base
+				receipt = "workspace/work/receipt.txt"
+			case "workspace_linked_parent":
+				alias := filepath.Join(base, "alias")
+				if err := os.Symlink(base, alias); err != nil {
+					t.Fatal(err)
+				}
+				workspace = filepath.Join(alias, "workspace")
+				directory = filepath.Join(workspace, "work")
 			case "absolute":
 				receipt = path
 			}
-			p := Process{Command: []string{"/bin/sh", "-c", "printf 'process succeeded'"}, Directory: directory, Receipt: receipt}
+			p := Process{Command: []string{"/bin/sh", "-c", "printf 'process succeeded'"}, Directory: directory, Receipt: receipt, Env: map[string]string{"TASK_WORKSPACE": workspace}}
 			result := runReceiptProcess(t, p)
 			if test.readable {
 				want := receipt + ", read back by the runtime:\n" + content
@@ -136,10 +160,7 @@ func TestProcessReceiptRead(t *testing.T) {
 }
 
 func TestProcessReceiptRelativeDirectory(t *testing.T) {
-	base, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	base := t.TempDir()
 	t.Chdir(base)
 	if err := os.Mkdir("work", 0700); err != nil {
 		t.Fatal(err)
@@ -157,14 +178,11 @@ func TestProcessReceiptRelativeDirectory(t *testing.T) {
 			}
 		})
 	}
-	if err := os.Symlink("work", "alias"); err != nil {
-		t.Fatal(err)
-	}
-	for _, directory := range []string{"alias", "alias/.."} {
-		t.Run(directory, func(t *testing.T) {
-			result := runReceiptProcess(t, Process{Command: []string{"/bin/sh", "-c", "printf 'process succeeded'"}, Directory: directory, Receipt: "receipt.txt"})
-			if !strings.HasPrefix(result.Receipt, "receipt.txt could not be read back: ") {
-				t.Fatal("relative process directory link was followed")
+	for _, receipt := range []string{"../receipt.txt", "nested/../../receipt.txt"} {
+		t.Run(receipt, func(t *testing.T) {
+			result := runReceiptProcess(t, Process{Command: []string{"/bin/sh", "-c", "printf 'process succeeded'"}, Directory: "work", Receipt: receipt})
+			if !strings.HasPrefix(result.Receipt, receipt+" could not be read back: ") {
+				t.Fatal("receipt escaped the fallback process directory")
 			}
 		})
 	}

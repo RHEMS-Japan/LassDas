@@ -1290,10 +1290,13 @@ each process ended, and the content of the file named by that process's
 `receipt` setting when there is one. It is plain text for the next stage to
 read, not a shape anything has to answer in, and it is also where one launch
 ends, so a repaired stage is never read as part of the launch that failed.
-Receipt reads follow no symbolic links, including in the process directory's
-path, and accept only regular files with one hard link and at most 1 MiB.
-An absolute receipt path, any `..` component, or a file that fails these checks
-is treated as an unreadable, absent receipt without failing the process.
+Receipt reads follow no symbolic links inside the workspace (links above its
+location are allowed), accept only regular files with one hard link and at
+most 1 MiB, and treat absolute paths, paths outside the workspace, or files
+that fail these checks as unreadable, absent receipts without failing the
+process; when TASK_WORKSPACE is unset, the process directory is the boundary.
+Linked receipts inside the workspace, FIFOs, files with multiple hard links,
+and files over 1 MiB are now intentionally unreadable even if previously read.
 One launch of a process has no time limit unless its `timeout_minutes` names
 one; a launch that reaches that limit is stopped and recorded like any failure.
 
