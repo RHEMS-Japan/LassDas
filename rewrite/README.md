@@ -2077,8 +2077,8 @@ SHA-256 body digest, creation time and update time in
 It keeps the first values read for each comment id, never overwrites them on a
 later read, and does not delete earlier entries.
 Reads with an issue id of zero and comments with an empty body are not recorded.
-Recording is currently disabled by an internal flag; PR2 will enable it only
-for configurations with approval conditions.
+Recording is currently disabled by an internal flag.
+A later change enables it only for settings with approval conditions.
 
 ### Requester stop in watch mode
 

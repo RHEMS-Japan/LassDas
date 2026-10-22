@@ -56,6 +56,9 @@ func readSeenTest(t *testing.T, jobs string) []seenComment {
 
 func TestCommentsSeenKeepsFirstReadAcrossWrappers(t *testing.T) {
 	jobs := filepath.Join(t.TempDir(), "jobs")
+	if err := os.MkdirAll(filepath.Join(jobs, "51"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	issue := tracker.Issue{ID: 51, Key: "EXAMPLE-51"}
 	base := seenTestTracker{Tracker: tracker.BacklogProject{ProjectID: 17}, rows: []json.RawMessage{
 		seenTestRaw(701, 55, "original 日本語", 0), seenTestRaw(702, 56, "", 0),
@@ -126,6 +129,9 @@ func TestCommentsSeenSkipsEmptyBodiesAndUnknownIssue(t *testing.T) {
 
 func TestCommentsSeenConcurrentReadersKeepEveryRow(t *testing.T) {
 	jobs := filepath.Join(t.TempDir(), "jobs")
+	if err := os.MkdirAll(filepath.Join(jobs, "51"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	issue := tracker.Issue{ID: 51, Key: "EXAMPLE-51"}
 	base := seenTestTracker{Tracker: tracker.BacklogProject{ProjectID: 17}}
 	for id := int64(1); id <= 40; id++ {
@@ -212,6 +218,9 @@ func TestSourceCommentRecordingFlag(t *testing.T) {
 		}
 	}
 	cfg := config{recordComments: true, commentJobs: filepath.Join(t.TempDir(), "jobs"), Intake: &intakeConfig{ProjectID: 17}}
+	if err := os.MkdirAll(filepath.Join(cfg.commentJobs, "51"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := cfg.source().ReadComment(seenTestRaw(701, 55, "source read", 0), tracker.Issue{ID: 51}); err != nil {
 		t.Fatal(err)
 	}
@@ -260,5 +269,41 @@ func TestCommentsSeenRefusesUnreadableRecordsAndStorageFailures(t *testing.T) {
 	}
 	if _, err := recordTrackerComments(base, t.TempDir()).ReadComment(json.RawMessage(`{"id":0}`), issue); err == nil {
 		t.Fatal("invalid comment accepted")
+	}
+}
+
+func TestCommentsSeenPassesThroughUnreadableAndOffIssueRows(t *testing.T) {
+	jobs := t.TempDir()
+	if err := os.Mkdir(filepath.Join(jobs, "51"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	issue := tracker.Issue{ID: 51}
+	odd := json.RawMessage(`{"id":950,"issueId":"51","projectId":null,"createdUser":"someone","content":"unrelated words"}`)
+	offIssue := json.RawMessage(`{"id":951,"issueId":52,"projectId":17,"createdUser":{"id":55},"content":"another issue"}`)
+	base := seenTestTracker{Tracker: tracker.BacklogProject{ProjectID: 17}, rows: []json.RawMessage{
+		odd, offIssue, seenTestRaw(952, 55, "readable words", 0),
+	}}
+	rows, err := recordTrackerComments(base, jobs).Comments(context.Background(), issue)
+	if err != nil || !reflect.DeepEqual(rows, base.rows) {
+		t.Fatalf("comments changed: %s (%v)", rows, err)
+	}
+	if seen := readSeenTest(t, jobs); len(seen) != 1 || seen[0].ID != 952 {
+		t.Fatalf("recorded unreadable or off-issue rows: %+v", seen)
+	}
+}
+
+func TestCommentsSeenDoesNotCreateMissingJobDirectory(t *testing.T) {
+	jobs := filepath.Join(t.TempDir(), "jobs")
+	issue := tracker.Issue{ID: 51}
+	base := seenTestTracker{Tracker: tracker.BacklogProject{ProjectID: 17}, rows: []json.RawMessage{seenTestRaw(701, 55, "words", 0)}}
+	source := recordTrackerComments(base, jobs)
+	if _, err := source.Comments(context.Background(), issue); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("list did not fail for missing directory: %v", err)
+	}
+	if _, err := source.ReadComment(base.rows[0], issue); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("single read did not fail for missing directory: %v", err)
+	}
+	if _, err := os.Stat(jobs); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("created jobs: %v", err)
 	}
 }

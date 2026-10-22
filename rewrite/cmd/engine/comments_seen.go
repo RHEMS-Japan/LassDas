@@ -51,8 +51,8 @@ func (s *recordingTracker) Comments(ctx context.Context, issue tracker.Issue) ([
 	comments := make([]tracker.Comment, 0, len(rows))
 	for _, raw := range rows {
 		comment, err := s.Tracker.ReadComment(raw, issue)
-		if err != nil {
-			return nil, err
+		if err != nil || !comment.OnIssue {
+			continue
 		}
 		comments = append(comments, comment)
 	}
@@ -132,9 +132,6 @@ func (s *recordingTracker) record(issue tracker.Issue, comments []tracker.Commen
 	}
 	data, err = json.Marshal(seen)
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(directory, 0700); err != nil {
 		return err
 	}
 	if err := writeRuntimeFile(path, data); err != nil {
