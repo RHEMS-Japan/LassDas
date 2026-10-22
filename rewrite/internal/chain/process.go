@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -371,7 +370,7 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	if p.Receipt != "" {
 		// An absent or unreadable receipt is an observation like any other. It
 		// is never turned into a failure or into proof that a delivery landed.
-		if content, readErr := os.ReadFile(filepath.Join(p.Directory, p.Receipt)); readErr != nil {
+		if content, readErr := readReceipt(p.Directory, p.Receipt); readErr != nil {
 			result.Receipt = p.Receipt + " could not be read back: " + readErr.Error()
 		} else {
 			result.Receipt = p.Receipt + ", read back by the runtime:\n" + string(content)
