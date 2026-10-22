@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"ticket-runner/internal/chain"
 	"ticket-runner/internal/tracker"
@@ -246,17 +247,6 @@ func validateApprovalStages(cfg config) error {
 			return err
 		}
 	}
-	if cfg.allowApprovalForTest {
-		return nil
-	}
-	return rejectUnavailableApproval(cfg.Workflow)
-}
-
-// Removed only when the parent-side approval handling and end-to-end tests land.
-func rejectUnavailableApproval(workflow *chain.Workflow) error {
-	if hasApproval(workflow) {
-		return errors.New("approval stages are not available yet")
-	}
 	return nil
 }
 
@@ -303,31 +293,40 @@ func prepareRunAccess(cfg *config, runDirectory, issue string, access roleAccess
 }
 
 func prepareStoredApprovals(cfg *config, store *chain.FileStore) error {
-	// Ordinary runs leave history loading and retries entirely to Chain.Run.
-	if !hasApproval(cfg.Workflow) {
+	currentApproval := hasApproval(cfg.Workflow)
+	if !currentApproval && store == nil {
 		return nil
 	}
 	state, err := store.Load()
 	if err != nil {
+		// Ordinary runs retain Chain.Run's history retry behavior.
+		if !currentApproval {
+			return nil
+		}
 		return err
+	}
+	if !currentApproval && !hasApproval(state.Workflow) {
+		return nil
+	}
+	if hasApproval(state.Workflow) {
+		cfg.recordComments = true
 	}
 	// Run has not taken its first copy yet.
 	if state.Workflow == nil {
 		return nil
 	}
 	if hasApproval(cfg.Workflow) && !hasApproval(state.Workflow) {
-		return errors.New("saved workflow has no approval stages; a new request is required")
+		state.PauseApproval("approval_config_mismatch", time.Now().UTC())
+		return store.Save(state)
 	}
 	saved := *cfg
 	saved.Workflow = state.Workflow
 	// Shape checks 1, 2 and 10 already ran before the immutable copy was taken.
 	for _, check := range []func(config) error{validateApprovalSecrets, validateApprovalTrackerAccess, validateApprovalStopReport, validateApprovalProcessCount} {
 		if err := check(saved); err != nil {
-			return err
+			state.PauseApproval("approval_config_mismatch", time.Now().UTC())
+			return store.Save(state)
 		}
 	}
-	if cfg.allowApprovalForTest {
-		return nil
-	}
-	return rejectUnavailableApproval(state.Workflow)
+	return nil
 }

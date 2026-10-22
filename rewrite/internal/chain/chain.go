@@ -189,6 +189,9 @@ func (c Chain) Run(ctx context.Context) error {
 	if state.Done {
 		return nil
 	}
+	if state.ApprovalPaused() != "" {
+		return ErrApprovalPause
+	}
 	if state.AwaitingApproval != nil {
 		return ErrAwaitingApproval
 	}
@@ -396,7 +399,7 @@ func (c Chain) Run(ctx context.Context) error {
 					}
 					continue
 				}
-				if errors.Is(err, ErrAwaitingApproval) {
+				if errors.Is(err, ErrAwaitingApproval) || errors.Is(err, ErrApprovalPause) {
 					if saveErr := c.save(ctx, state); saveErr != nil {
 						return saveErr
 					}

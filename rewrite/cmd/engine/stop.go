@@ -150,11 +150,8 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			// Bound an unresponsive read independently of an executing role. A
 			// missing control channel pauses work, not the request's goal.
 			readCtx, release := context.WithTimeout(ctx, interval)
-			rows, err = source.Comments(readCtx, issue)
+			rows, instruction, err = readStopComments(readCtx, source, issue, cfg.Intake.StopUserIDs)
 			release()
-			if err == nil {
-				instruction, err = stopInstruction(source, rows, issue, cfg.Intake.StopUserIDs)
-			}
 			if err == nil && issue.Creator.ID <= 0 && len(cfg.Intake.StopUserIDs) == 0 {
 				err = errors.New("requester identity is unavailable for stop instructions")
 			}
@@ -281,7 +278,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				if outcome.clockErr != nil {
 					return errors.Join(outcome.err, outcome.clockErr)
 				}
-				if errors.Is(outcome.err, chain.ErrAwaitingApproval) {
+				if errors.Is(outcome.err, chain.ErrAwaitingApproval) || errors.Is(outcome.err, chain.ErrApprovalPause) {
 					return nil
 				}
 				if !errors.Is(outcome.err, chain.ErrWaiting) {

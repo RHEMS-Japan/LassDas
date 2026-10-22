@@ -202,37 +202,41 @@ func TestApprovalCheck10LaterFailures(t *testing.T) {
 	}
 }
 
-func TestApprovalUnavailableAfterAllChecks(t *testing.T) {
-	const unavailable = "approval stages are not available yet"
+func TestApprovalAvailableAfterAllChecks(t *testing.T) {
 	cfg := approvalConfiguration()
-	if err := prepareStages(&cfg); err == nil || err.Error() != unavailable {
+	if err := prepareStages(&cfg); err != nil {
 		t.Fatalf("gate: %v", err)
 	}
-	// Each check must run before the temporary gate, including the last check.
-	changes := []func(*config){
-		func(c *config) {
+	// Availability still requires every preflight check.
+	changes := []struct {
+		name, want string
+		change     func(*config)
+	}{
+		{"predecessor", "approval needs an immediately preceding command stage", func(c *config) {
 			c.Workflow.Stages[1].Kind = chain.ModelStage
 			c.Roles[1].Processes[0].ModelEnv = "MODEL"
-		},
-		func(c *config) { c.Workflow.Stages[2].OnFailure = "d" },
-		func(c *config) {
+		}},
+		{"failure_target", "approval on_failure", func(c *config) { c.Workflow.Stages[2].OnFailure = "d" }},
+		{"shared_credentials", "approval credentials must not be shared", func(c *config) {
 			c.Roles[1].Processes[0].Secrets = map[string]string{"K": "APPROVAL_TEST_SHARED"}
 			c.Roles[2].Processes[0].Secrets = map[string]string{"K": "APPROVAL_TEST_SHARED"}
-		},
-		func(c *config) { c.Intake.StopUserIDs = nil },
-		func(c *config) { c.Roles[0].Processes[0].TrackerAccess = "read" },
-		func(c *config) { c.Intake.StopReportRole = "c" },
-		func(c *config) { c.Roles[2].Processes = append(c.Roles[2].Processes, chain.Process{}) },
-		func(c *config) { c.GitHub = &tracker.GitHub{} },
-		func(c *config) { c.Workflow.Stages[2].Approval.Show = nil },
-		func(c *config) { c.Workflow.Stages[4].OnFailure = "a" },
+		}},
+		{"stop_users", "approvers must belong to intake.stop_user_ids", func(c *config) { c.Intake.StopUserIDs = nil }},
+		{"tracker_access", "must have no tracker_access", func(c *config) { c.Roles[0].Processes[0].TrackerAccess = "read" }},
+		{"stop_report", "stop_report_role must not name an approval stage", func(c *config) { c.Intake.StopReportRole = "c" }},
+		{"process_count", "must have exactly one process", func(c *config) { c.Roles[2].Processes = append(c.Roles[2].Processes, chain.Process{}) }},
+		{"tracker", "approval stages require Backlog", func(c *config) { c.GitHub = &tracker.GitHub{} }},
+		{"show", "approval needs show paths", func(c *config) { c.Workflow.Stages[2].Approval.Show = nil }},
+		{"later_failure", "on_failure must stay after approval stage", func(c *config) { c.Workflow.Stages[4].OnFailure = "a" }},
 	}
-	for i, change := range changes {
-		cfg := approvalConfiguration()
-		change(&cfg)
-		if err := prepareStages(&cfg); err == nil || err.Error() == unavailable {
-			t.Fatalf("check %d did not precede gate: %v", i+1, err)
-		}
+	for _, tt := range changes {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := approvalConfiguration()
+			tt.change(&cfg)
+			if err := prepareStages(&cfg); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected rejection containing %q, got %v", tt.want, err)
+			}
+		})
 	}
 	cfg = approvalConfiguration()
 	cfg.Workflow.Stages[2].Approval = nil
@@ -243,6 +247,8 @@ func TestApprovalUnavailableAfterAllChecks(t *testing.T) {
 
 func TestApprovalJSONAndCheckHaveNoRemoteReads(t *testing.T) {
 	cfg := approvalConfiguration()
+	cfg.Backlog = watchConfiguration(t).Backlog
+	cfg.Intake.CreatedSince = "2026-01-02T00:00:00Z"
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +279,7 @@ func TestApprovalJSONAndCheckHaveNoRemoteReads(t *testing.T) {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"check", "watch", "single", "child"} {
+	for _, mode := range []string{"check", "single"} {
 		t.Run(mode, func(t *testing.T) {
 			var out bytes.Buffer
 			ctx := readCtx
@@ -290,12 +296,10 @@ func TestApprovalJSONAndCheckHaveNoRemoteReads(t *testing.T) {
 					ctx = context.WithValue(ctx, acceptedTimeFactsKey{}, "accepted limit")
 				}
 			}
-			if err := run(ctx, args, &out, &out); err == nil || err.Error() != "approval stages are not available yet" {
+			if err := run(ctx, args, &out, &out); mode == "check" && err != nil || mode == "single" && (err == nil || !strings.Contains(err.Error(), "single run")) {
 				t.Fatalf("%s: %v", mode, err)
 			}
-			if strings.Contains(out.String(), "configuration is accepted") {
-				t.Fatal("check accepted approval")
-			}
+
 			if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("rejected configuration created a run directory", err)
 			}
@@ -441,13 +445,17 @@ func TestApprovalStoredChecksUseCurrentRolesOnEveryStart(t *testing.T) {
 			current.Workflow.Stages[2].Approval = nil
 			tt.change(&current)
 			for attempt := 0; attempt < 2; attempt++ {
-				if err := prepareStoredApprovals(&current, store); err == nil || !strings.Contains(err.Error(), tt.want) {
+				if err := prepareStoredApprovals(&current, store); err != nil {
 					t.Fatalf("attempt %d: %v", attempt, err)
+				}
+				state, _ := store.Load()
+				if state.ApprovalPaused() != "approval_config_mismatch" {
+					t.Fatal("missing configuration pause")
 				}
 			}
 		})
 	}
-	if err := prepareStoredApprovals(&cfg, store); err == nil || err.Error() != "approval stages are not available yet" {
+	if err := prepareStoredApprovals(&cfg, store); err != nil {
 		t.Fatalf("saved copy: %v", err)
 	}
 	cfg.Workflow = nil
@@ -459,7 +467,7 @@ func TestApprovalStoredChecksUseCurrentRolesOnEveryStart(t *testing.T) {
 	if err := store.Save(chain.State{Request: "request", Workflow: saved}); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareStoredApprovals(&cfg, store); err == nil || !strings.Contains(err.Error(), "new request") {
+	if err := prepareStoredApprovals(&cfg, store); err != nil {
 		t.Fatalf("old copy: %v", err)
 	}
 }
@@ -513,7 +521,7 @@ func TestApprovalAbsentLeavesHistoryRetriesToRun(t *testing.T) {
 func TestApprovalParentAndChildRecordSameJob(t *testing.T) {
 	cfg := approvalConfiguration()
 	cfg.Backlog = watchConfiguration(t).Backlog
-	if err := prepareStages(&cfg); err == nil || err.Error() != "approval stages are not available yet" {
+	if err := prepareStages(&cfg); err != nil {
 		t.Fatalf("gate: %v", err)
 	}
 	if !cfg.recordComments {

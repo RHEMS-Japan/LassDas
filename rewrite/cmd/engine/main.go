@@ -40,9 +40,8 @@ type config struct {
 	// start when issues are handed over.
 	runtimeUser tracker.Account
 	// PR2 enables recording only for settings with approval conditions.
-	allowApprovalForTest bool
-	recordComments       bool
-	commentJobs          string
+	recordComments bool
+	commentJobs    string
 }
 
 // Give the dispatcher the same configured work instructions as its workers.
@@ -261,7 +260,6 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		return err
 	}
 	cfg, err := readConfig(data)
-	cfg.allowApprovalForTest, _ = ctx.Value(approvalTestKey{}).(bool)
 	if err != nil {
 		return err
 	}
@@ -470,7 +468,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		Observe:  observe,
 		Activity: executor.LastActivity,
 	}
-	if hasApproval(cfg.Workflow) {
+	if hasApproval(cfg.Workflow) || cfg.recordComments {
 		source := cfg.source()
 		raw, err := os.ReadFile(filepath.Join(filepath.Dir(store.Dir), "issue.json"))
 		if err != nil {

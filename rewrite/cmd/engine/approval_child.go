@@ -21,8 +21,6 @@ import (
 
 const approvalNotice = "approval_post"
 
-type approvalTestKey struct{}
-
 var (
 	errApprovalTampered     = errors.New("approval comparison mismatch")
 	errApprovalNoApprover   = errors.New("approval has no eligible approver")
@@ -31,8 +29,7 @@ var (
 	errApprovalRetry        = errors.New("approval is waiting for confirmed notices")
 )
 
-// This hook is installed only inside a supervised child. PR2's intake refusal
-// remains in force. Tests may bypass it without a serialized configuration flag.
+// The same comparison is used by the supervised child and the parent.
 type approvalChild struct {
 	cfg       config
 	source    tracker.Tracker
@@ -40,6 +37,7 @@ type approvalChild struct {
 	directory string
 	now       func() time.Time
 	retry     time.Duration
+	parent    bool
 }
 
 func (a approvalChild) clock() time.Time {
@@ -71,16 +69,7 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 	if cfg.Intake != nil {
 		operators = cfg.Intake.StopUserIDs
 	}
-	base := a.source
-	var recorder *recordingTracker
-	switch source := a.source.(type) {
-	case *recordingTracker:
-		recorder = source
-		base = source.Tracker
-	case recordingCommentEditor:
-		recorder = source.recordingTracker
-		base = source.Tracker
-	}
+	base, recorder := approvalTracker(a.source)
 	_, seenBeforeErr := os.Stat(filepath.Join(a.directory, "comments-seen.json"))
 	stopped, err := savedStop(base, a.directory, a.issue, operators)
 	if err != nil {
@@ -111,6 +100,9 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 		recordErr = recorder.record(a.issue, decoded)
 	}
 	if stop != nil {
+		if err := writeRuntimeFile(filepath.Join(a.directory, "stop-request.json"), stop); err != nil {
+			return v, err
+		}
 		return v, errApprovalStopped
 	}
 	if seenBeforeErr != nil || recordErr != nil {
@@ -127,6 +119,17 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 	// The watcher can confirm a notice while Comments is in flight. Read the
 	// durable notice log only after that read, under its existing mutex.
 	n := a.notice()
+	if a.parent {
+		if err := n.flush(ctx); err != nil {
+			release := n.hold()
+			_, loadErr := n.load()
+			release()
+			if loadErr != nil {
+				return v, errApprovalTampered
+			}
+			return v, err
+		}
+	}
 	release := n.hold()
 	defer release()
 	v.log, err = n.load()
@@ -150,6 +153,14 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 		return v, errApprovalTampered
 	}
 	for _, p := range v.posts {
+		if p.Resolution != "" && (p.Resolution != "rejected" && p.Resolution != "expired" || p.ResolvedAt.IsZero()) {
+			return v, errApprovalTampered
+		}
+		for _, id := range p.ProcessedCommentIDs {
+			if id <= 0 {
+				return v, errApprovalTampered
+			}
+		}
 		if p.N <= 0 || p.CommentID <= 0 || len(p.Digest) != 64 || p.DigestPrefix != p.Digest[:8] || p.CreatedAt.IsZero() || p.Deadline.IsZero() || len(p.Files) == 0 {
 			return v, errApprovalTampered
 		}
@@ -196,6 +207,11 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 	}
 	accepted := map[int64]bool{}
 	processed := map[int64]bool{}
+	for _, p := range v.posts {
+		for _, id := range p.ProcessedCommentIDs {
+			processed[id] = true
+		}
+	}
 	for _, g := range v.gos {
 		processed[g.GOCommentID] = true
 		if g.Result == "go" && strings.TrimRight(g.Body, " \t\r\n") == "GO "+g.Digest[:8] {
@@ -279,13 +295,13 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 		}
 	}
 	for _, c := range v.comments {
+		if c.ChangedTitleOrDescription && c.Created.After(original.Updated) {
+			return v, errApprovalTampered
+		}
 		if accepted[c.ID] {
 			continue
 		}
 		if c.Created.IsZero() || c.Updated.IsZero() {
-			return v, errApprovalTampered
-		}
-		if c.ChangedTitleOrDescription && c.Created.After(original.Updated) {
 			return v, errApprovalTampered
 		}
 		if first > 0 && c.ID > first {
@@ -335,6 +351,15 @@ func approvalPostText(stage chain.Stage, previous string, bundle chain.ApprovalB
 		r := state.History[i]
 		if r.Role != stage.Name || r.Speaker != "runtime" {
 			continue
+		}
+		// The stage summary has no Error: the process rows immediately
+		// before it carry the actual exit and interruption status.
+		for j := i - 1; j >= 0 && state.History[j].Role == stage.Name && state.History[j].Speaker != "runtime"; j-- {
+			prior := state.History[j]
+			r.Interrupted = r.Interrupted || prior.Interrupted
+			if r.Error == "" {
+				r.Error = prior.Error
+			}
 		}
 		switch {
 		case chain.ApprovalFailureReason(r) != "":
@@ -569,6 +594,14 @@ func (a approvalChild) consume(state *chain.State, post chain.ApprovalPost, v ap
 	return false, readErr
 }
 func (a approvalChild) before(ctx context.Context, state *chain.State, next chain.Assignment) error {
+	err := a.beforeRead(ctx, state, next)
+	if reason := approvalPauseReason(err); reason != "" {
+		state.PauseApproval(reason, a.clock())
+		return chain.ErrApprovalPause
+	}
+	return err
+}
+func (a approvalChild) beforeRead(ctx context.Context, state *chain.State, next chain.Assignment) error {
 	stage, previous, ok := state.ApprovalStage(next.Role)
 	if !ok {
 		return nil
@@ -715,4 +748,43 @@ func (a approvalChild) retryRead(ctx context.Context) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func approvalTracker(source tracker.Tracker) (tracker.Tracker, *recordingTracker) {
+	switch s := source.(type) {
+	case *recordingTracker:
+		return s.Tracker, s
+	case recordingCommentEditor:
+		return s.Tracker, s.recordingTracker
+	default:
+		return source, nil
+	}
+}
+
+// Read native stop controls even if the approval ledger cannot be written.
+// The read is still recorded whenever possible, but a broken ledger is never
+// permission to keep running past an authorized stop.
+func readStopComments(ctx context.Context, source tracker.Tracker, issue sourceIssue, operators []int64) ([]json.RawMessage, json.RawMessage, error) {
+	base, recorder := approvalTracker(source)
+	rows, err := base.Comments(ctx, issue)
+	if err != nil {
+		return rows, nil, err
+	}
+	stop, err := stopInstruction(base, rows, issue, operators)
+	if err != nil {
+		return rows, nil, err
+	}
+	if recorder != nil {
+		var comments []tracker.Comment
+		for _, raw := range rows {
+			c, e := base.ReadComment(raw, issue)
+			if e == nil && c.OnIssue {
+				comments = append(comments, c)
+			}
+		}
+		if err := recorder.record(issue, comments); err != nil && stop == nil {
+			return rows, nil, err
+		}
+	}
+	return rows, stop, nil
 }

@@ -33,6 +33,7 @@ type noticeTracker struct {
 	approvalRule         string
 	approvalPostStatuses []int
 	approvalPostChange   func(map[string]any)
+	approvalAssigned     int64
 	approvalReadHook     func()
 
 	mu       sync.Mutex
@@ -103,6 +104,15 @@ func (n *noticeTracker) install(t *testing.T, extra roundTripFunc) {
 			}
 			return catalogReply(r, 404, "no such comment"), nil
 		}
+		if n.approvalIssue != nil && r.Method == http.MethodPatch && !strings.Contains(r.URL.Path, "/comments/") {
+			if err := r.ParseForm(); err != nil {
+				return nil, err
+			}
+			if id, err := strconv.ParseInt(r.Form.Get("assigneeId"), 10, 64); err == nil {
+				n.approvalAssigned = id
+				return selectionReply(r, 200, map[string]any{"assignee": map[string]any{"id": id}}), nil
+			}
+		}
 		if n.approvalIssue != nil && r.Method == http.MethodGet {
 			if strings.Contains(r.URL.Path, "/projects/") {
 				return selectionReply(r, 200, map[string]any{"textFormattingRule": n.approvalRule}), nil
@@ -140,6 +150,13 @@ func (n *noticeTracker) install(t *testing.T, extra roundTripFunc) {
 			row := map[string]any{"id": 900 + len(n.rows), "issueId": 51, "projectId": 17,
 				"content": content, "createdUser": map[string]any{"id": 99}}
 			if n.approvalIssue != nil {
+				for _, raw := range n.rows {
+					var old struct{ ID int64 }
+					json.Unmarshal(raw, &old)
+					if old.ID >= int64(row["id"].(int)) {
+						row["id"] = int(old.ID + 1)
+					}
+				}
 				now := time.Now().UTC().Format(time.RFC3339Nano)
 				row["created"], row["updated"] = now, now
 			}

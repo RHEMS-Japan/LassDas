@@ -23,7 +23,6 @@ func approvalFixture(t *testing.T) (approvalChild, *noticeTracker, chain.State) 
 	t.Helper()
 	cfg := approvalConfiguration()
 	cfg.Backlog = watchConfiguration(t).Backlog
-	cfg.allowApprovalForTest = true
 	if err := validateApprovalStages(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +174,7 @@ func TestApprovalChildPostFailures(t *testing.T) {
 				if len(log.Notices) != 1 || !log.Notices[0].Obsolete || pendingNotice(log) >= 0 {
 					t.Fatal("refusal blocks notices")
 				}
-			} else if !errors.Is(err, errApprovalPostMismatch) {
+			} else if !errors.Is(err, chain.ErrApprovalPause) {
 				t.Fatal(err)
 			}
 			posts, _ := chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
@@ -263,6 +262,9 @@ func TestApprovalChildComparisonConditions(t *testing.T) {
 			if !errors.Is(err, errApprovalTampered) {
 				t.Fatalf("want comparison mismatch, got %v", err)
 			}
+			if ready, err := a.parentTick(context.Background(), &s); err != nil || ready || s.ApprovalPaused() != "approval_tampered" {
+				t.Fatalf("parent comparison: ready=%t pause=%s err=%v", ready, s.ApprovalPaused(), err)
+			}
 		})
 	}
 }
@@ -304,12 +306,14 @@ func TestApprovalChildNoticeLockAfterCommentRead(t *testing.T) {
 	}
 }
 func TestApprovalChildApproverExclusions(t *testing.T) {
-	for _, variant := range []string{"ordinary_before", "creator", "runtime", "removed", "control_before", "ordinary_after", "same_second_change", "empty_runtime", "duplicate"} {
+	for _, variant := range []string{"ordinary_before", "go_before", "creator", "runtime", "removed", "control_before", "ordinary_after", "same_second_change", "empty_runtime", "duplicate"} {
 		t.Run(variant, func(t *testing.T) {
 			a, f, s := approvalFixture(t)
 			switch variant {
 			case "ordinary_before":
 				approvalAdd(t, f, 850, 7, "ordinary", nil)
+			case "go_before":
+				approvalAdd(t, f, 850, 7, "GO 12345678", nil)
 			case "creator":
 				a.issue.Creator.ID = 7
 			case "runtime":
@@ -326,7 +330,7 @@ func TestApprovalChildApproverExclusions(t *testing.T) {
 				})
 			}
 			_, err := a.read(context.Background(), s, "c")
-			if variant == "ordinary_before" || variant == "creator" || variant == "runtime" || variant == "removed" {
+			if variant == "ordinary_before" || variant == "go_before" || variant == "creator" || variant == "runtime" || variant == "removed" {
 				if !errors.Is(err, errApprovalNoApprover) {
 					t.Fatal(err)
 				}
@@ -508,7 +512,7 @@ func TestApprovalChildReadbackPrecedesGO(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	err := a.before(ctx, &s, chain.Assignment{Role: "c"})
-	if !errors.Is(err, errApprovalPostMismatch) {
+	if !errors.Is(err, chain.ErrApprovalPause) {
 		t.Fatal(err)
 	}
 	if s.Pending != nil || s.AwaitingApproval != nil {
@@ -617,8 +621,8 @@ func TestApprovalTestBypassCannotBeConfigured(t *testing.T) {
 		t.Fatal("test flag accepted as configuration")
 	}
 	cfg := approvalConfiguration()
-	if err := validateApprovalStages(cfg); err == nil || !strings.Contains(err.Error(), "not available yet") {
-		t.Fatal("production intake opened")
+	if err := validateApprovalStages(cfg); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -662,7 +666,6 @@ func TestApprovalChildRunsThroughEngineEntry(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ctx = context.WithValue(ctx, approvalTestKey{}, true)
 	ctx = context.WithValue(ctx, acceptedTimeFactsKey{}, requestTimeFacts(a.directory))
 	var log bytes.Buffer
 	err := run(ctx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(a.directory, "run")}, io.Discard, &log)
@@ -820,7 +823,7 @@ func TestApprovalChildDeletedLatestNoticeDoesNotRetry(t *testing.T) {
 			reads := 0
 			a.source = recordTrackerComments(approvalAfterComments{Tracker: a.cfg.unrecordedSource(), after: func() { reads++ }}, a.cfg.commentJobs)
 			err = a.before(ctx, &s, chain.Assignment{Role: "c"})
-			if !errors.Is(err, errApprovalTampered) || reads != 1 || len(f.all()) != postsBefore {
+			if !errors.Is(err, chain.ErrApprovalPause) || reads != 1 || len(f.all()) != postsBefore {
 				t.Fatalf("err = %v, reads = %d, new posts = %d", err, reads, len(f.all())-postsBefore)
 			}
 		})
