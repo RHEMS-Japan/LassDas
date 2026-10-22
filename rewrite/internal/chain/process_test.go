@@ -508,53 +508,58 @@ func TestAProcessIsToldWhichOfItsVariablesAreCredentials(t *testing.T) {
 	}
 }
 
-func TestHistoryBindingCannotBeReplacedBeforeSelectionOrAfterPreparation(t *testing.T) {
-	for _, source := range []string{"env", "secrets", "credentials", "model"} {
-		for _, prepared := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/prepared=%t", source, prepared), func(t *testing.T) {
-				inject := func(p Process) Process {
-					switch source {
-					case "env":
-						p.Env = map[string]string{"TASK_HISTORY": "private-not-to-be-quoted"}
-					case "secrets":
-						p.Secrets = map[string]string{"TASK_HISTORY": "private-not-to-be-quoted"}
-					case "credentials":
-						p.Credentials = map[string]string{"TASK_HISTORY": "private-not-to-be-quoted"}
-					case "model":
-						p.ModelEnv = "TASK_HISTORY"
-					}
-					return p
-				}
-				process := Process{Name: "p", ModelEnv: "SELECTED_MODEL", Command: []string{"/bin/sh", "-c", "printf child-ran"}}
-				if !prepared {
-					process = inject(process)
-				}
-				selected, released := 0, 0
-				executor := Processes{Roles: map[string]Role{"r": {Name: "r", Processes: []Process{process}}}, HistoryPath: "/trusted/history.json",
-					SelectModel: func(context.Context, Role, Process, State, []string) (string, string, error) {
-						selected++
-						return "chosen", "", nil
-					},
-					Prepare: func(_ context.Context, p Process) (Process, func(), error) {
-						if prepared {
-							p = inject(p)
+func TestReservedBindingsCannotBeReplacedBeforeSelectionOrAfterPreparation(t *testing.T) {
+	for _, name := range []string{"TASK_HISTORY", "TASK_APPROVED_BUNDLE", "TASK_APPROVED_DIGEST"} {
+		for _, source := range []string{"env", "secrets", "credentials", "model"} {
+			for _, prepared := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/prepared=%t", name, source, prepared), func(t *testing.T) {
+					inject := func(p Process) Process {
+						switch source {
+						case "env":
+							p.Env = map[string]string{name: "private-not-to-be-quoted"}
+						case "secrets":
+							p.Secrets = map[string]string{name: "private-not-to-be-quoted"}
+						case "credentials":
+							p.Credentials = map[string]string{name: "private-not-to-be-quoted"}
+						case "model":
+							p.ModelEnv = name
 						}
-						return p, func() { released++ }, nil
-					}}
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
-				results := executor.Execute(ctx, Assignment{Role: "r"}, State{})
-				if len(results) != 1 || !strings.Contains(results[0].Error, "TASK_HISTORY is reserved") || results[0].Output != "" || strings.Contains(results[0].Error, "private-not-to-be-quoted") {
-					t.Fatalf("collision reached child: %#v", results)
-				}
-				want := 0
-				if prepared {
-					want = 1
-				}
-				if selected != want || released != want {
-					t.Fatalf("selected=%d released=%d want=%d", selected, released, want)
-				}
-			})
+						if !p.HistoryEnvironmentConflict() {
+							t.Error("configuration check accepted a reserved name")
+						}
+						return p
+					}
+					process := Process{Name: "p", ModelEnv: "SELECTED_MODEL", Command: []string{"/bin/sh", "-c", "printf child-ran"}}
+					if !prepared {
+						process = inject(process)
+					}
+					selected, released := 0, 0
+					executor := Processes{Roles: map[string]Role{"r": {Name: "r", Processes: []Process{process}}}, HistoryPath: "/trusted/history.json",
+						SelectModel: func(context.Context, Role, Process, State, []string) (string, string, error) {
+							selected++
+							return "chosen", "", nil
+						},
+						Prepare: func(_ context.Context, p Process) (Process, func(), error) {
+							if prepared {
+								p = inject(p)
+							}
+							return p, func() { released++ }, nil
+						}}
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					defer cancel()
+					results := executor.Execute(ctx, Assignment{Role: "r"}, State{})
+					if len(results) != 1 || results[0].Error != "TASK_HISTORY is reserved for runtime request history; TASK_APPROVED_BUNDLE and TASK_APPROVED_DIGEST are reserved for runtime approval." || results[0].Output != "" || strings.Contains(results[0].Error, "private-not-to-be-quoted") {
+						t.Fatalf("collision reached child: %#v", results)
+					}
+					want := 0
+					if prepared {
+						want = 1
+					}
+					if selected != want || released != want {
+						t.Fatalf("selected=%d released=%d want=%d", selected, released, want)
+					}
+				})
+			}
 		}
 	}
 }

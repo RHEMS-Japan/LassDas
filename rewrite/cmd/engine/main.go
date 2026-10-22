@@ -276,7 +276,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		}
 		for _, process := range role.Processes {
 			if process.HistoryEnvironmentConflict() {
-				return errors.New("TASK_HISTORY is reserved for the runtime's request history")
+				return errors.New("TASK_HISTORY is reserved for runtime request history; TASK_APPROVED_BUNDLE and TASK_APPROVED_DIGEST are reserved for runtime approval")
 			}
 			if process.TimeoutMinutes < 0 {
 				return errors.New("a process's timeout_minutes must not be negative")

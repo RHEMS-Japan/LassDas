@@ -3,6 +3,7 @@
 The controller prepares Git before this command. Operator-specified paths are
 permissions, not fields requested from a model. Network inheritance is explicit
 and requires the outer runtime's egress policy; this is not a network firewall.
+TASK_APPROVED_BUNDLE, when set, is a pinned read-only directory at the same path.
 """
 import argparse
 from collections import namedtuple
@@ -131,6 +132,11 @@ def command(args, environment):
         writable.append(workspace / relative)
     runtimes = [absolute(value) for value in args.runtime]
     history = absolute(environment["TASK_HISTORY"]) if environment.get("TASK_HISTORY") else None
+    bundle = absolute(environment["TASK_APPROVED_BUNDLE"]) if "TASK_APPROVED_BUNDLE" in environment else None
+    if bundle is not None:
+        for path in [workspace, home, *runtimes, *([history] if history is not None else [])]:
+            if bundle == path or bundle.is_relative_to(path) or path.is_relative_to(bundle):
+                raise ValueError("Approved bundle must be a separate read-only directory, not overlap another mount")
     if history is not None:
         for path in [workspace, home, *runtimes]:
             if history == path or history.is_relative_to(path) or path.is_relative_to(history):
@@ -200,6 +206,12 @@ def command(args, environment):
             # Only the file is visible. Its empty destination parents do not
             # expose the controller's directory or neighboring requests.
             result += ["--ro-bind-fd", str(descriptor), str(history)]
+        if bundle is not None:
+            descriptor = open_path(bundle, directory=True)
+            descriptors.append(descriptor)
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise ValueError("Approved bundle must be a directory")
+            result += ["--ro-bind-fd", str(descriptor), str(bundle)]
         result += ["--chdir", str(workspace), "--", *program]
         child_environment = dict(environment)
         child_environment.update(HOME=str(home), HERMES_HOME=str(home), TMPDIR="/tmp")
