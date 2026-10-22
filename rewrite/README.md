@@ -813,6 +813,51 @@ The next assignment is the first stage that is not yet satisfied.
   error or an interrupted launch simply runs that stage again, with the
   runtime's usual note about the interruption in the record.
 
+#### Approval conditions (not yet available)
+
+A command stage can declare the following optional `approval` object:
+
+```json
+"approval": {
+  "approver_user_ids": [7],
+  "bundle": "ops/bundle",
+  "show": ["dry-run.txt"],
+  "expiry_hours": 72
+}
+```
+
+- `approver_user_ids`: one or more positive account IDs, always read from the
+  operator's current configuration, never saved in the request's workflow copy.
+- `bundle`: a local relative path from `TASK_WORKSPACE`, without `..` components.
+- `show`: one or more local paths relative to `bundle` (`filepath.IsLocal`).
+- `expiry_hours`: a positive number of hours. The first workflow copy preserves
+  this value, `bundle`, and an independent copy of `show`.
+
+The following checks apply to the current configuration before intake:
+
+1. An approval stage immediately follows a command stage.
+2. Its `on_failure` names a model stage before that preceding command.
+3. The approval and preceding command roles share no process secret source
+   environment name or nonempty value with any other role, including each other.
+4. Every approver belongs to `intake.stop_user_ids`.
+5. Roles reachable up to and including approval, including failure recovery,
+   have no `tracker_access`, for reading or writing. `question_role` cannot be
+   combined with approval.
+6. `stop_report_role` names neither the approval role nor its preceding command.
+7. Each of those two roles has exactly one process.
+8. The tracker is Backlog.
+9. The fields meet the constraints above; a model stage cannot declare approval.
+10. Every `on_failure` after approval stays after that approval stage.
+
+Configurations with approval stages cannot start in this version:
+`approval stages are not available yet` is returned after these checks.
+The remaining startup guards require watch mode, a successful `Myself()` read,
+no runtime account among approvers, and project `textFormattingRule` equal to
+`markdown`. `--check` reads no remote services. Comment recording is enabled
+only for Backlog configurations with approval, with parent and child sharing
+`jobs/<id>/comments-seen.json`. All role processes in an approval configuration
+must use the launcher so their processes are gone when each launch ends.
+
 The shipped delivery process (`harnesses/deliver_git.py`) brings the ticket
 branch up to date with the integration branch before publishing it, because
 requests running side by side merge into that branch while this one is still
