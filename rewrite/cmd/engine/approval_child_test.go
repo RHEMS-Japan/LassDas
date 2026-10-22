@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/tracker"
 )
 
 func approvalFixture(t *testing.T) (approvalChild, *noticeTracker, chain.State) {
@@ -188,6 +190,11 @@ func TestApprovalChildComparisonConditions(t *testing.T) {
 		name   string
 		change func(*testing.T, approvalChild, *noticeTracker, *chain.State, chain.ApprovalPost)
 	}{
+		{"notices_missing", func(t *testing.T, a approvalChild, f *noticeTracker, s *chain.State, p chain.ApprovalPost) {
+			if err := os.Remove(a.notice().path()); err != nil {
+				t.Fatal(err)
+			}
+		}},
 		{"deleted", func(t *testing.T, a approvalChild, f *noticeTracker, s *chain.State, p chain.ApprovalPost) {
 			f.set(func(f *noticeTracker) { f.rows = f.rows[1:] })
 		}},
@@ -253,8 +260,8 @@ func TestApprovalChildComparisonConditions(t *testing.T) {
 			a, f, s, p := approvalPostFixture(t)
 			tt.change(t, a, f, &s, p)
 			_, err := a.read(context.Background(), s, "c")
-			if err == nil {
-				t.Fatal("comparison accepted")
+			if !errors.Is(err, errApprovalTampered) {
+				t.Fatalf("want comparison mismatch, got %v", err)
 			}
 		})
 	}
@@ -353,7 +360,7 @@ func TestApprovalChildApproverExclusions(t *testing.T) {
 func approvalAcceptedGO(t *testing.T, a approvalChild, f *noticeTracker, s chain.State, p chain.ApprovalPost) chain.ApprovalGO {
 	t.Helper()
 	now := time.Now().UTC()
-	g := chain.ApprovalGO{PostN: p.N, PostCommentID: p.CommentID, GOCommentID: 950, AuthorID: 7, Body: "GO " + p.DigestPrefix, AcceptedAt: now, Digest: p.Digest, LaunchHistoryLen: len(s.History) + 1, PendingSince: now}
+	g := chain.ApprovalGO{Result: "go", PostN: p.N, PostCommentID: p.CommentID, GOCommentID: 950, AuthorID: 7, Body: "GO " + p.DigestPrefix, AcceptedAt: now, Digest: p.Digest, LaunchHistoryLen: len(s.History) + 1, PendingSince: now}
 	approvalAdd(t, f, g.GOCommentID, g.AuthorID, g.Body, nil)
 	if err := g.Save(a.approvalDirectory()); err != nil {
 		t.Fatal(err)
@@ -361,11 +368,14 @@ func approvalAcceptedGO(t *testing.T, a approvalChild, f *noticeTracker, s chain
 	return g
 }
 func TestApprovalChildConsumptionConditions(t *testing.T) {
-	for _, variant := range []string{"valid", "old_post", "digest", "deadline", "position", "zero_time", "ordinary", "resume", "pause", "approver_removed", "copy_changed", "comparison", "go_deleted", "go_edited"} {
+	for _, variant := range []string{"valid", "old_post", "digest", "deadline", "position", "zero_time", "ordinary", "resume", "pause", "approver_removed", "copy_changed", "comparison", "go_deleted", "go_edited", "acceptance_row"} {
 		t.Run(variant, func(t *testing.T) {
 			a, f, s, p := approvalPostFixture(t)
 			g := approvalAcceptedGO(t, a, f, s, p)
 			switch variant {
+			case "acceptance_row":
+				s.History = append(s.History, chain.Result{Role: "router", Speaker: "runtime", Output: "承認の GO を受理した", FinishedAt: g.AcceptedAt.Add(time.Millisecond)})
+				g.LaunchHistoryLen = len(s.History) + 1
 			case "old_post":
 				g.PostCommentID--
 			case "digest":
@@ -402,7 +412,7 @@ func TestApprovalChildConsumptionConditions(t *testing.T) {
 			if readErr != nil || len(gos) != 1 {
 				t.Fatal(readErr)
 			}
-			valid := variant == "valid" || variant == "go_deleted" || variant == "go_edited"
+			valid := variant == "valid" || variant == "go_deleted" || variant == "go_edited" || variant == "acceptance_row"
 			if valid {
 				if err != nil || gos[0].ConsumedAt.IsZero() || s.PendingSince != g.PendingSince || len(s.History) != g.LaunchHistoryLen {
 					t.Fatalf("err=%v GO=%+v state=%+v", err, gos[0], s)
@@ -576,25 +586,6 @@ func TestApprovalRefusalDoesNotAnnounceStageLaunch(t *testing.T) {
 		t.Fatal("refusal announced as launch")
 	}
 }
-func TestApprovalCurrentApproversAndSavedBundleSettings(t *testing.T) {
-	a, _, s, p := approvalPostFixture(t)
-	current := a.cfg
-	current.Workflow = &chain.Workflow{Stages: append([]chain.Stage(nil), a.cfg.Workflow.Stages...)}
-	copy := *current.Workflow.Stages[2].Approval
-	copy.ApproverUserIDs = []int64{8}
-	copy.Bundle = "different"
-	copy.ExpiryHours = 1
-	current.Workflow.Stages[2].Approval = &copy
-	reads := 0
-	a.current = func() (config, error) { reads++; return current, nil }
-	view, err := a.read(context.Background(), s, "c")
-	if err != nil || len(view.approvers) != 1 || view.approvers[0] != 8 || reads != 1 {
-		t.Fatalf("view=%+v err=%v", view, err)
-	}
-	if p.Deadline.Sub(p.CreatedAt) < 71*time.Hour {
-		t.Fatal("current expiry replaced snapshot")
-	}
-}
 func TestApprovalTestBypassCannotBeConfigured(t *testing.T) {
 	if _, err := readConfig([]byte(`{"allowApprovalForTest":true}`)); err == nil {
 		t.Fatal("test flag accepted as configuration")
@@ -625,7 +616,7 @@ func TestApprovalChildStopsOnTheFinalConsumptionRead(t *testing.T) {
 	}
 }
 func TestApprovalChildRunsThroughEngineEntry(t *testing.T) {
-	a, _, s := approvalFixture(t)
+	a, f, s := approvalFixture(t)
 	s.History = append([]chain.Result{{Role: "a", Speaker: "runtime"}}, s.History...)
 	a.cfg.ModelSelection = &selectionConfig{Fixed: "maker/test"}
 	writeJobHistory(t, a.directory, s)
@@ -640,6 +631,11 @@ func TestApprovalChildRunsThroughEngineEntry(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	f.approvalReadHook = func() {
+		if err := os.WriteFile(configPath, []byte("changed after configuration was loaded"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ctx = context.WithValue(ctx, approvalTestKey{}, true)
 	ctx = context.WithValue(ctx, acceptedTimeFactsKey{}, requestTimeFacts(a.directory))
 	var log bytes.Buffer
@@ -649,5 +645,168 @@ func TestApprovalChildRunsThroughEngineEntry(t *testing.T) {
 	}
 	if saved := loadJobState(t, a.directory); saved.AwaitingApproval == nil || saved.Pending != nil {
 		t.Fatal("entry did not checkpoint approval wait")
+	}
+}
+
+func TestApprovalChildFirstPostWithoutNotices(t *testing.T) {
+	a, f, s := approvalFixture(t)
+	if err := os.Remove(a.notice().path()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := a.before(ctx, &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) || f.attempts() != 1 || s.AwaitingApproval == nil {
+		t.Fatalf("err=%v posts=%d", err, f.attempts())
+	}
+}
+
+func TestApprovalChildPostRecordRecoveryDoesNotRepost(t *testing.T) {
+	a, f, s, p := approvalPostFixture(t)
+	if err := os.Remove(filepath.Join(a.approvalDirectory(), "post-1.json")); err != nil {
+		t.Fatal(err)
+	}
+	s.AwaitingApproval = nil
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := a.before(ctx, &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) {
+		t.Fatal(err)
+	}
+	if f.attempts() != 1 {
+		t.Fatalf("POST attempts=%d, want 1", f.attempts())
+	}
+	log, err := a.notice().load()
+	if err != nil || len(log.Notices) != 1 {
+		t.Fatalf("kind/number duplicated: notices=%d err=%v", len(log.Notices), err)
+	}
+	posts, err := chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
+	if err != nil || len(posts) != 1 || posts[0].CommentID != p.CommentID || posts[0].Digest != p.Digest || s.AwaitingApproval.PostN != 1 {
+		t.Fatalf("posts=%+v err=%v", posts, err)
+	}
+}
+
+type approvalAfterComments struct {
+	tracker.Tracker
+	after func()
+}
+
+func (s approvalAfterComments) Comments(ctx context.Context, issue tracker.Issue) ([]json.RawMessage, error) {
+	rows, err := s.Tracker.Comments(ctx, issue)
+	if err == nil {
+		s.after()
+	}
+	return rows, err
+}
+func TestApprovalChildConfirmedNoticeAfterCommentRead(t *testing.T) {
+	for _, variant := range []string{"new_id", "new_time", "old_missing"} {
+		t.Run(variant, func(t *testing.T) {
+			a, f, s, _ := approvalPostFixture(t)
+			original := a.source
+			once := false
+			a.source = recordTrackerComments(approvalAfterComments{Tracker: a.cfg.unrecordedSource(), after: func() {
+				if once {
+					return
+				}
+				once = true
+				id := int64(960)
+				posted := time.Now().UTC()
+				if variant != "new_id" {
+					id = 850
+				}
+				if variant != "new_time" {
+					posted = posted.Add(-time.Hour)
+				}
+				n := a.notice()
+				release := n.hold()
+				defer release()
+				log, err := n.load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				log.Notices = append(log.Notices, noticeRecord{Kind: startedNotice, Text: "confirmed while reading", CommentID: id, PostedAt: &posted})
+				if err := n.save(log); err != nil {
+					t.Fatal(err)
+				}
+				if variant != "old_missing" {
+					approvalAdd(t, f, id, 99, "confirmed while reading", nil)
+					f.set(func(f *noticeTracker) {
+						sort.Slice(f.rows, func(i, j int) bool {
+							var left, right struct{ ID int64 }
+							if err := json.Unmarshal(f.rows[i], &left); err != nil {
+								t.Fatal(err)
+							}
+							if err := json.Unmarshal(f.rows[j], &right); err != nil {
+								t.Fatal(err)
+							}
+							return left.ID < right.ID
+						})
+					})
+					// The watcher's readback records the notice before the child locks.
+					if _, err := original.Comments(context.Background(), a.issue); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}}, a.cfg.commentJobs)
+			_, err := a.read(context.Background(), s, "c")
+			if variant == "old_missing" {
+				if !errors.Is(err, errApprovalTampered) {
+					t.Fatal(err)
+				}
+				return
+			}
+			if !errors.Is(err, errApprovalRetry) {
+				t.Fatalf("first read: %v", err)
+			}
+			if _, err := a.read(context.Background(), s, "c"); err != nil {
+				t.Fatalf("second read: %v", err)
+			}
+		})
+	}
+}
+
+func TestApprovalChildProcessedCommentsKeepApprover(t *testing.T) {
+	for _, result := range []string{"rejection", "unreadable_go"} {
+		t.Run(result, func(t *testing.T) {
+			a, f, s, first := approvalPostFixture(t)
+			body := "please revise"
+			if result == "unreadable_go" {
+				body = "GO invalid"
+			}
+			// PR5 records every processed comment in this shared format.
+			record := chain.ApprovalGO{Result: result, PostN: first.N, PostCommentID: first.CommentID, GOCommentID: 902, AuthorID: 7, Body: body, Digest: first.Digest}
+			approvalAdd(t, f, record.GOCommentID, 7, body, nil)
+			if _, err := a.source.Comments(context.Background(), a.issue); err != nil {
+				t.Fatal(err)
+			}
+			if err := record.Save(a.approvalDirectory()); err != nil {
+				t.Fatal(err)
+			}
+			// Simulate the next attempt after the parent's rejection/deadline handling.
+			s.History = append(s.History, chain.Result{Role: "c", Speaker: "runtime", Error: "parent ended approval wait", FinishedAt: time.Now().UTC()})
+			s.AwaitingApproval = nil
+			if err := a.before(context.Background(), &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) {
+				t.Fatal(err)
+			}
+			posts, err := chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
+			if err != nil || len(posts) != 2 {
+				t.Fatalf("posts=%+v err=%v", posts, err)
+			}
+			second := posts[1]
+			if second.N != 2 {
+				t.Fatal("no second post")
+			}
+			approvalAcceptedGO(t, a, f, s, second)
+			s.AwaitingApproval = nil
+			if err := a.before(context.Background(), &s, chain.Assignment{Role: "c"}); err != nil {
+				t.Fatal(err)
+			}
+			gos, err := chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
+			if err != nil || len(gos) != 2 || !gos[0].ConsumedAt.IsZero() || !gos[0].ExpiredAt.IsZero() || gos[1].ConsumedAt.IsZero() {
+				t.Fatalf("records=%+v err=%v", gos, err)
+			}
+			approvalEditRow(t, f, record.GOCommentID, func(row map[string]any) { row["content"] = "edited" })
+			if _, err := a.read(context.Background(), s, "c"); !errors.Is(err, errApprovalTampered) {
+				t.Fatalf("processed non-GO edit accepted: %v", err)
+			}
+		})
 	}
 }

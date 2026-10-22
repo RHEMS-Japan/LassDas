@@ -224,7 +224,7 @@ func approvalLaunchFixture(t *testing.T) (Processes, State, ApprovalGO) {
 	if err = post.Save(directory); err != nil {
 		t.Fatal(err)
 	}
-	goRecord := ApprovalGO{PostN: 1, PostCommentID: 90, GOCommentID: 91, AuthorID: 7, Body: "GO " + b.Digest[:8], Digest: b.Digest, AcceptedAt: now, PendingSince: now, ConsumedAt: now, LaunchHistoryLen: 0}
+	goRecord := ApprovalGO{Result: "go", PostN: 1, PostCommentID: 90, GOCommentID: 91, AuthorID: 7, Body: "GO " + b.Digest[:8], Digest: b.Digest, AcceptedAt: now, PendingSince: now, ConsumedAt: now, LaunchHistoryLen: 0}
 	if err = goRecord.Save(directory); err != nil {
 		t.Fatal(err)
 	}
@@ -233,11 +233,18 @@ func approvalLaunchFixture(t *testing.T) (Processes, State, ApprovalGO) {
 	return p, state, goRecord
 }
 func TestApprovalEnvironmentOnlyExactLaunch(t *testing.T) {
-	for _, variant := range []string{"match", "position", "time", "stage", "unconsumed", "expired"} {
+	for _, variant := range []string{"match", "position", "time", "stage", "unconsumed", "expired", "copy_changed", "rejection", "unreadable_go"} {
 		t.Run(variant, func(t *testing.T) {
 			p, state, g := approvalLaunchFixture(t)
 			role := "execute"
 			switch variant {
+			case "copy_changed":
+				approvalWrite(t, filepath.Join(p.ApprovalDirectory, "bundle-1/a"), "tampered after consumption\n")
+			case "rejection", "unreadable_go":
+				g.Result = variant
+				if err := g.Save(p.ApprovalDirectory); err != nil {
+					t.Fatal(err)
+				}
 			case "position":
 				state.History = append(state.History, Result{})
 			case "time":
@@ -266,6 +273,9 @@ func TestApprovalEnvironmentOnlyExactLaunch(t *testing.T) {
 				}
 			} else if strings.Contains(results[0].Output, g.Digest) {
 				t.Fatal("approval leaked")
+			}
+			if variant == "copy_changed" && results[0].Error == "" {
+				t.Fatal("changed copy launched")
 			}
 			if len(p.Roles["execute"].Processes[0].Env) != 1 {
 				t.Fatal("shared env mutated")
@@ -376,7 +386,13 @@ func TestApprovalReceiptFailureIsRecordedAfterStage(t *testing.T) {
 				return []Result{{Role: role, Speaker: "p", ApprovalReceiptFailure: reason, FinishedAt: time.Now().UTC()}}
 			})}
 			_ = runner.Run(ctx)
+			if store.state.Recovering || store.state.Step != role {
+				t.Fatal("approval refusal changed the completed command state")
+			}
 			last := store.state.History[len(store.state.History)-1]
+			if variant == "bundle_credential" && last.Error != approvalReceiptPrefix+reason {
+				t.Fatalf("receipt result: %s", last.Error)
+			}
 			if variant == "predecessor_unreadable" {
 				if ApprovalFailureReason(last) != "" {
 					t.Fatal("predecessor unreadable is not an approval failure")

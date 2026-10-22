@@ -34,7 +34,7 @@ func ApprovalFailureReason(result Result) string {
 		return ""
 	}
 	for _, reason := range approvalReasons {
-		if result.Error == ApprovalFailureText(reason) {
+		if result.Error == ApprovalFailureText(reason) || reason == "bundle_credential" && result.Error == approvalReceiptPrefix+reason {
 			return reason
 		}
 	}
@@ -67,6 +67,7 @@ type ApprovalPost struct {
 	Files          []ApprovalFile `json:"files"`
 }
 type ApprovalGO struct {
+	Result           string    `json:"result"`
 	PostN            int       `json:"post_n"`
 	PostCommentID    int64     `json:"post_comment_id"`
 	GOCommentID      int64     `json:"go_comment_id"`
@@ -198,7 +199,7 @@ func (p Processes) approvedLaunch(state State, role string) (string, string, err
 		return "", "", err
 	}
 	for _, g := range gos {
-		if g.ConsumedAt.IsZero() || !g.ExpiredAt.IsZero() || g.LaunchHistoryLen != len(state.History) || !g.PendingSince.Equal(state.PendingSince) {
+		if g.Result != "go" || g.ConsumedAt.IsZero() || !g.ExpiredAt.IsZero() || g.LaunchHistoryLen != len(state.History) || !g.PendingSince.Equal(state.PendingSince) {
 			continue
 		}
 		for _, post := range posts {

@@ -407,19 +407,6 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		if cfg.AssignedIssue != "" {
 			return errors.New("watch assigns each issue; do not configure assigned_issue for the entire queue")
 		}
-		if hasApproval(cfg.Workflow) {
-			path, err := filepath.Abs(*configPath)
-			if err != nil {
-				return err
-			}
-			ctx = context.WithValue(ctx, approvalConfigKey{}, func() (config, error) {
-				raw, err := os.ReadFile(path)
-				if err != nil {
-					return config{}, err
-				}
-				return readConfig(raw)
-			})
-		}
 		return watchRequests(ctx, cfg, *directory, log)
 	}
 	assigned := cfg.AssignedIssue
@@ -493,16 +480,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		if err != nil {
 			return err
 		}
-		child := approvalChild{cfg: cfg, source: source, issue: accepted, directory: filepath.Dir(store.Dir), current: func() (config, error) {
-			raw, err := os.ReadFile(*configPath)
-			if err != nil {
-				return config{}, err
-			}
-			return readConfig(raw)
-		}}
-		if current, ok := ctx.Value(approvalConfigKey{}).(func() (config, error)); ok {
-			child.current = current
-		}
+		child := approvalChild{cfg: cfg, source: source, issue: accepted, directory: filepath.Dir(store.Dir)}
 		engine.BeforeApproval = child.before
 	}
 	if questionMonitor != nil {

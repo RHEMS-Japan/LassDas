@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,7 +22,6 @@ import (
 const approvalNotice = "approval_post"
 
 type approvalTestKey struct{}
-type approvalConfigKey struct{}
 
 var (
 	errApprovalTampered     = errors.New("approval comparison mismatch")
@@ -37,7 +35,6 @@ var (
 // remains in force. Tests may bypass it without a serialized configuration flag.
 type approvalChild struct {
 	cfg       config
-	current   func() (config, error)
 	source    tracker.Tracker
 	issue     sourceIssue
 	directory string
@@ -50,12 +47,6 @@ func (a approvalChild) clock() time.Time {
 		return a.now().UTC()
 	}
 	return time.Now().UTC()
-}
-func (a approvalChild) settings() (config, error) {
-	if a.current != nil {
-		return a.current()
-	}
-	return a.cfg, nil
 }
 func (a approvalChild) notice() notices {
 	return notices{source: a.source, issue: a.issue, directory: a.directory, queue: filepath.Dir(filepath.Dir(a.directory)), approval: true}
@@ -75,10 +66,7 @@ type approvalView struct {
 // Stop wins even when local comparison records or notification settlement fail.
 func (a approvalChild) read(ctx context.Context, state chain.State, stage string) (approvalView, error) {
 	v := approvalView{}
-	cfg, err := a.settings()
-	if err != nil {
-		return v, err
-	}
+	cfg := a.cfg
 	var operators []int64
 	if cfg.Intake != nil {
 		operators = cfg.Intake.StopUserIDs
@@ -101,6 +89,7 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 	if stopped {
 		return v, errApprovalStopped
 	}
+	readStarted := a.clock()
 	rows, err := base.Comments(ctx, a.issue)
 	if err != nil {
 		return v, err
@@ -147,12 +136,14 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 	if pendingNotice(v.log) >= 0 {
 		return v, errApprovalRetry
 	}
-	if _, err = os.Stat(n.path()); err != nil {
-		return v, errApprovalTampered
-	}
 	v.posts, err = chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
 	if err != nil {
 		return v, errApprovalTampered
+	}
+	if len(v.posts) > 0 {
+		if _, err := os.Stat(n.path()); err != nil {
+			return v, errApprovalTampered
+		}
 	}
 	v.gos, err = chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
 	if err != nil {
@@ -164,7 +155,16 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 		}
 	}
 	for _, g := range v.gos {
-		if g.GOCommentID <= 0 || g.PostN <= 0 || g.AuthorID <= 0 || g.AcceptedAt.IsZero() || len(g.Digest) != 64 {
+		if g.GOCommentID <= 0 || g.PostN <= 0 || g.AuthorID <= 0 || g.PostCommentID <= 0 || len(g.Digest) != 64 {
+			return v, errApprovalTampered
+		}
+		switch g.Result {
+		case "go":
+			if g.AcceptedAt.IsZero() {
+				return v, errApprovalTampered
+			}
+		case "unreadable_go", "rejection":
+		default:
 			return v, errApprovalTampered
 		}
 	}
@@ -175,16 +175,30 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 		}
 	}
 	byID := map[int64]tracker.Comment{}
+	var maxCommentID int64
 	for _, c := range decoded {
 		if !c.OnIssue || c.ID <= 0 || c.Author.ID <= 0 {
 			return v, errApprovalTampered
 		}
+		maxCommentID = max(maxCommentID, c.ID)
 		byID[c.ID] = c
 		v.comments = append(v.comments, c)
 	}
+	// A watcher readback may also have recorded the new comment in seen.
+	// Retry before comparing that ledger against this older comment snapshot.
+	for _, record := range v.log.Notices {
+		if record.Predates || record.Obsolete || record.PostedAt == nil || record.CommentID <= 0 {
+			continue
+		}
+		if _, ok := byID[record.CommentID]; !ok && (record.CommentID > maxCommentID || record.PostedAt.After(readStarted)) {
+			return v, errApprovalRetry
+		}
+	}
 	accepted := map[int64]bool{}
+	processed := map[int64]bool{}
 	for _, g := range v.gos {
-		if len(g.Digest) == 64 && strings.TrimRight(g.Body, " \t\r\n") == "GO "+g.Digest[:8] {
+		processed[g.GOCommentID] = true
+		if g.Result == "go" && strings.TrimRight(g.Body, " \t\r\n") == "GO "+g.Digest[:8] {
 			accepted[g.GOCommentID] = true
 		}
 	}
@@ -285,7 +299,7 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 	}
 	excluded := map[int64]bool{a.issue.Creator.ID: true, v.me: true}
 	for _, s := range seen {
-		if accepted[s.ID] || known[s.ID] {
+		if processed[s.ID] || known[s.ID] {
 			continue
 		}
 		if current > 0 && s.ID > current {
@@ -324,7 +338,7 @@ func approvalPostText(stage chain.Stage, previous string, bundle chain.ApprovalB
 		}
 		switch {
 		case chain.ApprovalFailureReason(r) != "":
-			ending = chain.ApprovalFailureText(chain.ApprovalFailureReason(r))
+			ending = r.Error
 		case r.Interrupted:
 			ending = "中断した（効果不明）"
 		case r.Error != "":
@@ -374,24 +388,6 @@ func approvalPostText(stage chain.Stage, previous string, bundle chain.ApprovalB
 	return text, nil
 }
 
-// trackerError is intentionally private to tracker. Inspect only its exported
-// numeric status; never parse, log or retain a response body here.
-func approvalHTTPStatus(err error) int {
-	for err != nil {
-		v := reflect.ValueOf(err)
-		if v.Kind() == reflect.Pointer && !v.IsNil() {
-			v = v.Elem()
-			if v.Kind() == reflect.Struct && v.Type().PkgPath() == "ticket-runner/internal/tracker" && v.Type().Name() == "trackerError" {
-				f := v.FieldByName("Status")
-				if f.IsValid() && f.Kind() == reflect.Int {
-					return int(f.Int())
-				}
-			}
-		}
-		err = errors.Unwrap(err)
-	}
-	return 0
-}
 func (a approvalChild) post(ctx context.Context, stage chain.Stage, previous string, state chain.State, v approvalView) (chain.ApprovalPost, error) {
 	n := a.notice()
 	var prepared *noticeRecord
@@ -413,10 +409,7 @@ func (a approvalChild) post(ctx context.Context, stage chain.Stage, previous str
 		}
 	}
 	if prepared == nil {
-		cfg, err := a.settings()
-		if err != nil {
-			return chain.ApprovalPost{}, err
-		}
+		cfg := a.cfg
 		workspace := ""
 		for _, role := range a.cfg.Roles {
 			if role.Name == stage.Name && len(role.Processes) == 1 {
@@ -535,17 +528,12 @@ func approvalOrdinary(body string) bool {
 }
 func (a approvalChild) consume(state *chain.State, post chain.ApprovalPost, v approvalView, readErr error) (bool, error) {
 	for _, g := range v.gos {
-		if !g.ConsumedAt.IsZero() || !g.ExpiredAt.IsZero() {
+		if g.Result != "go" || !g.ConsumedAt.IsZero() || !g.ExpiredAt.IsZero() {
 			continue
 		}
 		valid := readErr == nil && g.PostN == post.N && g.PostCommentID == post.CommentID && g.Digest == post.Digest && a.clock().Before(post.Deadline) && slices.Contains(v.approvers, g.AuthorID) && g.LaunchHistoryLen == len(state.History)+1 && !g.PendingSince.IsZero() && !g.PendingSince.Before(g.AcceptedAt)
 		if strings.TrimRight(g.Body, " \t\r\n") != "GO "+post.DigestPrefix {
 			valid = false
-		}
-		for _, r := range state.History {
-			if r.FinishedAt.After(g.AcceptedAt) && (r.Speaker == "requester" || r.Role == "router") {
-				valid = false
-			}
 		}
 		for _, c := range v.comments {
 			if c.ID == g.GOCommentID {
@@ -705,7 +693,7 @@ func (a approvalChild) pruneBundles(current int) error {
 
 func (a approvalChild) expireOutstanding(gos []chain.ApprovalGO) error {
 	for _, g := range gos {
-		if g.ConsumedAt.IsZero() && g.ExpiredAt.IsZero() {
+		if g.Result == "go" && g.ConsumedAt.IsZero() && g.ExpiredAt.IsZero() {
 			g.ExpiredAt = a.clock()
 			if err := g.Save(a.approvalDirectory()); err != nil {
 				return err

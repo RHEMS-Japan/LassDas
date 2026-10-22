@@ -443,8 +443,11 @@ func (c Chain) Run(ctx context.Context) error {
 					}
 				}
 			}
-			results = append(results, ApprovalFailureRecord(target, reason))
-			state.Recovering = true
+			record := ApprovalFailureRecord(target, reason)
+			if target == next.Role && reason == "bundle_credential" {
+				record.Error = approvalReceiptPrefix + reason
+			}
+			results = append(results, record)
 			break
 		}
 		if asking && len(results) == 0 {

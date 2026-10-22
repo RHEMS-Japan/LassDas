@@ -643,7 +643,7 @@ func (n notices) settle(ctx context.Context, log *noticeLog, i int, fresh bool) 
 		stored, err = n.source.AddComment(ctx, n.issue, record.Text)
 	}
 	if err != nil {
-		status := approvalHTTPStatus(err)
+		status := tracker.StatusCode(err)
 		if record.Kind == approvalNotice && status >= 400 && status < 500 && status != 429 {
 			log.Notices[i].Obsolete = true
 			if saveErr := n.save(*log); saveErr != nil {
