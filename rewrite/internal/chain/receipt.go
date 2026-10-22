@@ -53,7 +53,16 @@ func readReceipt(workspace, directory, name string) ([]byte, error) {
 		defer next.Close()
 		root = next
 	}
-	file, err := root.OpenFile(parts[len(parts)-1], os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	name = parts[len(parts)-1]
+	// os.Root can re-resolve a final symlink despite O_NOFOLLOW.
+	before, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, errors.New("receipt is not a regular file")
+	}
+	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -61,6 +70,9 @@ func readReceipt(workspace, directory, name string) ([]byte, error) {
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err
+	}
+	if !os.SameFile(before, info) {
+		return nil, errors.New("receipt changed during inspection")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !info.Mode().IsRegular() || !ok || stat.Nlink != 1 || info.Size() > receiptBytes {

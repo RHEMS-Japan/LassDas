@@ -20,6 +20,8 @@ func TestProcessReceiptRead(t *testing.T) {
 		{"nested", true},
 		{"empty", true},
 		{"final_symlink", false},
+		{"final_relative_symlink", false},
+		{"final_relative_symlink_through_directory_symlink", false},
 		{"intermediate_symlink", false},
 		{"process_directory_symlink", false},
 		{"process_directory_ancestor_symlink", false},
@@ -81,13 +83,31 @@ func TestProcessReceiptRead(t *testing.T) {
 					}
 					receipt = "alias/receipt.txt"
 				}
-			case "final_symlink", "hardlink":
+			case "final_symlink", "final_relative_symlink", "hardlink":
 				receipt = "alias.txt"
 				link := os.Symlink
+				target := path
+				if test.name == "final_relative_symlink" {
+					target = "receipt.txt"
+				}
 				if test.name == "hardlink" {
 					link = os.Link
 				}
-				if err := link(path, filepath.Join(directory, receipt)); err != nil {
+				if err := link(target, filepath.Join(directory, receipt)); err != nil {
+					t.Fatal(err)
+				}
+			case "final_relative_symlink_through_directory_symlink":
+				nested := filepath.Join(directory, "nested")
+				if err := os.Mkdir(nested, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(path, filepath.Join(nested, "secret")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("nested", filepath.Join(directory, "sub")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("sub/secret", path); err != nil {
 					t.Fatal(err)
 				}
 			case "process_directory_symlink", "process_directory_ancestor_symlink":
