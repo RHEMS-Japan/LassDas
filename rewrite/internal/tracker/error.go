@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"errors"
 	"fmt"
 
 	"ticket-runner/internal/textclip"
@@ -22,4 +23,13 @@ func (e *trackerError) Error() string {
 // clip retains complete graphemes within the code-point budget and marks a cut.
 func clip(text string, limit int) string {
 	return textclip.Clip(text, limit)
+}
+
+// StatusCode returns the tracker HTTP status, or zero for other errors.
+func StatusCode(err error) int {
+	var response *trackerError
+	if errors.As(err, &response) && response != nil {
+		return response.Status
+	}
+	return 0
 }

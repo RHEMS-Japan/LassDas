@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -21,13 +23,17 @@ import (
 // configured command/container, not permissions invented by a model response.
 type Process struct {
 	// historyPath is supplied by the executor, never process configuration.
-	historyPath      string
-	environmentFacts string
-	Name             string            `json:"name"`
-	Command          []string          `json:"command"`
-	Directory        string            `json:"directory"`
-	Env              map[string]string `json:"env,omitempty"`
-	Secrets          map[string]string `json:"secrets,omitempty"`
+	approvedBundle      string
+	approvedDigest      string
+	approvalCredentials []string
+	approvalReceipt     bool
+	historyPath         string
+	environmentFacts    string
+	Name                string            `json:"name"`
+	Command             []string          `json:"command"`
+	Directory           string            `json:"directory"`
+	Env                 map[string]string `json:"env,omitempty"`
+	Secrets             map[string]string `json:"secrets,omitempty"`
 	// Credentials are ephemeral controller-issued values, never operator JSON.
 	Credentials map[string]string `json:"-"`
 	// TrackerAccess is an operator grant, not a model-produced instruction.
@@ -71,7 +77,9 @@ type Processes struct {
 	EnvironmentFacts string
 	// HistoryPath names this run's existing checkpoint. It grants no parent
 	// directory: a confined launcher exposes only this file, read-only.
-	HistoryPath string
+	HistoryPath       string
+	ApprovalDirectory string
+	CredentialValues  func() []string
 	// SelectModel names the model of one launch as the catalog names it, and
 	// the id the harness is handed to reach it. An empty id is read as
 	// ModelPrefix + model.
@@ -105,10 +113,15 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 	if !exists || len(role.Processes) == 0 {
 		return []Result{{Role: name, Speaker: "runtime", Error: "No process is configured for this role.", FinishedAt: time.Now().UTC()}}
 	}
+	approvedBundle, approvedDigest, approvalErr := p.approvedLaunch(state, name)
+	if approvalErr != nil {
+		return []Result{{Role: name, Speaker: "runtime", Error: approvalErr.Error(), FinishedAt: time.Now().UTC()}}
+	}
 	results := make([]Result, len(role.Processes))
 	var group sync.WaitGroup
 	var selected []string
 	for index, process := range role.Processes {
+		process.Env = maps.Clone(process.Env)
 		if process.HistoryEnvironmentConflict() {
 			results[index] = Result{Role: name, Speaker: process.Name, Instruction: assignment.Instruction,
 				Error: "TASK_HISTORY is reserved for runtime request history; TASK_APPROVED_BUNDLE and TASK_APPROVED_DIGEST are reserved for runtime approval.", FinishedAt: time.Now().UTC()}
@@ -155,6 +168,32 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 		group.Add(1)
 		go func(index int, process Process, model, prefix, invoked string) {
 			defer group.Done()
+			if state.approvalReceiptRole(name) {
+				workspace := process.Env["TASK_WORKSPACE"]
+				if workspace == "" {
+					workspace = process.Directory
+				}
+				var cleanupErr error
+				if state.Workflow != nil {
+					for i, stage := range state.Workflow.Stages {
+						if stage.Approval != nil && i > 0 && state.Workflow.Stages[i-1].Name == name {
+							for _, show := range stage.Approval.Show {
+								if err := RemoveApprovalFile(workspace, filepath.Join(workspace, stage.Approval.Bundle), show); err != nil {
+									cleanupErr = err
+									break
+								}
+							}
+						}
+					}
+				}
+				if cleanupErr == nil {
+					cleanupErr = RemoveApprovalFile(workspace, process.Directory, process.Receipt)
+				}
+				if cleanupErr != nil {
+					results[index] = Result{Role: name, Speaker: process.Name, Error: "Approval file cleanup refused", ApprovalReceiptFailure: "bundle_kind", FinishedAt: time.Now().UTC()}
+					return
+				}
+			}
 			if p.Prepare != nil {
 				started := time.Now().UTC()
 				prepared, release, err := p.Prepare(ctx, process)
@@ -168,6 +207,11 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 					return
 				}
 				process = prepared
+			}
+			process.approvedBundle, process.approvedDigest = approvedBundle, approvedDigest
+			process.approvalReceipt = state.approvalReceiptRole(name)
+			if process.approvalReceipt && p.CredentialValues != nil {
+				process.approvalCredentials = p.CredentialValues()
 			}
 			process.historyPath = p.HistoryPath
 			process.environmentFacts = p.EnvironmentFacts
@@ -262,6 +306,9 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	}
 	if p.historyPath != "" {
 		env["TASK_HISTORY"] = p.historyPath
+	}
+	if p.approvedBundle != "" {
+		env["TASK_APPROVED_BUNDLE"], env["TASK_APPROVED_DIGEST"] = p.approvedBundle, p.approvedDigest
 	}
 	var secrets []string
 	for name, value := range p.Credentials {
@@ -378,6 +425,15 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 		// is never turned into a failure or into proof that a delivery landed.
 		if content, readErr := readReceipt(env["TASK_WORKSPACE"], p.Directory, p.Receipt); readErr != nil {
 			result.Receipt = p.Receipt + " could not be read back: " + readErr.Error()
+			if p.approvalReceipt {
+				result.ApprovalReceiptFailure = "receipt_unreadable"
+			}
+		} else if p.approvalReceipt && hasCredential(content, p.approvalCredentials) {
+			result.ApprovalReceiptFailure = "bundle_credential"
+			result.Receipt = "Approval receipt contained a configured credential and was withheld."
+			if removeErr := RemoveApprovalFile(env["TASK_WORKSPACE"], p.Directory, p.Receipt); removeErr != nil {
+				result.Receipt = "Approval receipt cleanup refused; no receipt content retained."
+			}
 		} else {
 			result.Receipt = p.Receipt + ", read back by the runtime:\n" + string(content)
 		}

@@ -417,6 +417,9 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 			first = map[string]time.Time{}
 			if state, err := savedHistory(directory); err == nil {
 				for _, result := range state.History {
+					if chain.ApprovalFailureReason(result) != "" {
+						continue
+					}
 					if earliest, seen := first[result.Role]; !seen || result.StartedAt.Before(earliest) {
 						first[result.Role] = result.StartedAt
 					}
@@ -582,7 +585,7 @@ func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory
 				// A notice recorded with notes the tracker could not tell it
 				// apart from (Also) may not be the engine's own comment at
 				// CommentID: it is never rewritten, the rerun is a new comment.
-				if last != nil && last.PostedAt != nil && !last.Predates && last.CommentID > 0 && len(last.Also) == 0 &&
+				if !hasApproval(cfg.Workflow) && last != nil && last.PostedAt != nil && !last.Predates && last.CommentID > 0 && len(last.Also) == 0 &&
 					sameFailures(saved(), role.Name, last.Event, latest.Launch) {
 					said.Edits = last.CommentID
 				}
@@ -707,6 +710,9 @@ func rerunNoticeText(cfg config, directory, role string, before []chain.Result, 
 // endingText is how a launch that did not end cleanly ended, from what the
 // runtime recorded of it and never from what a role wrote.
 func endingText(cfg config, ending chain.Ending) string {
+	if ending.ApprovalFailure != "" {
+		return japaneseStage(ending.Role) + ": " + ending.Error + "。"
+	}
 	name := japaneseStage(ending.Role)
 	if stage, known := orderedStage(cfg, ending.Role); known && stage.Kind == chain.CommandStage && !ending.Interrupted {
 		return name + "が通りませんでした。"

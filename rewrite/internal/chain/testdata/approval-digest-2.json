@@ -1,0 +1,13 @@
+{
+  "files": [
+    {
+      "path": "b/c",
+      "content": "y\n"
+    },
+    {
+      "path": "a",
+      "content": "x\n"
+    }
+  ],
+  "digest": "427276de8a55ad3976b8274d9d8d955806f6aa9eb980d19921c1e80a95c5950c"
+}

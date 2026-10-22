@@ -110,6 +110,10 @@ func (s State) stageRuns() []stageRun {
 			ended := s.History[j].Speaker == "runtime"
 			j++
 			if ended {
+				if j < len(s.History) && s.History[j].Role == role && ApprovalFailureReason(s.History[j]) != "" {
+					satisfied = false
+					j++
+				}
 				break
 			}
 		}
@@ -389,7 +393,9 @@ func (s State) stageInstruction(name string) string {
 		}
 	}
 	runs := s.stageRuns()
-	if len(runs) > 0 && !runs[len(runs)-1].satisfied {
+	if ending, ok := s.LastEnding(); ok && ending.ApprovalFailure != "" {
+		fmt.Fprintf(&text, "%s: %s\n", ending.Role, ending.Error)
+	} else if len(runs) > 0 && !runs[len(runs)-1].satisfied {
 		if failed, at := stageAt(stages, runs[len(runs)-1].role); at >= 0 && failed.Kind == CommandStage {
 			fmt.Fprintf(&text, "The %s stage did not exit 0. What its commands returned is in the record below; this run has no failing end state, so it is tried again after you.\n", failed.Name)
 		}
@@ -403,6 +409,10 @@ func (s State) stageInstruction(name string) string {
 // Ending is how the latest launch ended when it did not end cleanly, as the
 // runtime observed it: never what a role wrote about itself.
 type Ending struct {
+	ApprovalFailure string
+	// Error preserves the runtime's approval refusal text, including whether
+	// the command launched before its result became unreadable.
+	Error string
 	// Role is the role the launch ran.
 	Role string
 	// Attempt counts the launches of Role in a row, this one included, that
@@ -436,6 +446,10 @@ type EndingKinds struct {
 func endingOf(role string, records []Result) Ending {
 	ending := Ending{Role: role}
 	for _, record := range records {
+		if reason := ApprovalFailureReason(record); reason != "" {
+			ending.ApprovalFailure = reason
+			ending.Error = record.Error
+		}
 		ending.Interrupted = ending.Interrupted || record.Interrupted
 		ending.Forced = ending.Forced || record.Forced
 		ending.TimedOut = ending.TimedOut || record.Speaker != "runtime" && strings.HasPrefix(record.Error, context.DeadlineExceeded.Error())
@@ -504,6 +518,9 @@ func launchStopped(records []Result) bool {
 // instruction is the runtime's plain account of the ending for the launch
 // that follows it, so it does not walk into the same end without knowing.
 func (e Ending) instruction() string {
+	if e.ApprovalFailure != "" {
+		return e.Role + ": " + e.Error + "\n"
+	}
 	how := "ended with a process error, which is in the record below"
 	switch {
 	case e.Forced:
