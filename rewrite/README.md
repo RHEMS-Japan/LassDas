@@ -2141,7 +2141,6 @@ SHA-256 body digest, creation time and update time in
 It keeps the first values read for each comment id, never overwrites them on a
 later read, and does not delete earlier entries.
 Reads with an issue id of zero and comments with an empty body are not recorded.
-Recording is currently disabled by an internal flag.
 It is enabled only for settings with approval conditions.
 
 ### Requester stop in watch mode
@@ -4135,7 +4134,7 @@ CI, live credentials and deployment behavior remain installation checks.
 
 承認条件のある command 工程は、直前の command の後に束の全文を投稿し、実行枠を返して承認を待つ。
 子側は投稿と複製・照合・消費を行い、親側は各 tick の GO の受理・差し戻し・期限切れを処理する。
-承認者の設定は、親は見張りが読み込んだ設定、子は起動時に渡された `engine.json` の設定を使う。照合のたびに設定ファイルを読み直さない。
+承認者の設定は、親は見張りが読み込んだ設定、子は起動時に渡された `engine.json` の設定を使う。照合のたびに設定ファイルを読み直さない。「今の設定」は見張りが読み込んだ設定を指し、承認者を変えるには見張りの再起動が必要。
 通常の設定の動きは変えない。全役の process が隔離起動器を通り、終了時に子 process も消えることが前提。
 
 `<queue>/jobs/<id>/approval/` は役が書けない、workspace と homes の外に置く。
@@ -4143,7 +4142,7 @@ JSON は一時ファイルを同期して rename し、ディレクトリも同�
 
 - `bundle-<n>/`: n 回目の投稿のファイルを、そのまま複製したもの。
 - `post-<n>.json`: `n`, `stage`, `comment_id`, `sent_text_sha256`, `digest`（小文字64桁）, `digest_prefix`（先頭8桁）, `deadline`, `created_at`, `files`（`path`, `size`, `sha256`）。時刻は本体の UTC、RFC3339。読み戻しが一致してから保存する。送った全文と準備中の投稿メタデータ（`approval` 欄）は `notices.json` に保持し、再起動時も同じ複製・文・期限を使う。
-- `go-<comment_id>.json`: 親が受理した GO と読めない GO を保存する。差し戻しと受理しなかった GO の処理済み id は投稿の記録にも保持する。`result` は `"go"` / `"unreadable_go"` / `"rejection"`。共通欄は `post_n`, `post_comment_id`, `go_comment_id`, `author_id`, `body`, `digest`。`result="go"` では `accepted_at`, `launch_history_len`, `pending_since` を記録し（他の結果ではゼロ値）、消費時に `consumed_at`、失効時に `expired_at` を書く。起動位置は消費の runtime 行を含む、起動直前の History の長さと PendingSince。消費を先に保存し、Pending 保存前に落ちた場合も同じ GO を再利用しない。GO 記録と投稿記録の処理済みコメント id を承認者の除外から外すが、編集・削除の照合を免除するのは受理した GO だけ。
+- `go-<comment_id>.json`: 親が受理した GO と読めない GO を保存する。差し戻しと受理しなかった GO の処理済み id は投稿の記録にも保持する。`result` は `"go"` / `"unreadable_go"`。`"rejection"` は PR4 との読み込み互換のための値で、今は書かない。差し戻しは `post-<n>.json` の `processed_comment_ids` と `resolution` に記録する。共通欄は `post_n`, `post_comment_id`, `go_comment_id`, `author_id`, `body`, `digest`。`result="go"` では `accepted_at`, `launch_history_len`, `pending_since` を記録し（他の結果ではゼロ値）、消費時に `consumed_at`、失効時に `expired_at` を書く。起動位置は消費の runtime 行を含む、起動直前の History の長さと PendingSince。消費を先に保存し、Pending 保存前に落ちた場合も同じ GO を再利用しない。GO 記録と投稿記録の処理済みコメント id を承認者の除外から外すが、編集・削除の照合を免除するのは受理した GO だけ。
 
 State の `awaiting_approval` は `stage`, `post_n`, `post_comment_id`, `deadline`。
 問いの `waiting` とは別で、問いの回答や通常の再開では解けない。
@@ -4200,7 +4199,7 @@ State の `awaiting_approval` は `stage`, `post_n`, `post_comment_id`, `deadlin
 
 `post-<n>.json` の任意欄 `processed_comment_ids` は受理しなかったコメントも処理済みとして保持する。
 `resolution`（`rejected` / `expired`）、`resolution_body`、`resolved_at` は差し戻し・期限切れを
-history へ1回だけ反映するための記録。欄の無い既存の投稿も読み込める。
+history へ1回だけ反映するための記録。同じ読み取りで期限切れになった差し戻しの本文も保持し、不成立の行と一時停止の行の間に残す。欄の無い既存の投稿も読み込める。
 再開の記録の任意欄 `approval_checked` は、親の再検査が通った事実を保持する。
 受理しなかった GO は編集・削除の照合から免除しない。
 

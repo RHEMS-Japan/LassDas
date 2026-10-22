@@ -153,6 +153,9 @@ func pausedWorkText(pause pauseEpisode, clock *workClock, exits *stageExits) str
 
 // pausedText is the pause notice around its reason.
 func pausedText(reason string, pause pauseEpisode, clock *workClock) string {
+	if pause.Reason == "approval_expired" {
+		reason += "作業を続ける場合は、再開以外のコメントを書かないでください。遅れた GO も除外の対象となり、承認できなくなります。"
+	}
 	if chain.ApprovalPauseText(pause.Reason) != "" && pause.Reason != "approval_expired" {
 		return "この依頼の自動処理を一時停止しています。" + reason + "依頼は未完了です。"
 	}

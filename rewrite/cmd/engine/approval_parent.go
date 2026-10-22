@@ -45,9 +45,10 @@ func resolveApproval(state *chain.State, p chain.ApprovalPost) {
 	r.FinishedAt = p.ResolvedAt
 	state.History = append(state.History, r)
 	state.AwaitingApproval = nil
-	if p.Resolution == "rejected" {
+	if p.Resolution == "rejected" || p.ResolutionBody != "" {
 		state.History = append(state.History, chain.Result{Speaker: "requester", Output: p.ResolutionBody, FinishedAt: p.ResolvedAt})
-	} else {
+	}
+	if p.Resolution == "expired" {
 		state.PauseApproval("approval_expired", p.ResolvedAt)
 	}
 }
@@ -122,7 +123,6 @@ func (a approvalChild) parentTick(ctx context.Context, state *chain.State) (bool
 		p.ResolutionBody = strings.Join(rejections, "\n\n")
 		if !now.Before(p.Deadline) {
 			p.Resolution = "expired"
-			p.ResolutionBody = ""
 		}
 		if err := p.Save(a.approvalDirectory()); err != nil {
 			return false, err

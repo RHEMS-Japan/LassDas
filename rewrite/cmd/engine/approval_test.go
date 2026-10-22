@@ -208,30 +208,35 @@ func TestApprovalAvailableAfterAllChecks(t *testing.T) {
 		t.Fatalf("gate: %v", err)
 	}
 	// Availability still requires every preflight check.
-	changes := []func(*config){
-		func(c *config) {
+	changes := []struct {
+		name, want string
+		change     func(*config)
+	}{
+		{"predecessor", "approval needs an immediately preceding command stage", func(c *config) {
 			c.Workflow.Stages[1].Kind = chain.ModelStage
 			c.Roles[1].Processes[0].ModelEnv = "MODEL"
-		},
-		func(c *config) { c.Workflow.Stages[2].OnFailure = "d" },
-		func(c *config) {
+		}},
+		{"failure_target", "approval on_failure", func(c *config) { c.Workflow.Stages[2].OnFailure = "d" }},
+		{"shared_credentials", "approval credentials must not be shared", func(c *config) {
 			c.Roles[1].Processes[0].Secrets = map[string]string{"K": "APPROVAL_TEST_SHARED"}
 			c.Roles[2].Processes[0].Secrets = map[string]string{"K": "APPROVAL_TEST_SHARED"}
-		},
-		func(c *config) { c.Intake.StopUserIDs = nil },
-		func(c *config) { c.Roles[0].Processes[0].TrackerAccess = "read" },
-		func(c *config) { c.Intake.StopReportRole = "c" },
-		func(c *config) { c.Roles[2].Processes = append(c.Roles[2].Processes, chain.Process{}) },
-		func(c *config) { c.GitHub = &tracker.GitHub{} },
-		func(c *config) { c.Workflow.Stages[2].Approval.Show = nil },
-		func(c *config) { c.Workflow.Stages[4].OnFailure = "a" },
+		}},
+		{"stop_users", "approvers must belong to intake.stop_user_ids", func(c *config) { c.Intake.StopUserIDs = nil }},
+		{"tracker_access", "must have no tracker_access", func(c *config) { c.Roles[0].Processes[0].TrackerAccess = "read" }},
+		{"stop_report", "stop_report_role must not name an approval stage", func(c *config) { c.Intake.StopReportRole = "c" }},
+		{"process_count", "must have exactly one process", func(c *config) { c.Roles[2].Processes = append(c.Roles[2].Processes, chain.Process{}) }},
+		{"tracker", "approval stages require Backlog", func(c *config) { c.GitHub = &tracker.GitHub{} }},
+		{"show", "approval needs show paths", func(c *config) { c.Workflow.Stages[2].Approval.Show = nil }},
+		{"later_failure", "on_failure must stay after approval stage", func(c *config) { c.Workflow.Stages[4].OnFailure = "a" }},
 	}
-	for i, change := range changes {
-		cfg := approvalConfiguration()
-		change(&cfg)
-		if err := prepareStages(&cfg); err == nil {
-			t.Fatalf("check %d did not precede gate: %v", i+1, err)
-		}
+	for _, tt := range changes {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := approvalConfiguration()
+			tt.change(&cfg)
+			if err := prepareStages(&cfg); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected rejection containing %q, got %v", tt.want, err)
+			}
+		})
 	}
 	cfg = approvalConfiguration()
 	cfg.Workflow.Stages[2].Approval = nil
