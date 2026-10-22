@@ -110,7 +110,7 @@ func approvalAdd(t *testing.T, f *noticeTracker, id, author int64, body string, 
 func TestApprovalChildPostFullTextAndRestart(t *testing.T) {
 	a, f, s, p := approvalPostFixture(t)
 	text := f.all()[0]
-	for _, want := range []string{"## b の起動中に書かれたもの", "## 役が書いたもの", "```\ndry-run.txt\nchecked\n```", "```\nplan.txt\nproposed\n```", p.Digest, "GO " + p.DigestPrefix, p.Deadline.Format(time.RFC3339), "id 99", "コメント id", "直前の c の終了状態: まだ起動していない", "GO の削除・編集", "承認者が普通のコメント", "承認待ちの間に他の人", "書き直しは新しいコメントで"} {
+	for _, want := range []string{"## 試し実行の結果\n\n```\ndry-run.txt\nchecked\n```", "## AI が書いた計画\n\n```\nplan.txt\nproposed\n```", p.Digest, "GO " + p.DigestPrefix, p.Deadline.Format(time.RFC3339), "id 99", "コメント id", "前回の実行の終了状態: まだ起動していない", "GO の削除・編集", "承認者が普通のコメント", "承認待ちの間に他の人", "書き直しは新しいコメントで"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q", want)
 		}
@@ -433,7 +433,7 @@ func TestApprovalChildConsumptionConditions(t *testing.T) {
 func TestApprovalFailureNoticeAndQuestionIsolation(t *testing.T) {
 	cfg := approvalConfiguration()
 	text := endingText(cfg, chain.Ending{Role: "c", ApprovalFailure: "post_fence", Error: chain.ApprovalFailureText("post_fence")})
-	if strings.Contains(text, "通りません") || !strings.Contains(text, "post_fence") {
+	if strings.Contains(text, "通りません") || strings.Contains(text, "post_fence") || !strings.Contains(text, "承認の投稿に使えない文字や書式") {
 		t.Fatal(text)
 	}
 	state := chain.State{Waiting: true, AwaitingApproval: &chain.AwaitingApproval{Stage: "c"}}
@@ -442,12 +442,21 @@ func TestApprovalFailureNoticeAndQuestionIsolation(t *testing.T) {
 	}
 }
 
-func TestApprovalFailureEndingTextPreservesRecordedError(t *testing.T) {
-	for _, tc := range []struct{ name, text string }{
-		{"receipt_credential", "起動した・結果は読めない (効果不明): bundle_credential"},
-		{"bundle_credential", "承認条件が成立しなかった: bundle_credential"},
-		{"receipt_unreadable", "起動した・結果は読めない (効果不明): receipt_unreadable"},
-		{"post_fence", "承認条件が成立しなかった: post_fence"},
+func TestApprovalFailureEndingTextPreservesMeaning(t *testing.T) {
+	for _, tc := range []struct{ name, text, posted string }{
+		{"receipt_credential", "起動した・結果は読めない (効果不明): bundle_credential", "起動した・結果は読めない (効果不明): ファイルに認証情報が含まれていた"},
+		{"bundle_credential", "承認条件が成立しなかった: bundle_credential", "承認条件が成立しなかった: ファイルに認証情報が含まれていた"},
+		{"receipt_unreadable", "起動した・結果は読めない (効果不明): receipt_unreadable", "起動した・結果は読めない (効果不明): 実行結果を読み取れない"},
+		{"post_fence", "承認条件が成立しなかった: post_fence", "承認条件が成立しなかった: 承認の投稿に使えない文字や書式が含まれている"},
+		{"rejected", "承認条件が成立しなかった: rejected", "承認条件が成立しなかった: 承認者から修正を求められた"},
+		{"expired", "承認条件が成立しなかった: expired", "承認条件が成立しなかった: 承認の期限が切れた"},
+		{"bundle_name", "承認条件が成立しなかった: bundle_name", "承認条件が成立しなかった: 承認対象のファイル名が条件を満たしていない"},
+		{"bundle_kind", "承認条件が成立しなかった: bundle_kind", "承認条件が成立しなかった: 承認対象のファイルを安全に扱えない"},
+		{"bundle_limit", "承認条件が成立しなかった: bundle_limit", "承認条件が成立しなかった: 承認対象のファイルが量や形式の条件を満たしていない"},
+		{"show_missing", "承認条件が成立しなかった: show_missing", "承認条件が成立しなかった: 試し実行の結果のファイルが見つからない"},
+		{"post_size", "承認条件が成立しなかった: post_size", "承認条件が成立しなかった: 承認の投稿が長すぎるか、投稿先に受け付けられなかった"},
+		{"post_masked", "承認条件が成立しなかった: post_masked", "承認条件が成立しなかった: 承認の投稿に認証情報が含まれている"},
+		{"digest_collision", "承認条件が成立しなかった: digest_collision", "承認条件が成立しなかった: 承認対象を指紋で区別できない"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := approvalConfiguration()
@@ -456,13 +465,21 @@ func TestApprovalFailureEndingTextPreservesRecordedError(t *testing.T) {
 			if !ok {
 				t.Fatal("missing ending")
 			}
-			want := "c: " + tc.text + "。"
+			want := tc.posted + "。"
 			if text := endingText(cfg, ending); text != want {
 				t.Fatalf("ending = %q, want %q", text, want)
 			}
 			text, _ := rerunNoticeText(cfg, t.TempDir(), "a", state.History, "test-model")
-			if !strings.HasPrefix(text, want) {
+			if text != want+"作業をやり直します。（モデル: test-model）" {
 				t.Fatalf("rerun notice = %q, want prefix %q", text, want)
+			}
+			stage := cfg.Workflow.Stages[2]
+			posted, err := approvalPostText(stage, chain.ApprovalBundle{}, chain.ApprovalPost{}, 99, state, nil)
+			if err != nil || !strings.Contains(posted, "前回の実行の終了状態: "+tc.posted+"\n") || strings.Contains(posted, tc.text) {
+				t.Fatalf("post = %q, err = %v", posted, err)
+			}
+			if state.History[len(state.History)-1].Error != tc.text {
+				t.Fatal("posted wording changed the saved failure")
 			}
 		})
 	}
@@ -521,7 +538,7 @@ func TestApprovalChildReadbackPrecedesGO(t *testing.T) {
 }
 func TestApprovalChildPostSizeAndMaskedText(t *testing.T) {
 	a, _, s := approvalFixture(t)
-	stage, previous, _ := s.ApprovalStage("c")
+	stage, _, _ := s.ApprovalStage("c")
 	post := chain.ApprovalPost{Digest: strings.Repeat("a", 64), DigestPrefix: "aaaaaaaa", Deadline: time.Now().Add(time.Hour)}
 	for _, variant := range []string{"size", "masked"} {
 		t.Run(variant, func(t *testing.T) {
@@ -533,7 +550,7 @@ func TestApprovalChildPostSizeAndMaskedText(t *testing.T) {
 				credentials = []string{"safe"}
 			}
 			bundle := chain.ApprovalBundle{Files: []chain.ApprovalFile{{Path: "dry-run.txt"}}, Contents: map[string][]byte{"dry-run.txt": []byte(contents)}}
-			_, err := approvalPostText(stage, previous, bundle, post, 99, s, credentials)
+			_, err := approvalPostText(stage, bundle, post, 99, s, credentials)
 			if err == nil || !strings.Contains(err.Error(), "post_"+variant) {
 				t.Fatal(err)
 			}

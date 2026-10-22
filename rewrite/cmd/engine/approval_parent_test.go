@@ -604,14 +604,14 @@ func TestApprovalPauseStopSurvivesDamagedLedger(t *testing.T) {
 
 func TestApprovalRefusalWordsAndNoRoleQuotes(t *testing.T) {
 	cfg := approvalConfiguration()
-	for _, reason := range []string{"rejected", "expired"} {
+	for reason, description := range map[string]string{"rejected": "承認者から修正を求められた", "expired": "承認の期限が切れた"} {
 		state := chain.State{Workflow: cfg.Workflow, History: []chain.Result{chain.ApprovalFailureRecord("c", reason)}}
 		next, err := (chain.StageRouter{}).Next(context.Background(), state)
 		if err != nil || !strings.Contains(next.Instruction, reason) || strings.Contains(next.Instruction, "did not exit 0") {
 			t.Fatal("incorrect recovery words", err)
 		}
 		text, _ := rerunNoticeText(cfg, t.TempDir(), "a", state.History, "fixture")
-		if !strings.Contains(text, reason) || strings.Contains(text, "通りません") {
+		if strings.Contains(text, reason) || !strings.Contains(text, description) || strings.Contains(text, "通りません") {
 			t.Fatal("refusal described as failed command")
 		}
 		cfg.Intake.Announce = true

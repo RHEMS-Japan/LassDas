@@ -343,7 +343,26 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 	return v, nil
 }
 
-func approvalPostText(stage chain.Stage, previous string, bundle chain.ApprovalBundle, post chain.ApprovalPost, me int64, state chain.State, credentials []string) (string, error) {
+// Translate only posted text; saved failure reasons retain their internal names.
+func approvalFailurePostText(reason, recorded string) string {
+	descriptions := map[string]string{
+		"rejected":           "承認者から修正を求められた",
+		"expired":            "承認の期限が切れた",
+		"bundle_name":        "承認対象のファイル名が条件を満たしていない",
+		"bundle_kind":        "承認対象のファイルを安全に扱えない",
+		"bundle_limit":       "承認対象のファイルが量や形式の条件を満たしていない",
+		"bundle_credential":  "ファイルに認証情報が含まれていた",
+		"show_missing":       "試し実行の結果のファイルが見つからない",
+		"post_size":          "承認の投稿が長すぎるか、投稿先に受け付けられなかった",
+		"post_fence":         "承認の投稿に使えない文字や書式が含まれている",
+		"post_masked":        "承認の投稿に認証情報が含まれている",
+		"digest_collision":   "承認対象を指紋で区別できない",
+		"receipt_unreadable": "実行結果を読み取れない",
+	}
+	return strings.TrimSuffix(recorded, reason) + descriptions[reason]
+}
+
+func approvalPostText(stage chain.Stage, bundle chain.ApprovalBundle, post chain.ApprovalPost, me int64, state chain.State, credentials []string) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "承認の対象: この投稿（本体のアカウント id %d、コメント id はこのコメント自身の id）の中身だけが GO の対象です。\n指紋: %s\n先頭 8 桁: %s\nGO の書き方: GO %s （この1行だけ）\n期限 D（本体の時計）: %s\n", me, post.Digest, post.DigestPrefix, post.DigestPrefix, post.Deadline.Format(time.RFC3339))
 	ending := "まだ起動していない"
@@ -363,7 +382,7 @@ func approvalPostText(stage chain.Stage, previous string, bundle chain.ApprovalB
 		}
 		switch {
 		case chain.ApprovalFailureReason(r) != "":
-			ending = r.Error
+			ending = approvalFailurePostText(chain.ApprovalFailureReason(r), r.Error)
 		case r.Interrupted:
 			ending = "中断した（効果不明）"
 		case r.Error != "":
@@ -373,13 +392,13 @@ func approvalPostText(stage chain.Stage, previous string, bundle chain.ApprovalB
 		}
 		break
 	}
-	fmt.Fprintf(&b, "直前の %s の終了状態: %s\n", stage.Name, ending)
+	fmt.Fprintf(&b, "前回の実行の終了状態: %s\n", ending)
 	b.WriteString("GO の削除・編集は取り消しにならず、止められるのは `停止` だけ。\n承認者が普通のコメントを書くとこの依頼は承認できなくなる。\n承認待ちの間に他の人がコメントするとこの依頼は止まる。\nコメントの編集・削除（読めない GO の書き直しを含む）でこの依頼は止まる。書き直しは新しいコメントで。\n")
 	for _, show := range []bool{true, false} {
 		if show {
-			fmt.Fprintf(&b, "\n## %s の起動中に書かれたもの\n", previous)
+			b.WriteString("\n## 試し実行の結果\n")
 		} else {
-			b.WriteString("\n## 役が書いたもの\n")
+			b.WriteString("\n## AI が書いた計画\n")
 		}
 		for _, f := range bundle.Files {
 			if slices.Contains(stage.Approval.Show, f.Path) != show {
@@ -413,7 +432,7 @@ func approvalPostText(stage chain.Stage, previous string, bundle chain.ApprovalB
 	return text, nil
 }
 
-func (a approvalChild) post(ctx context.Context, stage chain.Stage, previous string, state chain.State, v approvalView) (chain.ApprovalPost, error) {
+func (a approvalChild) post(ctx context.Context, stage chain.Stage, state chain.State, v approvalView) (chain.ApprovalPost, error) {
 	n := a.notice()
 	var prepared *noticeRecord
 	lastStageEnd := time.Time{}
@@ -462,7 +481,7 @@ func (a approvalChild) post(ctx context.Context, stage chain.Stage, previous str
 		if err = chain.CheckApprovalCollision(post.Digest, v.posts); err != nil {
 			return post, err
 		}
-		text, err := approvalPostText(stage, previous, bundle, post, v.me, state, credentialValues(cfg))
+		text, err := approvalPostText(stage, bundle, post, v.me, state, credentialValues(cfg))
 		if err != nil {
 			return post, err
 		}
@@ -602,7 +621,7 @@ func (a approvalChild) before(ctx context.Context, state *chain.State, next chai
 	return err
 }
 func (a approvalChild) beforeRead(ctx context.Context, state *chain.State, next chain.Assignment) error {
-	stage, previous, ok := state.ApprovalStage(next.Role)
+	stage, _, ok := state.ApprovalStage(next.Role)
 	if !ok {
 		return nil
 	}
@@ -653,7 +672,7 @@ func (a approvalChild) beforeRead(ctx context.Context, state *chain.State, next 
 				state.AwaitingApproval = &chain.AwaitingApproval{Stage: stage.Name, PostN: current.N, PostCommentID: current.CommentID, Deadline: current.Deadline}
 				return chain.ErrAwaitingApproval
 			}
-			post, postErr := a.post(ctx, stage, previous, *state, v)
+			post, postErr := a.post(ctx, stage, *state, v)
 			err = postErr
 			if err == nil {
 				state.History = append(state.History, chain.Result{Role: "router", Speaker: "runtime", Output: "承認の投稿を読み戻して確認した", FinishedAt: a.clock()})
