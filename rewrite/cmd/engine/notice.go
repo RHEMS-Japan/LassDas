@@ -383,7 +383,7 @@ func kindStart(now time.Time) time.Time {
 func postableKinds(cfg config) []string {
 	kinds := []string{resumeNotice}
 	if hasApproval(cfg.Workflow) {
-		kinds = append(kinds, approvalNotice)
+		kinds = append(kinds, approvalNotice, approvalUnreadableNotice)
 	}
 	if diskThreshold(cfg) > 0 {
 		kinds = append(kinds, diskNotice)
@@ -1036,6 +1036,9 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string, run
 		elapsed = sinceLaunch
 	}
 	if stalled && elapsed > window {
+		if hasApproval(cfg.Workflow) || hasApproval(state.Workflow) {
+			failure = ""
+		}
 		return n.post(ctx, stallNotice, stallNoticeText(int(elapsed.Minutes()), noticeDetail(cfg, failure)), now.Add(-elapsed))
 	}
 	// A long silence is worth a word only while the work runs: a request

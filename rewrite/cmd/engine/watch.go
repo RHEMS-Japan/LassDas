@@ -594,6 +594,22 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				continue
 			}
 			stopping := false
+			if state.AwaitingApproval != nil {
+				applyStatus(ctx, cfg, issue, directory, awaitingStatus, say)
+				assignApproval(ctx, cfg, issue, directory, state, say)
+				ready, stop, err := resumeApprovalRequest(ctx, cfg, issue, directory, request, interval)
+				if err != nil {
+					say("approval waits: " + err.Error())
+					continue
+				}
+				if !ready {
+					if _, err := holdPausedRequest(ctx, cfg, issue, directory, request, interval, say); err != nil {
+						say("approval remains held: " + err.Error())
+					}
+					continue
+				}
+				stopping = stop
+			}
 			if state.Waiting {
 				// This request put a question to the person who filed it. Only
 				// an authorized stop, or their reply after that question, makes

@@ -18,7 +18,7 @@ type ApprovalFailure string
 
 func (r ApprovalFailure) Error() string { return ApprovalFailureText(string(r)) }
 
-var approvalReasons = []string{"bundle_name", "bundle_kind", "bundle_limit", "bundle_credential", "show_missing", "post_size", "post_fence", "post_masked", "digest_collision", "receipt_unreadable"}
+var approvalReasons = []string{"rejected", "expired", "bundle_name", "bundle_kind", "bundle_limit", "bundle_credential", "show_missing", "post_size", "post_fence", "post_masked", "digest_collision", "receipt_unreadable"}
 
 const approvalFailurePrefix = "承認条件が成立しなかった: "
 const approvalReceiptPrefix = "起動した・結果は読めない (効果不明): "
@@ -56,15 +56,19 @@ type ApprovalFile struct {
 	SHA256 string `json:"sha256"`
 }
 type ApprovalPost struct {
-	N              int            `json:"n"`
-	Stage          string         `json:"stage"`
-	CommentID      int64          `json:"comment_id"`
-	SentTextSHA256 string         `json:"sent_text_sha256"`
-	Digest         string         `json:"digest"`
-	DigestPrefix   string         `json:"digest_prefix"`
-	Deadline       time.Time      `json:"deadline"`
-	CreatedAt      time.Time      `json:"created_at"`
-	Files          []ApprovalFile `json:"files"`
+	ProcessedCommentIDs []int64        `json:"processed_comment_ids,omitempty"`
+	Resolution          string         `json:"resolution,omitempty"`
+	ResolutionBody      string         `json:"resolution_body,omitempty"`
+	ResolvedAt          time.Time      `json:"resolved_at,omitzero"`
+	N                   int            `json:"n"`
+	Stage               string         `json:"stage"`
+	CommentID           int64          `json:"comment_id"`
+	SentTextSHA256      string         `json:"sent_text_sha256"`
+	Digest              string         `json:"digest"`
+	DigestPrefix        string         `json:"digest_prefix"`
+	Deadline            time.Time      `json:"deadline"`
+	CreatedAt           time.Time      `json:"created_at"`
+	Files               []ApprovalFile `json:"files"`
 }
 type ApprovalGO struct {
 	Result           string    `json:"result"`
@@ -217,4 +221,38 @@ func (p Processes) approvedLaunch(state State, role string) (string, string, err
 		}
 	}
 	return "", "", errors.New("approval launch does not match a consumed GO")
+}
+
+// Approval pauses deliberately recognize only these runtime-owned words.
+var approvalPauseTexts = map[string]string{
+	"approval_expired":         "期限が切れた。再開すると計画から作り直して再投稿する",
+	"approval_post_mismatch":   "投稿が送った文と一致しない。再開しても続かない。停止して起票し直す",
+	"approval_tampered":        "課題かコメントが変えられた。再開しても続かない。停止して起票し直す",
+	"approval_no_approver":     "承認できる人がいない。停止して起票し直す",
+	"approval_config_mismatch": "この依頼は今の設定では承認できない。停止して起票し直す",
+}
+var ErrApprovalPause = errors.New("the request is paused at approval")
+
+func ApprovalPauseText(reason string) string { return approvalPauseTexts[reason] }
+func (s State) ApprovalPaused() string {
+	if len(s.History) == 0 {
+		return ""
+	}
+	r := s.History[len(s.History)-1]
+	if r.Role != "router" || r.Speaker != "runtime" || r.Error != "" {
+		return ""
+	}
+	for reason, text := range approvalPauseTexts {
+		if r.Output == text {
+			return reason
+		}
+	}
+	return ""
+}
+func (s *State) PauseApproval(reason string, now time.Time) {
+	if ApprovalPauseText(reason) == "" || s.ApprovalPaused() == reason {
+		return
+	}
+	s.AwaitingApproval = nil
+	s.History = append(s.History, Result{Role: "router", Speaker: "runtime", Output: ApprovalPauseText(reason), FinishedAt: now})
 }

@@ -55,10 +55,11 @@ type pauseEpisode struct {
 // join the history. A restart can finish that local write without consuming the
 // comment twice or treating an unrelated history change as its own write.
 type pauseResume struct {
-	Comment      json.RawMessage `json:"comment"`
-	HistoryIndex int             `json:"history_index"`
-	RecordedAt   time.Time       `json:"recorded_at"`
-	Applied      bool            `json:"applied,omitempty"`
+	Comment         json.RawMessage `json:"comment"`
+	HistoryIndex    int             `json:"history_index"`
+	RecordedAt      time.Time       `json:"recorded_at"`
+	ApprovalChecked bool            `json:"approval_checked,omitempty"`
+	Applied         bool            `json:"applied,omitempty"`
 }
 
 var errPauseRecord = errors.New("the recorded pause is unreadable; the request remains held")
@@ -122,10 +123,13 @@ func recordWorkPause(directory, reason string, at time.Time) error {
 
 // knownPauseReason reports a reason this controller records itself.
 func knownPauseReason(reason string) bool {
-	return reason == activeLimitPause || reason == hardExitPause || reason == stageAttemptsPause || reason == environmentPause
+	return chain.ApprovalPauseText(reason) != "" || reason == activeLimitPause || reason == hardExitPause || reason == stageAttemptsPause || reason == environmentPause
 }
 
 func pauseReason(reason string) string {
+	if text := chain.ApprovalPauseText(reason); text != "" {
+		return text + "。"
+	}
 	switch reason {
 	case activeLimitPause:
 		return "今回任された区間の実稼働時間が、設定された上限に達したためです。"
@@ -149,6 +153,9 @@ func pausedWorkText(pause pauseEpisode, clock *workClock, exits *stageExits) str
 
 // pausedText is the pause notice around its reason.
 func pausedText(reason string, pause pauseEpisode, clock *workClock) string {
+	if chain.ApprovalPauseText(pause.Reason) != "" && pause.Reason != "approval_expired" {
+		return "この依頼の自動処理を一時停止しています。" + reason + "依頼は未完了です。"
+	}
 	return "この依頼の自動処理を一時停止しています。" + reason + workPauseMeasured(clock, pause.Elapsed) +
 		"依頼は未完了です。中断前の操作が既に反映されている場合があり、取り消してはいません。\n" +
 		"続ける場合は、最初の空でない行を「再開」として新しいコメントを投稿してください。必要な補足は次の行に書けます。保存した条件で、外部の状態を確かめてから続けます。" +
@@ -273,7 +280,10 @@ func (n notices) sayPauseEvent(ctx context.Context, kind, event, words string) (
 // when the pause record is damaged; a disappearing remote stop cannot turn
 // this poll's stop-only decision into permission to run work on the next one.
 func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, directory, request string, interval time.Duration, observe func(string)) (bool, error) {
-	recoveryErr := recoverWorkClock(directory)
+	recoveryErr := pauseApproval(directory, time.Now().UTC())
+	if recoveryErr == nil {
+		recoveryErr = recoverWorkClock(directory)
+	}
 	if recoveryErr == nil {
 		recoveryErr = pauseStageAttempts(cfg, directory, time.Now().UTC())
 	}
@@ -289,12 +299,8 @@ func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	}
 	readCtx, release := context.WithTimeout(ctx, interval)
 	source := cfg.source()
-	rows, err := source.Comments(readCtx, issue)
+	rows, stop, err := readStopComments(readCtx, source, issue, cfg.Intake.StopUserIDs)
 	release()
-	if err != nil {
-		return true, err
-	}
-	stop, err := stopInstruction(source, rows, issue, cfg.Intake.StopUserIDs)
 	if err != nil {
 		return true, err
 	}
@@ -325,7 +331,11 @@ func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	pause := &record.Pauses[len(record.Pauses)-1]
 	if record.held() {
 		applyStatus(ctx, cfg, issue, directory, awaitingStatus, observe)
-		assignTurn(ctx, cfg, issue, directory, "requester", observe)
+		if state, err := savedHistory(directory); err == nil && (hasApproval(state.Workflow) || hasApproval(cfg.Workflow)) {
+			assignApproval(ctx, cfg, issue, directory, state, observe)
+		} else {
+			assignTurn(ctx, cfg, issue, directory, "requester", observe)
+		}
 		words := pausedWorkText(*pause, record.Clock, record.StageExits)
 		if pause.Reason == stageAttemptsPause || pause.Reason == environmentPause {
 			// Nothing has run since the pause, so the history still says what
@@ -394,8 +404,23 @@ func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			return true, errPauseRecord
 		}
 	}
-	if _, err := n.sayPauseEvent(ctx, workResumeNotice, event, workResumeText); err != nil {
+	resumeText := workResumeText
+	blockedApproval := chain.ApprovalPauseText(pause.Reason) != "" && pause.Reason != "approval_expired"
+	if blockedApproval {
+		resumeText = approvalResumeBlockedText
+	}
+	if _, err := n.sayPauseEvent(ctx, workResumeNotice, event, resumeText); err != nil {
 		return true, err
+	}
+	if blockedApproval && !pause.Resume.ApprovalChecked {
+		ready, err := recheckApprovalResume(ctx, cfg, issue, directory, request)
+		if err != nil || !ready {
+			return true, err
+		}
+		pause.Resume.ApprovalChecked = true
+		if err := saveWorkLimit(directory, record); err != nil {
+			return true, err
+		}
 	}
 	return false, nil
 }
@@ -559,6 +584,9 @@ func pauseEnvironment(directory string, now time.Time) error {
 // has had and may have. The quote is cut and scrubbed the way a failure line
 // is in other notices; reportFromShortfall only chooses where it starts.
 func environmentReason(cfg config, state chain.State) string {
+	if hasApproval(cfg.Workflow) || hasApproval(state.Workflow) {
+		return pauseReason(environmentPause)
+	}
 	report, label, limit := "", "要件確定の報告の冒頭: ", 0
 	if flow := state.Workflow; flow != nil && len(flow.Stages) > 0 {
 		limit = flow.EnvironmentPauseLimit
