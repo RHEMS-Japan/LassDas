@@ -79,7 +79,7 @@ func TestApprovalParentGOConsumptionAndRepost(t *testing.T) {
 
 func TestApprovalParentClassification(t *testing.T) {
 	for _, tt := range []struct{ name, body, kind string }{
-		{"lower", "go 12345678", "unreadable"}, {"fullwidth", "ＧＯ １２３４５６７８", "unreadable"}, {"short", "GO 123", "unreadable"}, {"extra_space", "GO  12345678", "unreadable"}, {"wrong_digest", "GO 00000000", "unreadable"}, {"resume", "再開\n補足", "unreadable"}, {"two_lines", "GO 12345678\n追加", "rejected"}, {"quote", "> GO 12345678", "rejected"}, {"ordinary", "計画を直してください", "rejected"},
+		{"lower", "go 12345678", "unreadable"}, {"fullwidth", "ＧＯ １２３４５６７８", "unreadable"}, {"short", "GO 123", "unreadable"}, {"extra_space", "GO  12345678", "unreadable"}, {"wrong_digest", "GO 00000000", "unreadable"}, {"resume", "再開\n補足", "unreadable"}, {"two_lines", "GO 12345678\n追加", "rejected"}, {"quote", "> GO 12345678", "rejected"}, {"ordinary", "計画を直してください", "rejected"}, {"whitespace", " \t", "rejected"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			a, f, s, _ := approvalPostFixture(t)

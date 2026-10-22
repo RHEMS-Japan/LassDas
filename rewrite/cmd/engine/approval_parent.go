@@ -99,7 +99,7 @@ func (a approvalChild) parentTick(ctx context.Context, state *chain.State) (bool
 	var candidates []chain.ApprovalGO
 	var rejections []string
 	for _, c := range v.comments {
-		if c.ID <= v.boundary || processed[c.ID] || !slices.Contains(v.approvers, c.Author.ID) || strings.TrimSpace(c.Body) == "" {
+		if c.ID <= v.boundary || processed[c.ID] || !slices.Contains(v.approvers, c.Author.ID) || c.Body == "" {
 			continue
 		}
 		body := strings.TrimRight(c.Body, " \t\r\n")
