@@ -281,6 +281,9 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				if outcome.clockErr != nil {
 					return errors.Join(outcome.err, outcome.clockErr)
 				}
+				if errors.Is(outcome.err, chain.ErrAwaitingApproval) {
+					return nil
+				}
 				if !errors.Is(outcome.err, chain.ErrWaiting) {
 					return outcome.err
 				}

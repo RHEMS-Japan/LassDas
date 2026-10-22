@@ -364,6 +364,9 @@ func answerToQuestion(source tracker.Tracker, rows []json.RawMessage, issue sour
 // for the stop to be recorded, and it was not answered. Otherwise only a
 // reply above the recorded boundary resumes it.
 func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, directory, request string, state chain.State, interval time.Duration) (resume, answered bool, err error) {
+	if state.AwaitingApproval != nil {
+		return false, false, nil
+	}
 	readCtx, release := context.WithTimeout(ctx, interval)
 	source := cfg.source()
 	rows, err := source.Comments(readCtx, issue)

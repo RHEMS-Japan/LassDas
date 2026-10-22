@@ -4128,3 +4128,27 @@ run it deliberately returns nonzero, never evidence of a completed delivery.
 Tests use real local Git repositories and a local API fixture that must
 receive zero requests. Real hosting permissions, branch protection, triggered
 CI, live credentials and deployment behavior remain installation checks.
+
+### 承認の子側の記録（親側の実装まで受付は無効）
+
+承認条件のある設定は引き続き `approval stages are not available yet` で拒む。
+子側は投稿と複製・照合・消費を担当し、GO の受理、差し戻し、期限切れの処理は親側で追加する。
+通常の設定の動きは変えない。全役の process が隔離起動器を通り、終了時に子 process も消えることが前提。
+
+`<queue>/jobs/<id>/approval/` は役が書けない、workspace と homes の外に置く。
+JSON は一時ファイルを同期して rename し、ディレクトリも同期する。
+
+- `bundle-<n>/`: n 回目の投稿のファイルを、そのまま複製したもの。
+- `post-<n>.json`: `n`, `stage`, `comment_id`, `sent_text_sha256`, `digest`（小文字64桁）, `digest_prefix`（先頭8桁）, `deadline`, `created_at`, `files`（`path`, `size`, `sha256`）。時刻は本体の UTC、RFC3339。読み戻しが一致してから保存する。送った全文と準備中の投稿メタデータ（`approval` 欄）は `notices.json` に保持し、再起動時も同じ複製・文・期限を使う。
+- `go-<comment_id>.json`: 親が `post_n`, `post_comment_id`, `go_comment_id`, `author_id`, `body`, `accepted_at`, `digest`, `launch_history_len`, `pending_since` を保存する。子は `consumed_at` または `expired_at` を書く。起動位置は消費の runtime 行を含む、起動直前の History の長さと PendingSince。消費を先に保存し、Pending 保存前に落ちた場合も同じ GO を再利用しない。
+
+State の `awaiting_approval` は `stage`, `post_n`, `post_comment_id`, `deadline`。
+問いの `waiting` とは別で、問いの回答や通常の再開では解けない。
+指紋はパスのバイト順で、各ファイルのパス長（4 byte big-endian）、パス、内容長（8 byte big-endian）、内容を SHA-256 に通す。ディレクトリは含めない。
+空の束は拒む。共通の JSON 試験ベクトルは `internal/chain/testdata/approval-digest-*.json`。
+
+不成立は Role=工程名、Speaker=`runtime`、Error=固定文と理由名。
+理由は `bundle_name`, `bundle_kind`, `bundle_limit`, `bundle_credential`, `show_missing`, `post_size`, `post_fence`, `post_masked`, `digest_collision`, `receipt_unreadable`。
+`receipt_unreadable` は「起動した・結果は読めない (効果不明)」と記録する。
+不正 UTF-8・書式文字・禁止制御文字は `post_fence`、空の束は `bundle_limit` とする。
+深さは束からのパス要素数、行長は Unicode の文字数、空白は空白とタブ、空行は空白とタブだけの行（末尾改行自体は数えない）。本文の固定文も含め32 KiBを超えたら投稿しない。

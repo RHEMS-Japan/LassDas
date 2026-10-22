@@ -40,8 +40,9 @@ type config struct {
 	// start when issues are handed over.
 	runtimeUser tracker.Account
 	// PR2 enables recording only for settings with approval conditions.
-	recordComments bool
-	commentJobs    string
+	allowApprovalForTest bool
+	recordComments       bool
+	commentJobs          string
 }
 
 // Give the dispatcher the same configured work instructions as its workers.
@@ -260,6 +261,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		return err
 	}
 	cfg, err := readConfig(data)
+	cfg.allowApprovalForTest, _ = ctx.Value(approvalTestKey{}).(bool)
 	if err != nil {
 		return err
 	}
@@ -405,6 +407,19 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		if cfg.AssignedIssue != "" {
 			return errors.New("watch assigns each issue; do not configure assigned_issue for the entire queue")
 		}
+		if hasApproval(cfg.Workflow) {
+			path, err := filepath.Abs(*configPath)
+			if err != nil {
+				return err
+			}
+			ctx = context.WithValue(ctx, approvalConfigKey{}, func() (config, error) {
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					return config{}, err
+				}
+				return readConfig(raw)
+			})
+		}
 		return watchRequests(ctx, cfg, *directory, log)
 	}
 	assigned := cfg.AssignedIssue
@@ -434,7 +449,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		return err
 	}
 	executor := chain.Processes{Roles: roles, Prepare: prepareAccess, HistoryPath: filepath.Join(store.Dir, "history.json"),
-		EnvironmentFacts: environmentFacts}
+		EnvironmentFacts: environmentFacts, ApprovalDirectory: filepath.Join(filepath.Dir(store.Dir), "approval"), CredentialValues: func() []string { return credentialValues(cfg) }}
 	if cfg.ModelSelection != nil {
 		selection := *cfg.ModelSelection
 		selection.observe = observe
@@ -467,6 +482,28 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		Workflow: cfg.Workflow,
 		Observe:  observe,
 		Activity: executor.LastActivity,
+	}
+	if hasApproval(cfg.Workflow) {
+		source := cfg.source()
+		raw, err := os.ReadFile(filepath.Join(filepath.Dir(store.Dir), "issue.json"))
+		if err != nil {
+			return err
+		}
+		accepted, err := source.ReadIssue(raw)
+		if err != nil {
+			return err
+		}
+		child := approvalChild{cfg: cfg, source: source, issue: accepted, directory: filepath.Dir(store.Dir), current: func() (config, error) {
+			raw, err := os.ReadFile(*configPath)
+			if err != nil {
+				return config{}, err
+			}
+			return readConfig(raw)
+		}}
+		if current, ok := ctx.Value(approvalConfigKey{}).(func() (config, error)); ok {
+			child.current = current
+		}
+		engine.BeforeApproval = child.before
 	}
 	if questionMonitor != nil {
 		engine.QuestionPosted = questionMonitor.posted

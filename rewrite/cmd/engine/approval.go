@@ -246,6 +246,9 @@ func validateApprovalStages(cfg config) error {
 			return err
 		}
 	}
+	if cfg.allowApprovalForTest {
+		return nil
+	}
 	return rejectUnavailableApproval(cfg.Workflow)
 }
 
@@ -322,6 +325,9 @@ func prepareStoredApprovals(cfg *config, store *chain.FileStore) error {
 		if err := check(saved); err != nil {
 			return err
 		}
+	}
+	if cfg.allowApprovalForTest {
+		return nil
 	}
 	return rejectUnavailableApproval(state.Workflow)
 }

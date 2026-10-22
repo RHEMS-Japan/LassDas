@@ -31,9 +31,10 @@ type Result struct {
 	// process, read back by the runtime after the process returned. It reaches
 	// the stage's runtime record; it is not a field of the saved history and
 	// nothing here interprets what it says.
-	Receipt     string `json:"-"`
-	Diagnostics string `json:"diagnostics,omitempty"`
-	Error       string `json:"error,omitempty"`
+	Receipt                string `json:"-"`
+	ApprovalReceiptFailure string `json:"-"`
+	Diagnostics            string `json:"diagnostics,omitempty"`
+	Error                  string `json:"error,omitempty"`
 	// Interrupted is the controller stopping this invocation, not a process
 	// failure or a successful result. Partial output and the reason stay intact.
 	Interrupted bool `json:"interrupted,omitempty"`
@@ -67,8 +68,9 @@ type State struct {
 	// Waiting records that the configured question role has handed the request
 	// to a person. It is not a failure, a completion, or a judgment about any
 	// answer; only the caller that owns the conversation can clear it.
-	Waiting    bool `json:"waiting,omitempty"`
-	Recovering bool `json:"recovering,omitempty"`
+	AwaitingApproval *AwaitingApproval `json:"awaiting_approval,omitempty"`
+	Waiting          bool              `json:"waiting,omitempty"`
+	Recovering       bool              `json:"recovering,omitempty"`
 	// WaitingWithoutQuestion records that the request waits for the requester
 	// although no question was seen posted: the question chosen after a stage
 	// that confirms the change posted nothing, did not exit 0 or was cut short
@@ -127,10 +129,12 @@ type QuestionObservation struct {
 }
 
 type Chain struct {
-	Router   Router
-	Executor Executor
-	Store    Store
-	Workflow *Workflow
+	// BeforeApproval prepares/posts or consumes GO before the pending launch is saved.
+	BeforeApproval func(context.Context, *State, Assignment) error
+	Router         Router
+	Executor       Executor
+	Store          Store
+	Workflow       *Workflow
 	// RetryDelay spaces unavailable routing and question reads. It does not limit attempts
 	// or turn an outage into a completed delivery.
 	RetryDelay time.Duration
@@ -184,6 +188,9 @@ func (c Chain) Run(ctx context.Context) error {
 	}
 	if state.Done {
 		return nil
+	}
+	if state.AwaitingApproval != nil {
+		return ErrAwaitingApproval
 	}
 	if state.Waiting {
 		return ErrWaiting
@@ -375,7 +382,32 @@ func (c Chain) Run(ctx context.Context) error {
 			state.History = append(state.History, Result{Role: "router", Speaker: "runtime", Output: note,
 				StartedAt: began, FinishedAt: time.Now().UTC()})
 		}
-		launched := time.Now().UTC()
+		if _, _, approval := state.ApprovalStage(next.Role); approval {
+			if c.BeforeApproval == nil {
+				return errors.New("approval stage has no runtime gate")
+			}
+			err := c.BeforeApproval(ctx, &state, next)
+			if err != nil {
+				var refusal ApprovalFailure
+				if errors.As(err, &refusal) {
+					state.History = append(state.History, ApprovalFailureRecord(next.Role, string(refusal)))
+					if err := c.save(ctx, state); err != nil {
+						return err
+					}
+					continue
+				}
+				if errors.Is(err, ErrAwaitingApproval) {
+					if saveErr := c.save(ctx, state); saveErr != nil {
+						return saveErr
+					}
+				}
+				return err
+			}
+		}
+		launched := state.PendingSince
+		if launched.IsZero() {
+			launched = time.Now().UTC()
+		}
 		state.Pending, state.PendingSince = &next, launched
 		if err := c.save(ctx, state); err != nil {
 			return err
@@ -391,6 +423,29 @@ func (c Chain) Run(ctx context.Context) error {
 		// what this launch returned, so repeated launches stay distinguishable.
 		if record, staged := state.stageRecord(next, results); staged {
 			results = append(results, record)
+		}
+		for _, result := range results {
+			reason := result.ApprovalReceiptFailure
+			if reason == "" {
+				continue
+			}
+			target := next.Role
+			if _, _, approval := state.ApprovalStage(next.Role); !approval {
+				if reason == "receipt_unreadable" {
+					continue
+				}
+				if state.Workflow != nil {
+					for i, stage := range state.Workflow.Stages {
+						if stage.Approval != nil && i > 0 && state.Workflow.Stages[i-1].Name == next.Role {
+							target = stage.Name
+							break
+						}
+					}
+				}
+			}
+			results = append(results, ApprovalFailureRecord(target, reason))
+			state.Recovering = true
+			break
 		}
 		if asking && len(results) == 0 {
 			// The question role is not a stage and gets no record of its own,

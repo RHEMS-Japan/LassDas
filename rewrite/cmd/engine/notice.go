@@ -155,11 +155,12 @@ func quietFor(state chain.State, began, now time.Time) time.Duration {
 // request as a posted one would. A declaration keeps the models it named, so
 // the next launch of its stage is compared with them.
 type noticeRecord struct {
-	Kind      string     `json:"kind"`
-	Text      string     `json:"text"`
-	WrittenAt time.Time  `json:"written_at"`
-	PostedAt  *time.Time `json:"posted_at,omitempty"`
-	Predates  bool       `json:"predates,omitempty"`
+	Approval  *chain.ApprovalPost `json:"approval,omitempty"`
+	Kind      string              `json:"kind"`
+	Text      string              `json:"text"`
+	WrittenAt time.Time           `json:"written_at"`
+	PostedAt  *time.Time          `json:"posted_at,omitempty"`
+	Predates  bool                `json:"predates,omitempty"`
 	// Obsolete keeps a capacity warning that was pending when its request ended.
 	Obsolete bool   `json:"obsolete,omitempty"`
 	Models   string `json:"models,omitempty"`
@@ -211,6 +212,7 @@ type noticeLog struct {
 // notices posts the controller's own fixed comments for one accepted request.
 // The controller holds the tracker credential; no role posts these.
 type notices struct {
+	approval  bool
 	source    tracker.Tracker
 	issue     sourceIssue
 	directory string
@@ -223,7 +225,7 @@ type notices struct {
 }
 
 func requestNotices(cfg config, issue sourceIssue, directory string) notices {
-	return notices{source: cfg.source(), issue: issue, directory: directory, queue: filepath.Dir(filepath.Dir(directory))}
+	return notices{source: cfg.source(), issue: issue, directory: directory, queue: filepath.Dir(filepath.Dir(directory)), approval: hasApproval(cfg.Workflow)}
 }
 
 func (n notices) path() string { return filepath.Join(n.directory, "notices.json") }
@@ -380,6 +382,9 @@ func kindStart(now time.Time) time.Time {
 // posts.
 func postableKinds(cfg config) []string {
 	kinds := []string{resumeNotice}
+	if hasApproval(cfg.Workflow) {
+		kinds = append(kinds, approvalNotice)
+	}
 	if diskThreshold(cfg) > 0 {
 		kinds = append(kinds, diskNotice)
 	}
@@ -604,6 +609,13 @@ func (n notices) settle(ctx context.Context, log *noticeLog, i int, fresh bool) 
 			after = earlier.CommentID
 		}
 	}
+	if n.approval && record.Edits > 0 {
+		log.Notices[i].Edits = 0
+		if err := n.save(*log); err != nil {
+			return err
+		}
+		record = log.Notices[i]
+	}
 	if record.Edits > 0 {
 		done, err := n.edit(ctx, log, i, after)
 		if done || err != nil {
@@ -631,6 +643,14 @@ func (n notices) settle(ctx context.Context, log *noticeLog, i int, fresh bool) 
 		stored, err = n.source.AddComment(ctx, n.issue, record.Text)
 	}
 	if err != nil {
+		status := approvalHTTPStatus(err)
+		if record.Kind == approvalNotice && status >= 400 && status < 500 && status != 429 {
+			log.Notices[i].Obsolete = true
+			if saveErr := n.save(*log); saveErr != nil {
+				return saveErr
+			}
+			return chain.ApprovalFailure("post_size")
+		}
 		id, readErr := n.postedAfter(ctx, record.Text, after)
 		if readErr != nil || id == 0 {
 			return errors.Join(err, readErr)
@@ -711,6 +731,17 @@ func (n notices) postedAfter(ctx context.Context, text string, after int64) (int
 	if err != nil {
 		return 0, err
 	}
+	me := int64(0)
+	if n.approval {
+		account, err := n.source.Myself(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if account.ID <= 0 {
+			return 0, errApprovalRetry
+		}
+		me = account.ID
+	}
 	found := int64(0)
 	for _, raw := range rows {
 		// Only the id and the words are read: who wrote a comment, and where
@@ -719,8 +750,19 @@ func (n notices) postedAfter(ctx context.Context, text string, after int64) (int
 		if err != nil {
 			return 0, errors.New("issue comments could not be read before repeating a notice")
 		}
+		if n.approval {
+			c, err := n.source.ReadComment(raw, n.issue)
+			if err != nil {
+				return 0, err
+			}
+			if !c.OnIssue || c.Author.ID != me || c.Created.IsZero() || !c.Created.Equal(c.Updated) {
+				continue
+			}
+		}
 		if id > after && words == text {
-			found = id
+			if !n.approval || found == 0 || id < found {
+				found = id
+			}
 		}
 	}
 	return found, nil

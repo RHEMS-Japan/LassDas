@@ -29,6 +29,12 @@ import (
 // fixed comments. Posted text is kept exactly as submitted, so a test sees both
 // the wording and any repetition.
 type noticeTracker struct {
+	approvalIssue        map[string]any
+	approvalRule         string
+	approvalPostStatuses []int
+	approvalPostChange   func(map[string]any)
+	approvalReadHook     func()
+
 	mu       sync.Mutex
 	posted   []string
 	rows     []json.RawMessage
@@ -97,8 +103,19 @@ func (n *noticeTracker) install(t *testing.T, extra roundTripFunc) {
 			}
 			return catalogReply(r, 404, "no such comment"), nil
 		}
+		if n.approvalIssue != nil && r.Method == http.MethodGet {
+			if strings.Contains(r.URL.Path, "/projects/") {
+				return selectionReply(r, 200, map[string]any{"textFormattingRule": n.approvalRule}), nil
+			}
+			if strings.HasSuffix(r.URL.Path, "/issues/EXAMPLE-51") {
+				return selectionReply(r, 200, n.approvalIssue), nil
+			}
+		}
 		if !strings.HasSuffix(r.URL.Path, "/comments") {
 			return selectionReply(r, 200, []any{}), nil
+		}
+		if r.Method == http.MethodGet && n.approvalReadHook != nil {
+			n.approvalReadHook()
 		}
 		n.mu.Lock()
 		defer n.mu.Unlock()
@@ -107,6 +124,13 @@ func (n *noticeTracker) install(t *testing.T, extra roundTripFunc) {
 				return nil, err
 			}
 			n.posts++
+			if len(n.approvalPostStatuses) > 0 {
+				status := n.approvalPostStatuses[0]
+				n.approvalPostStatuses = n.approvalPostStatuses[1:]
+				if status != 201 {
+					return catalogReply(r, status, "synthetic refusal"), nil
+				}
+			}
 			content := r.Form.Get("content")
 			if n.postFail > 0 {
 				n.postFail--
@@ -115,6 +139,13 @@ func (n *noticeTracker) install(t *testing.T, extra roundTripFunc) {
 			n.posted = append(n.posted, content)
 			row := map[string]any{"id": 900 + len(n.rows), "issueId": 51, "projectId": 17,
 				"content": content, "createdUser": map[string]any{"id": 99}}
+			if n.approvalIssue != nil {
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				row["created"], row["updated"] = now, now
+			}
+			if n.approvalPostChange != nil {
+				n.approvalPostChange(row)
+			}
 			raw, _ := json.Marshal(row)
 			n.rows = append(n.rows, raw)
 			if n.silent {
