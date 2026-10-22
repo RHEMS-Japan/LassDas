@@ -111,7 +111,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 	for index, process := range role.Processes {
 		if process.HistoryEnvironmentConflict() {
 			results[index] = Result{Role: name, Speaker: process.Name, Instruction: assignment.Instruction,
-				Error: "TASK_HISTORY is reserved for the runtime's request history.", FinishedAt: time.Now().UTC()}
+				Error: "TASK_HISTORY is reserved for runtime request history; TASK_APPROVED_BUNDLE and TASK_APPROVED_DIGEST are reserved for runtime approval.", FinishedAt: time.Now().UTC()}
 			continue
 		}
 		model, prefix, invoked := "", "", ""
@@ -247,7 +247,7 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	// Check again after launch-scoped access preparation, before resolving any
 	// credential or running a child. Never quote the conflicting value.
 	if p.HistoryEnvironmentConflict() {
-		result.Error, result.FinishedAt = "TASK_HISTORY is reserved for the runtime's request history.", time.Now().UTC()
+		result.Error, result.FinishedAt = "TASK_HISTORY is reserved for runtime request history; TASK_APPROVED_BUNDLE and TASK_APPROVED_DIGEST are reserved for runtime approval.", time.Now().UTC()
 		return result
 	}
 	if len(p.Command) == 0 {

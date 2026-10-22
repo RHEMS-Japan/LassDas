@@ -523,6 +523,7 @@ that a model actually read or understood every older record.
 When `TASK_APPROVED_BUNDLE` is present, the launcher pins that directory and
 exposes it read-only at the same path, refusing missing paths, files, symlinks
 and overlap with workspace, home, runtime or history mounts.
+Pinning fixes the directory, not its contents; the contents must be verified by digest.
 `TASK_APPROVED_BUNDLE` and `TASK_APPROVED_DIGEST` are reserved environment names;
 the launcher passes the digest through without interpreting it and adds no
 bundle mount when the bundle variable is absent.

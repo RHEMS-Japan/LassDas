@@ -1,5 +1,6 @@
 """Configuration/path tests. Real namespace checks run separately on Linux."""
 import argparse
+from contextlib import nullcontext
 import importlib.util
 import io
 import os
@@ -110,10 +111,11 @@ class ApprovedBundleTests(unittest.TestCase):
                             "TASK_APPROVED_BUNDLE": str(self.bundle), "TASK_APPROVED_DIGEST": "opaque digest"}
 
     def command(self):
-        # Real path traversal with readable descriptors on macOS; only the
+        # Use real O_PATH on Linux, with readable descriptors only where it is absent;
         # Linux tests below claim that bubblewrap enforces mount permissions.
+        path_flag = nullcontext() if hasattr(os, "O_PATH") else patch.object(os, "O_PATH", os.O_RDONLY, create=True)
         with patch.object(sys, "platform", "linux"), patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"), \
-                patch.object(os, "O_PATH", os.O_RDONLY, create=True):
+                path_flag:
             argv, environment, descriptors = launcher.command(self.args, self.environment)
         for descriptor in descriptors:
             self.addCleanup(os.close, descriptor)
@@ -141,7 +143,8 @@ class ApprovedBundleTests(unittest.TestCase):
     def test_file_missing_and_symlink_paths_refuse_launch(self):
         link = self.root / "link"
         link.symlink_to(self.bundle, target_is_directory=True)
-        for path in (self.bundle / "plan", self.root / "missing", link, link / "child"):
+        (self.bundle / "sub").mkdir()
+        for path in (self.bundle / "plan", self.root / "missing", link, link / "sub"):
             with self.subTest(path=path), self.assertRaises((OSError, ValueError)):
                 self.environment["TASK_APPROVED_BUNDLE"] = str(path)
                 self.command()

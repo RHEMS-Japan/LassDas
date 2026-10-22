@@ -548,7 +548,7 @@ func TestReservedBindingsCannotBeReplacedBeforeSelectionOrAfterPreparation(t *te
 					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 					defer cancel()
 					results := executor.Execute(ctx, Assignment{Role: "r"}, State{})
-					if len(results) != 1 || !strings.Contains(results[0].Error, "TASK_HISTORY is reserved") || results[0].Output != "" || strings.Contains(results[0].Error, "private-not-to-be-quoted") {
+					if len(results) != 1 || results[0].Error != "TASK_HISTORY is reserved for runtime request history; TASK_APPROVED_BUNDLE and TASK_APPROVED_DIGEST are reserved for runtime approval." || results[0].Output != "" || strings.Contains(results[0].Error, "private-not-to-be-quoted") {
 						t.Fatalf("collision reached child: %#v", results)
 					}
 					want := 0
