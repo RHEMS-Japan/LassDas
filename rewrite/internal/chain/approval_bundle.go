@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -242,6 +243,9 @@ func hasCredential(data []byte, values []string) bool {
 	return false
 }
 
+var approvalSummarySetext = regexp.MustCompile(`^\s{0,3}(=+|-+)\s*$`)
+var approvalSummaryRule = regexp.MustCompile(`^\s*((\*\s*){3,}|(_\s*){3,}|(-\s*){3,})$`)
+
 // ApprovalSummary validates presentation without changing the bytes that are hashed.
 func ApprovalSummary(data []byte) error {
 	text := string(data)
@@ -250,7 +254,7 @@ func ApprovalSummary(data []byte) error {
 		return ApprovalFailure("summary_unreadable")
 	}
 	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "#") || strings.TrimSpace(line) == "---" || strings.TrimSpace(line) == "===" {
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "#") || approvalSummarySetext.MatchString(line) || approvalSummaryRule.MatchString(line) {
 			return ApprovalFailure("summary_unreadable")
 		}
 	}

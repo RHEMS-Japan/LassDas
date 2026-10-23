@@ -397,7 +397,7 @@ func (s State) stageInstruction(name string) string {
 		fmt.Fprintf(&text, "%s: %s", ending.Role, ending.Error)
 		if ending.ApprovalFailure == "summary_unreadable" {
 			if failed, at := stageAt(stages, ending.Role); at >= 0 && failed.Approval != nil {
-				fmt.Fprintf(&text, " (%s が無い・空・2,000 文字超・``` または ~~~ を含む・行頭の空白やタブを除くと # で始まる行がある・--- / === だけの行がある・1 行 200 文字超、のどれか。見出しや code fence、区切り線の無い平文で書き直す)", failed.Approval.Summary)
+				fmt.Fprintf(&text, " (%s が無い・空・2,000 文字超・``` または ~~~ を含む・行頭の空白やタブを除くと # で始まる行がある・= や - による見出しの下線がある・空白を除いて同じ * / _ / - が 3 個以上並ぶだけの行がある、のどれか。見出しや code fence、区切り線の無い平文で書き直す) (1 行 200 文字を超えると別の理由『量や形式』になる)", failed.Approval.Summary)
 			}
 		}
 		text.WriteByte('\n')

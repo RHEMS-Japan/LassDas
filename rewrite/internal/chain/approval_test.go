@@ -502,7 +502,7 @@ func TestApprovalSummaryRecoveryInstruction(t *testing.T) {
 		}
 		prefix := "execute: " + ApprovalFailureText(reason)
 		if reason == "summary_unreadable" {
-			for _, want := range []string{prefix + " (ops/bundle/summary.txt", "2,000", "```", "~~~", "#", "--- / ===", "200", "平文で書き直す)"} {
+			for _, want := range []string{prefix + " (ops/bundle/summary.txt", "2,000", "```", "~~~", "#", "= や - による見出しの下線", "同じ * / _ / - が 3 個以上", "平文で書き直す) (1 行 200 文字を超えると別の理由『量や形式』になる)"} {
 				if !strings.Contains(next.Instruction, want) {
 					t.Fatalf("missing %q: %s", want, next.Instruction)
 				}

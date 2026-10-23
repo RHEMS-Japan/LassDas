@@ -110,7 +110,7 @@ func approvalAdd(t *testing.T, f *noticeTracker, id, author int64, body string, 
 func TestApprovalChildPostFullTextAndRestart(t *testing.T) {
 	a, f, s, p := approvalPostFixture(t)
 	text := f.all()[0]
-	for _, want := range []string{"## 試し実行の結果\n\n```\ndry-run.txt\nchecked\n```", "## AI が書いた計画\n\n```\nplan.txt\nproposed\n```", "GO " + p.DigestPrefix, p.Deadline.Format("2006-01-02 15:04 (MST)"), "前回の実行: まだ実行していません。", "GO を消したり書き直したり", "承認者が GO・停止以外", "確認待ちの間に他の人"} {
+	for _, want := range []string{"## 試し実行の結果\n\n```\ndry-run.txt\nchecked\n```", "## AI が書いた計画\n\n```\nplan.txt\nproposed\n```", "GO " + p.DigestPrefix, p.Deadline.Format("2006-01-02 15:04 (MST)"), "前回の実行: まだ実行していません。", "GO を消したり書き直したり", "確認待ちの間に承認者が GO・停止・再開以外", "最初の確認の投稿より後は、確認待ちかどうかに関わらず"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q", want)
 		}

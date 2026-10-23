@@ -155,6 +155,56 @@ func TestApprovalParentRejectionWinsAndRecoversOnce(t *testing.T) {
 		t.Fatal("rejection duplicated")
 	}
 }
+
+func TestApprovalParentCommentDuringReplanning(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		author int64
+		pause  string
+		posts  int
+	}{
+		{"approver", 7, "approval_no_approver", 2},
+		{"other_person", 88, "approval_tampered", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, f, s, _ := approvalPostFixture(t)
+			approvalAdd(t, f, 950, 7, "計画を直してください", nil)
+			if !parentTickTest(t, a, &s) || s.AwaitingApproval != nil {
+				t.Fatal("rejection did not leave the approval wait")
+			}
+			next, err := (chain.StageRouter{}).Next(context.Background(), s)
+			if err != nil || next.Role != "a" {
+				t.Fatalf("replanning: next=%+v err=%v", next, err)
+			}
+			approvalAdd(t, f, 951, tc.author, "計画の作り直し中のコメント", nil)
+			s.History = append(s.History,
+				chain.Result{Role: "a", Speaker: "runtime", FinishedAt: a.clock()},
+				chain.Result{Role: "b", Speaker: "runtime", FinishedAt: a.clock()})
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err = a.before(ctx, &s, chain.Assignment{Role: "c"})
+			if tc.author == 7 {
+				if !errors.Is(err, chain.ErrAwaitingApproval) || s.AwaitingApproval == nil || s.AwaitingApproval.PostN != 2 || s.ApprovalPaused() != "" {
+					t.Fatalf("expected a second post before pausing: err=%v wait=%+v pause=%s", err, s.AwaitingApproval, s.ApprovalPaused())
+				}
+				if parentTickTest(t, a, &s) {
+					t.Fatal("replanning comment left its author eligible after reposting")
+				}
+			} else if !errors.Is(err, chain.ErrApprovalPause) {
+				t.Fatalf("expected pause before reposting, got %v", err)
+			}
+			posts, err := chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
+			if err != nil || len(posts) != tc.posts || s.ApprovalPaused() != tc.pause || s.Pending != nil {
+				t.Fatalf("posts=%d pause=%s pending=%+v err=%v", len(posts), s.ApprovalPaused(), s.Pending, err)
+			}
+			gos, err := chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
+			if err != nil || len(gos) != 0 {
+				t.Fatalf("unexpected GO: %v err=%v", gos, err)
+			}
+		})
+	}
+}
+
 func TestApprovalParentExpiryClassifiesBeforePause(t *testing.T) {
 	a, f, s, p := approvalPostFixture(t)
 	before := len(s.History)

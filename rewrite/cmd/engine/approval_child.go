@@ -423,7 +423,7 @@ func approvalPostText(stage chain.Stage, bundle chain.ApprovalBundle, post chain
 	fmt.Fprintf(&b, "前回の実行: %s\n", ending)
 	if post.N > 1 {
 		for _, previous := range posts {
-			if previous.N == post.N-1 {
+			if previous.N == post.N-1 && previous.Stage == post.Stage {
 				if previous.Digest == post.Digest {
 					b.WriteString("計画は前回の確認と同じです。\n")
 				} else {
@@ -433,7 +433,7 @@ func approvalPostText(stage chain.Stage, bundle chain.ApprovalBundle, post chain
 			}
 		}
 	}
-	b.WriteString("止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。\n承認者が GO・停止以外のコメントを書くと、修正の依頼として扱い、計画を作り直してから改めて確認します。確認待ちの間に他の人がコメントしたり、コメントが編集・削除されたりすると、安全のため実行せずに止まります。\n")
+	b.WriteString("止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。\n確認待ちの間に承認者が GO・停止・再開以外のコメントを書くと、修正の依頼として扱い、計画を作り直してから改めて確認します。\n最初の確認の投稿より後は、確認待ちかどうかに関わらず、承認者以外の人のコメント、確認待ちでない間の承認者のコメント、コメントの編集・削除があると、安全のため実行せずに止まり、起票し直しになります (承認者が複数いるときは、残った人で続けます)。\n")
 	for _, show := range []bool{true, false} {
 		if show {
 			b.WriteString("\n## 試し実行の結果\n")
