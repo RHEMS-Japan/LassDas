@@ -205,6 +205,64 @@ func TestApprovalParentCommentDuringReplanning(t *testing.T) {
 	}
 }
 
+func TestApprovalParentReplanningCommentLeavesOtherApproverEligible(t *testing.T) {
+	a, f, s := approvalFixture(t)
+	a.cfg.Workflow.Stages[2].Approval.ApproverUserIDs = []int64{7, 8}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := a.before(ctx, &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) {
+		t.Fatal(err)
+	}
+	approvalAdd(t, f, 950, 7, "計画を直してください", nil)
+	if !parentTickTest(t, a, &s) || s.AwaitingApproval != nil {
+		t.Fatal("rejection did not leave the approval wait")
+	}
+	next, err := (chain.StageRouter{}).Next(ctx, s)
+	if err != nil || next.Role != "a" {
+		t.Fatalf("replanning: next=%+v err=%v", next, err)
+	}
+	approvalAdd(t, f, 951, 7, "計画の作り直し中のコメント", nil)
+	s.History = append(s.History,
+		chain.Result{Role: "a", Speaker: "runtime", FinishedAt: a.clock()},
+		chain.Result{Role: "b", Speaker: "runtime", FinishedAt: a.clock()})
+	if err := a.before(ctx, &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) {
+		t.Fatal(err)
+	}
+	posts, err := chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
+	if err != nil || len(posts) != 2 {
+		t.Fatalf("posts=%d err=%v", len(posts), err)
+	}
+	var p chain.ApprovalPost
+	for _, post := range posts {
+		if post.N == 2 {
+			p = post
+		}
+	}
+	if p.N != 2 || parentTickTest(t, a, &s) || s.AwaitingApproval == nil || s.AwaitingApproval.PostN != 2 || s.ApprovalPaused() != "" {
+		t.Fatalf("remaining approver did not keep the second post waiting: wait=%+v pause=%s", s.AwaitingApproval, s.ApprovalPaused())
+	}
+	before := len(s.History)
+	approvalAdd(t, f, p.CommentID+10, 7, "もう一度計画を直してください", nil)
+	if parentTickTest(t, a, &s) || s.AwaitingApproval == nil || s.AwaitingApproval.PostN != 2 || s.ApprovalPaused() != "" || len(s.History) != before {
+		t.Fatal("excluded approver's comment rejected or paused the second post")
+	}
+	gos, err := chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
+	if err != nil || len(gos) != 0 {
+		t.Fatalf("excluded comment produced a GO record: records=%v err=%v", gos, err)
+	}
+	approvalAdd(t, f, p.CommentID+11, 8, "GO "+p.DigestPrefix, nil)
+	if !parentTickTest(t, a, &s) || s.AwaitingApproval != nil || s.ApprovalPaused() != "" {
+		t.Fatal("remaining approver's GO was not accepted")
+	}
+	gos, err = chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
+	if err != nil || len(gos) != 1 {
+		t.Fatalf("accepted GO records=%v err=%v", gos, err)
+	}
+	if gos[0].AuthorID != 8 || gos[0].PostN != 2 || gos[0].GOCommentID != p.CommentID+11 || gos[0].Result != "go" || gos[0].AcceptedAt.IsZero() {
+		t.Fatalf("wrong GO accepted: %+v", gos[0])
+	}
+}
+
 func TestApprovalParentExpiryClassifiesBeforePause(t *testing.T) {
 	a, f, s, p := approvalPostFixture(t)
 	before := len(s.History)
