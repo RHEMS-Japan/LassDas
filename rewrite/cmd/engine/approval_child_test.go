@@ -444,9 +444,9 @@ func TestApprovalFailureNoticeAndQuestionIsolation(t *testing.T) {
 
 func TestApprovalFailureEndingTextPreservesMeaning(t *testing.T) {
 	for _, tc := range []struct{ name, text, posted string }{
-		{"receipt_credential", "起動した・結果は読めない (効果不明): bundle_credential", "確認の途中で止まりました。理由: 確認用のファイルに認証情報が含まれていました。実行を開始しましたが、結果が分かりません"},
+		{"receipt_credential", "起動した・結果は読めない (効果不明): bundle_credential", "実行を開始しましたが、結果が分かりません。理由: 確認用のファイルに認証情報が含まれていました"},
 		{"bundle_credential", "承認条件が成立しなかった: bundle_credential", "確認の途中で止まりました。理由: 確認用のファイルに認証情報が含まれていました"},
-		{"receipt_unreadable", "起動した・結果は読めない (効果不明): receipt_unreadable", "確認の途中で止まりました。理由: 実行結果を読み取れませんでした。実行を開始しましたが、結果が分かりません"},
+		{"receipt_unreadable", "起動した・結果は読めない (効果不明): receipt_unreadable", "実行を開始しましたが、結果が分かりません。理由: 実行結果を読み取れませんでした"},
 		{"post_fence", "承認条件が成立しなかった: post_fence", "確認の途中で止まりました。理由: 確認のコメントに使えない文字や書式が含まれています"},
 		{"rejected", "承認条件が成立しなかった: rejected", "確認の途中で止まりました。理由: 承認者から修正を求められました"},
 		{"expired", "承認条件が成立しなかった: expired", "確認の途中で止まりました。理由: 確認の期限が切れました"},
@@ -474,10 +474,10 @@ func TestApprovalFailureEndingTextPreservesMeaning(t *testing.T) {
 				t.Fatalf("rerun notice = %q, want prefix %q", text, want)
 			}
 			stage := cfg.Workflow.Stages[2]
-			posted, err := approvalPostText(stage, chain.ApprovalBundle{}, chain.ApprovalPost{}, state, nil)
-			previous := "正常に終わりました。同じ計画でもう一度実行してよいか確認します。"
+			posted, err := approvalPostText(stage, chain.ApprovalBundle{}, chain.ApprovalPost{}, state, nil, nil)
+			previous := "正常に終わりました。もう一度実行してよいか確認します。"
 			if strings.HasPrefix(tc.text, "起動した・結果は読めない") {
-				previous = "途中で止まり、結果が分かりません。同じ計画で実行してよいか、もう一度確認します。"
+				previous = "途中で止まり、結果が分かりません。もう一度実行してよいか確認します。"
 			}
 			if err != nil || !strings.Contains(posted, "前回の実行: "+previous+"\n") || strings.Contains(posted, tc.text) {
 				t.Fatalf("post = %q, err = %v", posted, err)
@@ -554,7 +554,7 @@ func TestApprovalChildPostSizeAndMaskedText(t *testing.T) {
 				credentials = []string{"safe"}
 			}
 			bundle := chain.ApprovalBundle{Files: []chain.ApprovalFile{{Path: "dry-run.txt"}}, Contents: map[string][]byte{"dry-run.txt": []byte(contents)}}
-			_, err := approvalPostText(stage, bundle, post, s, credentials)
+			_, err := approvalPostText(stage, bundle, post, s, credentials, nil)
 			if err == nil || !strings.Contains(err.Error(), "post_"+variant) {
 				t.Fatal(err)
 			}

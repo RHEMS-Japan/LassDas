@@ -42,12 +42,12 @@ func TestApprovalCheck11Timezone(t *testing.T) {
 }
 
 func TestApprovalCheck12Summary(t *testing.T) {
-	for _, path := range []string{"", "ops/bundle/summary.txt", "ops/bundle/nested/summary.txt", "ops/summary.txt", "ops/bundle-other/summary.txt", "ops/bundle/../summary.txt", "/ops/bundle/summary.txt", "ops/bundle"} {
+	for _, path := range []string{"", "ops/bundle/summary.txt", "ops/bundle/nested/summary.txt", "ops/summary.txt", "ops/bundle-other/summary.txt", "ops/bundle/../summary.txt", "/ops/bundle/summary.txt", "ops/bundle", "ops/bundle/要約.txt", "ops/bundle/.summary", "ops/bundle/a/b/c/summary.txt", "ops/bundle/a/b/c/d/summary.txt", "ops/bundle/dry-run.txt"} {
 		t.Run(path, func(t *testing.T) {
 			cfg := approvalConfiguration()
 			approvalDisplaySettings(t, cfg.Workflow.Stages[2].Approval, "", path)
 			err := validateApprovalStages(cfg)
-			valid := path == "" || path == "ops/bundle/summary.txt" || path == "ops/bundle/nested/summary.txt"
+			valid := path == "" || path == "ops/bundle/summary.txt" || path == "ops/bundle/nested/summary.txt" || path == "ops/bundle/a/b/c/summary.txt"
 			if (err == nil) != valid {
 				t.Fatalf("valid=%t, err=%v", valid, err)
 			}
@@ -63,9 +63,9 @@ func TestApprovalPlainPostExactText(t *testing.T) {
 	stage := cfg.Workflow.Stages[2]
 	approvalDisplaySettings(t, stage.Approval, "Asia/Tokyo", "ops/bundle/summary.txt")
 	bundle := chain.ApprovalBundle{Files: []chain.ApprovalFile{{Path: "dry-run.txt"}, {Path: "plan.txt"}, {Path: "summary.txt"}}, Contents: map[string][]byte{"dry-run.txt": []byte("checked\n"), "plan.txt": []byte("proposed\n"), "summary.txt": []byte("確認済みの設定を本番に反映します。")}}
-	post := chain.ApprovalPost{Digest: strings.Repeat("a", 64), DigestPrefix: "aaaaaaaa", Deadline: time.Date(2026, 10, 25, 13, 6, 3, 0, time.UTC)}
-	got, err := approvalPostText(stage, bundle, post, chain.State{}, nil)
-	want := "本番の操作の確認をお願いします。\n\nやること:\n確認済みの設定を本番に反映します。\n\n実行してよければ、次の 1 行だけを新しいコメントに書いてください:\nGO aaaaaaaa\n\n期限: 2026-10-25 22:06 (JST) まで。過ぎたら計画を作り直して、もう一度確認します。\n前回の実行: まだ実行していません。\n止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。\n安全のため、確認待ちの間に他の人がコメントしたり、コメントが編集・削除されたり、承認者が GO・停止以外のコメントを書いたりすると、実行せずに止まります。\n\n## 試し実行の結果\n\n```\ndry-run.txt\nchecked\n```\n\n## AI が書いた計画\n\n```\nplan.txt\nproposed\n```\n"
+	post := chain.ApprovalPost{N: 1, Digest: strings.Repeat("a", 64), DigestPrefix: "aaaaaaaa", Deadline: time.Date(2026, 10, 25, 13, 6, 3, 0, time.UTC)}
+	got, err := approvalPostText(stage, bundle, post, chain.State{}, nil, nil)
+	want := "本番の操作の確認をお願いします。\n\nやること:\n確認済みの設定を本番に反映します。\n\n実行してよければ、次の 1 行だけを新しいコメントに書いてください:\nGO aaaaaaaa\n\n期限: 2026-10-25 22:06 (JST) まで。過ぎると一時停止します。続けるときは「再開」と書いてください (計画を作り直して、もう一度確認します)。\n前回の実行: まだ実行していません。\n止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。\n承認者が GO・停止以外のコメントを書くと、修正の依頼として扱い、計画を作り直してから改めて確認します。確認待ちの間に他の人がコメントしたり、コメントが編集・削除されたりすると、安全のため実行せずに止まります。\n\n## 試し実行の結果\n\n```\ndry-run.txt\nchecked\n```\n\n## AI が書いた計画\n\n```\nplan.txt\nproposed\n```\n"
 	if err != nil || got != want {
 		t.Fatalf("err=%v\ngot: %s\nwant: %s", err, got, want)
 	}
@@ -124,6 +124,8 @@ func TestApprovalSummaryUnreadable(t *testing.T) {
 		{"missing", ""}, {"empty", " \n\t"}, {"long", strings.Repeat("日", 2001)},
 		{"fence", "説明\n```text\n内容\n```"}, {"heading", "説明\n# 見出し"},
 		{"utf8", string([]byte{0xff})},
+		{"indented_heading", "説明\n \t# 見出し"}, {"tilde_fence", "説明\n~~~text\n内容\n~~~"},
+		{"dash_rule", "説明\n --- \t"}, {"equals_rule", "説明\n === \t"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, f, s := approvalFixture(t)
@@ -160,14 +162,14 @@ func TestApprovalPreviousExecutionWording(t *testing.T) {
 		want string
 	}{
 		{"none", nil, "まだ実行していません。"},
-		{"interrupted", []chain.Result{{Role: "c", Speaker: "process", Interrupted: true}, {Role: "c", Speaker: "runtime"}}, "途中で止まり、結果が分かりません。同じ計画で実行してよいか、もう一度確認します。"},
-		{"failed", []chain.Result{{Role: "c", Speaker: "process", Error: "exit status 1"}, {Role: "c", Speaker: "runtime"}}, "失敗しました。同じ計画で実行してよいか、もう一度確認します。"},
-		{"success", []chain.Result{{Role: "c", Speaker: "process"}, {Role: "c", Speaker: "runtime"}}, "正常に終わりました。同じ計画でもう一度実行してよいか確認します。"},
+		{"interrupted", []chain.Result{{Role: "c", Speaker: "process", Interrupted: true}, {Role: "c", Speaker: "runtime"}}, "途中で止まり、結果が分かりません。もう一度実行してよいか確認します。"},
+		{"failed", []chain.Result{{Role: "c", Speaker: "process", Error: "exit status 1"}, {Role: "c", Speaker: "runtime"}}, "失敗しました。もう一度実行してよいか確認します。"},
+		{"success", []chain.Result{{Role: "c", Speaker: "process"}, {Role: "c", Speaker: "runtime"}}, "正常に終わりました。もう一度実行してよいか確認します。"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// A later approval refusal must not replace the actual execution outcome.
 			rows := append(tc.rows, chain.ApprovalFailureRecord("c", "rejected"))
-			got, err := approvalPostText(stage, chain.ApprovalBundle{}, chain.ApprovalPost{}, chain.State{History: rows}, nil)
+			got, err := approvalPostText(stage, chain.ApprovalBundle{}, chain.ApprovalPost{}, chain.State{History: rows}, nil, nil)
 			if err != nil || !strings.Contains(got, "前回の実行: "+tc.want+"\n") {
 				t.Fatalf("%s %v", got, err)
 			}
@@ -180,7 +182,7 @@ func TestApprovalSummaryMaskedText(t *testing.T) {
 	stage.Approval.Summary = "ops/bundle/summary.txt"
 	for _, text := range []string{"synthetic/value", "synthetic%2Fvalue"} {
 		bundle := chain.ApprovalBundle{Contents: map[string][]byte{"summary.txt": []byte(text)}}
-		_, err := approvalPostText(stage, bundle, chain.ApprovalPost{}, chain.State{}, []string{"synthetic/value"})
+		_, err := approvalPostText(stage, bundle, chain.ApprovalPost{}, chain.State{}, []string{"synthetic/value"}, nil)
 		var failure chain.ApprovalFailure
 		if !errors.As(err, &failure) || failure != "post_masked" {
 			t.Fatalf("got %v", err)
@@ -196,6 +198,20 @@ func TestApprovalPauseNoticeLanguage(t *testing.T) {
 		}
 		if reason == "approval_expired" && !strings.Contains(text, "再開") {
 			t.Fatal("missing resume instruction")
+		}
+	}
+}
+
+func TestApprovalComparisonUsesImmediatelyPreviousPost(t *testing.T) {
+	stage := approvalConfiguration().Workflow.Stages[2]
+	posts := []chain.ApprovalPost{{N: 2, Digest: "second"}, {N: 1, Digest: "first"}}
+	for _, tc := range []struct{ digest, want string }{
+		{"first", "計画は前回の確認から変わりました。"},
+		{"second", "計画は前回の確認と同じです。"},
+	} {
+		got, err := approvalPostText(stage, chain.ApprovalBundle{}, chain.ApprovalPost{N: 3, Digest: tc.digest}, chain.State{}, nil, posts)
+		if err != nil || !strings.Contains(got, tc.want+"\n") {
+			t.Fatalf("post=%s err=%v", got, err)
 		}
 	}
 }

@@ -108,6 +108,20 @@ func (a Approval) SummaryPath() (string, error) {
 	if err != nil || !filepath.IsLocal(relative) || relative == "." {
 		return "", errors.New("approval summary must be a relative file path inside bundle")
 	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	if len(parts) > 4 {
+		return "", errors.New("approval summary exceeds bundle path depth")
+	}
+	for _, part := range parts {
+		if !approvalName(part) {
+			return "", errors.New("approval summary must follow bundle filename rules")
+		}
+	}
+	for _, show := range a.Show {
+		if filepath.Clean(show) == relative {
+			return "", errors.New("approval summary must not also appear in show")
+		}
+	}
 	return filepath.ToSlash(relative), nil
 }
 

@@ -449,6 +449,9 @@ func TestApprovalSummaryBundleBoundaryAndCredentials(t *testing.T) {
 	for _, tc := range []struct{ name, content, reason string }{
 		{"at limit", strings.Repeat(strings.Repeat("日", 99)+"\n", 19) + strings.Repeat("日", 100), ""},
 		{"trimmed", "  確認します。\n", ""},
+		{"line at limit", strings.Repeat("日", 200), ""},
+		{"line over limit", strings.Repeat("日", 201), "bundle_limit"},
+		{"indent link image", "  説明\n[link](https://example.com)\n![image](https://example.com/image.png)", ""},
 		{"masked", "synthetic-credential", "post_masked"},
 		{"format", "説明\u202e", "post_fence"},
 		{"control", "説明\r", "post_fence"},
@@ -479,5 +482,36 @@ func TestApprovalSummaryBundleBoundaryAndCredentials(t *testing.T) {
 				t.Fatal("summary not bound to digest", err)
 			}
 		})
+	}
+}
+
+func TestApprovalSummaryRecoveryInstruction(t *testing.T) {
+	workflow := &Workflow{Stages: []Stage{
+		{Name: "plan", Kind: ModelStage},
+		{Name: "check", Kind: CommandStage, OnFailure: "plan"},
+		{Name: "execute", Kind: CommandStage, OnFailure: "plan", Approval: &Approval{Summary: "ops/bundle/summary.txt"}},
+	}}
+	for _, reason := range approvalReasons {
+		state := State{Workflow: workflow, History: []Result{
+			{Role: "plan", Speaker: "runtime"}, {Role: "check", Speaker: "runtime"},
+			ApprovalFailureRecord("execute", reason),
+		}}
+		next, err := (StageRouter{}).Next(context.Background(), state)
+		if err != nil || next.Role != "plan" {
+			t.Fatalf("reason=%s next=%+v err=%v", reason, next, err)
+		}
+		prefix := "execute: " + ApprovalFailureText(reason)
+		if reason == "summary_unreadable" {
+			for _, want := range []string{prefix + " (ops/bundle/summary.txt", "2,000", "```", "~~~", "#", "--- / ===", "200", "平文で書き直す)"} {
+				if !strings.Contains(next.Instruction, want) {
+					t.Fatalf("missing %q: %s", want, next.Instruction)
+				}
+			}
+		} else if !strings.Contains(next.Instruction, prefix+"\n") {
+			t.Fatalf("other reason changed: %s", next.Instruction)
+		}
+		if state.History[len(state.History)-1].Error != ApprovalFailureText(reason) {
+			t.Fatal("saved failure text changed")
+		}
 	}
 }

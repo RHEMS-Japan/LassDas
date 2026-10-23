@@ -362,12 +362,12 @@ func approvalFailurePostText(reason, recorded string) string {
 	}
 	text := "確認の途中で止まりました。理由: " + descriptions[reason]
 	if strings.HasPrefix(recorded, "起動した・結果は読めない (効果不明): ") {
-		text += "。実行を開始しましたが、結果が分かりません"
+		text = "実行を開始しましたが、結果が分かりません。理由: " + descriptions[reason]
 	}
 	return text
 }
 
-func approvalPostText(stage chain.Stage, bundle chain.ApprovalBundle, post chain.ApprovalPost, state chain.State, credentials []string) (string, error) {
+func approvalPostText(stage chain.Stage, bundle chain.ApprovalBundle, post chain.ApprovalPost, state chain.State, credentials []string, posts []chain.ApprovalPost) (string, error) {
 	var b strings.Builder
 	b.WriteString("本番の操作の確認をお願いします。\n\n")
 	summary, err := stage.Approval.SummaryPath()
@@ -390,7 +390,7 @@ func approvalPostText(stage chain.Stage, bundle chain.ApprovalBundle, post chain
 	if err != nil {
 		return "", err
 	}
-	fmt.Fprintf(&b, "実行してよければ、次の 1 行だけを新しいコメントに書いてください:\nGO %s\n\n期限: %s まで。過ぎたら計画を作り直して、もう一度確認します。\n", post.DigestPrefix, post.Deadline.In(location).Format("2006-01-02 15:04 (MST)"))
+	fmt.Fprintf(&b, "実行してよければ、次の 1 行だけを新しいコメントに書いてください:\nGO %s\n\n期限: %s まで。過ぎると一時停止します。続けるときは「再開」と書いてください (計画を作り直して、もう一度確認します)。\n", post.DigestPrefix, post.Deadline.In(location).Format("2006-01-02 15:04 (MST)"))
 	ending := "まだ実行していません。"
 	for i := len(state.History) - 1; i >= 0; i-- {
 		r := state.History[i]
@@ -408,20 +408,32 @@ func approvalPostText(stage chain.Stage, bundle chain.ApprovalBundle, post chain
 		}
 		switch {
 		case strings.HasPrefix(r.Error, "起動した・結果は読めない (効果不明): "):
-			ending = "途中で止まり、結果が分かりません。同じ計画で実行してよいか、もう一度確認します。"
+			ending = "途中で止まり、結果が分かりません。もう一度実行してよいか確認します。"
 		case chain.ApprovalFailureReason(r) != "":
 			continue
 		case r.Interrupted:
-			ending = "途中で止まり、結果が分かりません。同じ計画で実行してよいか、もう一度確認します。"
+			ending = "途中で止まり、結果が分かりません。もう一度実行してよいか確認します。"
 		case r.Error != "":
-			ending = "失敗しました。同じ計画で実行してよいか、もう一度確認します。"
+			ending = "失敗しました。もう一度実行してよいか確認します。"
 		default:
-			ending = "正常に終わりました。同じ計画でもう一度実行してよいか確認します。"
+			ending = "正常に終わりました。もう一度実行してよいか確認します。"
 		}
 		break
 	}
 	fmt.Fprintf(&b, "前回の実行: %s\n", ending)
-	b.WriteString("止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。\n安全のため、確認待ちの間に他の人がコメントしたり、コメントが編集・削除されたり、承認者が GO・停止以外のコメントを書いたりすると、実行せずに止まります。\n")
+	if post.N > 1 {
+		for _, previous := range posts {
+			if previous.N == post.N-1 {
+				if previous.Digest == post.Digest {
+					b.WriteString("計画は前回の確認と同じです。\n")
+				} else {
+					b.WriteString("計画は前回の確認から変わりました。\n")
+				}
+				break
+			}
+		}
+	}
+	b.WriteString("止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。\n承認者が GO・停止以外のコメントを書くと、修正の依頼として扱い、計画を作り直してから改めて確認します。確認待ちの間に他の人がコメントしたり、コメントが編集・削除されたりすると、安全のため実行せずに止まります。\n")
 	for _, show := range []bool{true, false} {
 		if show {
 			b.WriteString("\n## 試し実行の結果\n")
@@ -509,7 +521,7 @@ func (a approvalChild) post(ctx context.Context, stage chain.Stage, state chain.
 		if err = chain.CheckApprovalCollision(post.Digest, v.posts); err != nil {
 			return post, err
 		}
-		text, err := approvalPostText(stage, bundle, post, state, credentialValues(cfg))
+		text, err := approvalPostText(stage, bundle, post, state, credentialValues(cfg), v.posts)
 		if err != nil {
 			return post, err
 		}

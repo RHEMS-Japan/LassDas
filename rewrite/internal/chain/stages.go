@@ -394,7 +394,13 @@ func (s State) stageInstruction(name string) string {
 	}
 	runs := s.stageRuns()
 	if ending, ok := s.LastEnding(); ok && ending.ApprovalFailure != "" {
-		fmt.Fprintf(&text, "%s: %s\n", ending.Role, ending.Error)
+		fmt.Fprintf(&text, "%s: %s", ending.Role, ending.Error)
+		if ending.ApprovalFailure == "summary_unreadable" {
+			if failed, at := stageAt(stages, ending.Role); at >= 0 && failed.Approval != nil {
+				fmt.Fprintf(&text, " (%s が無い・空・2,000 文字超・``` または ~~~ を含む・行頭の空白やタブを除くと # で始まる行がある・--- / === だけの行がある・1 行 200 文字超、のどれか。見出しや code fence、区切り線の無い平文で書き直す)", failed.Approval.Summary)
+			}
+		}
+		text.WriteByte('\n')
 	} else if len(runs) > 0 && !runs[len(runs)-1].satisfied {
 		if failed, at := stageAt(stages, runs[len(runs)-1].role); at >= 0 && failed.Kind == CommandStage {
 			fmt.Fprintf(&text, "The %s stage did not exit 0. What its commands returned is in the record below; this run has no failing end state, so it is tried again after you.\n", failed.Name)

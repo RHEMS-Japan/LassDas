@@ -27,7 +27,10 @@ operator to stop and file a new request, without promising continuation.
 The approval comment asks the requester to review the production operation in
 Japanese. It shows the optional `approval.summary` file verbatim as plain text,
 the exact GO line, a deadline in `approval.timezone` (default UTC), the previous
-execution outcome, and the stop conditions. The two headings remain
+execution outcome, and the stop conditions. From the second post onward, the
+current full digest is compared with post n-1: `計画は前回の確認と同じです。`
+or `計画は前回の確認から変わりました。`. The first post has no comparison.
+The two headings remain
 `## 試し実行の結果` and `## AI が書いた計画`. The summary is not repeated
 in the file listing, including its filename. Other files retain their order
 and fenced representation.
@@ -41,10 +44,10 @@ and fenced representation.
 実行してよければ、次の 1 行だけを新しいコメントに書いてください:
 GO 543f0e3e
 
-期限: 2026-10-25 22:06 (JST) まで。過ぎたら計画を作り直して、もう一度確認します。
+期限: 2026-10-25 22:06 (JST) まで。過ぎると一時停止します。続けるときは「再開」と書いてください (計画を作り直して、もう一度確認します)。
 前回の実行: まだ実行していません。
 止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。
-安全のため、確認待ちの間に他の人がコメントしたり、コメントが編集・削除されたり、承認者が GO・停止以外のコメントを書いたりすると、実行せずに止まります。
+承認者が GO・停止以外のコメントを書くと、修正の依頼として扱い、計画を作り直してから改めて確認します。確認待ちの間に他の人がコメントしたり、コメントが編集・削除されたりすると、安全のため実行せずに止まります。
 
 ## 試し実行の結果
 
@@ -62,17 +65,24 @@ proposed
 ````
 
 The summary path is relative to the working copy and must be inside the bundle
-(preflight 12). Missing, empty after trimming, over 2,000 characters after
-trimming, invalid UTF-8, triple backticks, or a line starting with `#` produces
-`summary_unreadable`. The existing credential checks also cover the summary.
+(check 12), follow the bundle filename and depth rules, and not also appear in
+`show`. Missing, empty after trimming, over 2,000 characters after trimming,
+invalid UTF-8, triple backticks or tildes, a line starting with `#` after leading
+spaces and tabs, or a trimmed line consisting only of `---` or `===` produces
+`summary_unreadable`. Lines over 200 characters retain `bundle_limit`.
+Summary failures return to planning, with the configured path and repair
+instructions in the planning role's input; they do not add a pause reason.
+The existing credential checks also cover the summary.
 The summary's original bytes remain part of the copied bundle and digest.
-Preflight 11 rejects an unreadable time zone name. Embedded time zone data
+Check 11 rejects an unreadable time zone name. Embedded time zone data
 avoids depending on the image. Saved deadlines remain RFC3339 UTC.
 
 Account IDs, comment IDs, the full digest, internal stage names, and runtime
 clock terminology are absent from the fixed post text. GO matching, post and
 launch binding, and `sent_text_sha256` readback stay unchanged. Failure notices
 start with `確認の途中で止まりました。理由: ` and retain recovery instructions.
+If execution started but its result cannot be read, the notice starts with
+`実行を開始しましたが、結果が分かりません。理由: `.
 
 ## Alternatives compared
 

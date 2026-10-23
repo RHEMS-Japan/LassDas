@@ -849,6 +849,12 @@ A command stage can declare the following optional `approval` object:
 - `summary`: optional path relative to the working copy, inside `bundle`. The
   process writes human-readable UTF-8 text here. It remains part of the digest,
   appears as plain text under `やること:`, and is omitted from the file listing.
+  The bundle-relative path must follow the bundle filename rules, have at most
+  four components, and not also appear in `show`.
+  説明文は見出し・code fence・区切り線を使えない。字下げ・リンク・画像は拒まないが投稿先の見え方は確かめていない。
+  1 行 200 文字まで (bundle の決まりと同じ、超えると「量や形式」の理由になる)。
+  説明文の不備は計画の工程からやり直す。
+  現在の stages 形式では `workflow.launch_limit` は設定検査で拒否されるため、このやり直しの回数制限には使えない。
 
 The following checks apply to the current configuration before intake:
 
@@ -866,7 +872,8 @@ The following checks apply to the current configuration before intake:
 9. The fields meet the constraints above; a model stage cannot declare approval.
 10. Every `on_failure` after approval stays after that approval stage.
 11. `approval.timezone` must be a readable IANA time zone name, if set.
-12. `approval.summary` must be a relative file path inside `bundle`, if set.
+12. `approval.summary` must be a relative file path inside `bundle`, if set,
+    follow the bundle filename rules and depth limit, and not also appear in `show`.
 
 The saved workflow is checked again on every child start with checks 3, 5, 6,
 and 7; checks 1, 2, 10, 11, and 12 run only once before the first copy.
@@ -4178,10 +4185,10 @@ State の `awaiting_approval` は `stage`, `post_n`, `post_comment_id`, `deadlin
 実行してよければ、次の 1 行だけを新しいコメントに書いてください:
 GO 543f0e3e
 
-期限: 2026-10-25 22:06 (JST) まで。過ぎたら計画を作り直して、もう一度確認します。
+期限: 2026-10-25 22:06 (JST) まで。過ぎると一時停止します。続けるときは「再開」と書いてください (計画を作り直して、もう一度確認します)。
 前回の実行: まだ実行していません。
 止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。
-安全のため、確認待ちの間に他の人がコメントしたり、コメントが編集・削除されたり、承認者が GO・停止以外のコメントを書いたりすると、実行せずに止まります。
+承認者が GO・停止以外のコメントを書くと、修正の依頼として扱い、計画を作り直してから改めて確認します。確認待ちの間に他の人がコメントしたり、コメントが編集・削除されたりすると、安全のため実行せずに止まります。
 
 ## 試し実行の結果
 
@@ -4200,15 +4207,18 @@ proposed
 
 `summary` が未設定なら「やること:」の節ごと省く。設定時はファイルの本文をそのまま表示し、
 ファイル名を含め一覧には重ねて出さない。ファイルの並び順と他のファイルの表示形式は変えない。
-説明文が無い・trim 後に空・2,000 文字超・不正 UTF-8・コードフェンス（連続するバッククォート 3 個）を含む・
-`#` で始まる行を含む場合は `summary_unreadable` として実行せず、
+説明文が無い・trim 後に空・2,000 文字超・不正 UTF-8・コードフェンス（連続するバッククォート 3 個または `~~~`）を含む・
+行頭の空白やタブを除いて `#` で始まる行・前後空白を除いて `---` / `===` だけの行を含む場合は `summary_unreadable` として実行せず、
 「やることの説明文が無いか、読めません」と知らせる。説明文にも既存の束の制約と認証情報の検査を行う。
 
-前回の実行は「まだ実行していません。」「途中で止まり、結果が分かりません。同じ計画で実行してよいか、もう一度確認します。」
-「失敗しました。同じ計画で実行してよいか、もう一度確認します。」
-「正常に終わりました。同じ計画でもう一度実行してよいか確認します。」のいずれか。
+前回の実行は「まだ実行していません。」「途中で止まり、結果が分かりません。もう一度実行してよいか確認します。」
+「失敗しました。もう一度実行してよいか確認します。」
+「正常に終わりました。もう一度実行してよいか確認します。」のいずれか。
 実行前の確認の不成立を実行失敗とは数えず、直近に実行した結果を示す。
+2 回目以降の投稿では、直前の投稿 (n-1) の指紋と比較し、
+「計画は前回の確認と同じです。」または「計画は前回の確認から変わりました。」を 1 行足す。1 回目には出さない。
 確認で止まった知らせは「確認の途中で止まりました。理由: …」とし、再開の方法も残す。
+起動したが結果を読めない場合は「実行を開始しましたが、結果が分かりません。理由: …」と知らせる。
 
 承認者は Web 上の本体名義の承認投稿の全文を読み、`GO <先頭8桁>` の半角1行を新しいコメントで返す。
 先頭8桁は小文字16進、空白は1つ。末尾の半角空白・タブ・CR・LFだけを除く。

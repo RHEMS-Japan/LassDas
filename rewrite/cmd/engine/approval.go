@@ -251,7 +251,7 @@ func validateApprovalSummary(cfg config) error {
 	for _, stage := range approvalStages(cfg) {
 		if stage.Approval != nil {
 			if _, err := stage.Approval.SummaryPath(); err != nil {
-				return fmt.Errorf("stage %q: approval check 12: summary must be a relative file path inside bundle", stage.Name)
+				return fmt.Errorf("stage %q: approval check 12: %w", stage.Name, err)
 			}
 		}
 	}

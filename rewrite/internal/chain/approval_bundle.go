@@ -246,11 +246,11 @@ func hasCredential(data []byte, values []string) bool {
 func ApprovalSummary(data []byte) error {
 	text := string(data)
 	trimmed := strings.TrimSpace(text)
-	if !utf8.Valid(data) || trimmed == "" || utf8.RuneCountInString(trimmed) > 2000 || strings.Contains(text, "```") {
+	if !utf8.Valid(data) || trimmed == "" || utf8.RuneCountInString(trimmed) > 2000 || strings.Contains(text, "```") || strings.Contains(text, "~~~") {
 		return ApprovalFailure("summary_unreadable")
 	}
 	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(line, "#") {
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "#") || strings.TrimSpace(line) == "---" || strings.TrimSpace(line) == "===" {
 			return ApprovalFailure("summary_unreadable")
 		}
 	}

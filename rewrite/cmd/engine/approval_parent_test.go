@@ -34,46 +34,65 @@ func parentTickTest(t *testing.T, a approvalChild, s *chain.State) bool {
 	return ready
 }
 func TestApprovalParentGOConsumptionAndRepost(t *testing.T) {
-	a, f, s, p := approvalPostFixture(t)
-	approvalAdd(t, f, 950, 7, "GO "+p.DigestPrefix+" \t\r\n", nil)
-	if !parentTickTest(t, a, &s) || s.AwaitingApproval != nil {
-		t.Fatal("GO not accepted")
-	}
-	if err := a.before(context.Background(), &s, chain.Assignment{Role: "c"}); err != nil {
-		t.Fatal(err)
-	}
-	gos, _ := chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
-	if len(gos) != 1 || gos[0].ConsumedAt.IsZero() || gos[0].LaunchHistoryLen != len(s.History) {
-		t.Fatal("GO not consumed at launch position")
-	}
-	if used, err := a.consume(&s, p, approvalView{gos: gos}, nil); used || err != nil {
-		t.Fatal("GO consumed twice")
-	}
-	s.History = append(s.History, chain.Result{Role: "c", Speaker: "runtime", Error: "synthetic failure", FinishedAt: time.Now().UTC()})
-	next, err := (chain.StageRouter{}).Next(context.Background(), s)
-	if err != nil || next.Role != "a" {
-		t.Fatalf("recovery=%v %v", next, err)
-	}
-	s.History = append(s.History, chain.Result{Role: "a", Speaker: "runtime", FinishedAt: time.Now().UTC()}, chain.Result{Role: "b", Speaker: "runtime", FinishedAt: time.Now().UTC()})
-	if err := a.before(context.Background(), &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) {
-		t.Fatal(err)
-	}
-	posts, _ := chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
-	var again chain.ApprovalPost
-	for _, post := range posts {
-		if post.N == 2 {
-			again = post
-		}
-	}
-	if again.Digest != p.Digest || again.CommentID == p.CommentID || !strings.Contains(f.all()[len(f.all())-1], "失敗しました。同じ計画で実行してよいか、もう一度確認します。") {
-		t.Fatal("repost lost bundle or previous ending")
-	}
-	if parentTickTest(t, a, &s) {
-		t.Fatal("old GO accepted on new post")
-	}
-	approvalAdd(t, f, again.CommentID+10, 7, "GO "+again.DigestPrefix, nil)
-	if !parentTickTest(t, a, &s) {
-		t.Fatal("new GO not accepted")
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
+			a, f, s, p := approvalPostFixture(t)
+			if strings.Contains(f.all()[0], "計画は前回の確認") {
+				t.Fatal("first post compares with a nonexistent post")
+			}
+			approvalAdd(t, f, 950, 7, "GO "+p.DigestPrefix+" \t\r\n", nil)
+			if !parentTickTest(t, a, &s) || s.AwaitingApproval != nil {
+				t.Fatal("GO not accepted")
+			}
+			if err := a.before(context.Background(), &s, chain.Assignment{Role: "c"}); err != nil {
+				t.Fatal(err)
+			}
+			gos, _ := chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
+			if len(gos) != 1 || gos[0].ConsumedAt.IsZero() || gos[0].LaunchHistoryLen != len(s.History) {
+				t.Fatal("GO not consumed at launch position")
+			}
+			if used, err := a.consume(&s, p, approvalView{gos: gos}, nil); used || err != nil {
+				t.Fatal("GO consumed twice")
+			}
+			s.History = append(s.History, chain.Result{Role: "c", Speaker: "runtime", Error: "synthetic failure", FinishedAt: time.Now().UTC()})
+			next, err := (chain.StageRouter{}).Next(context.Background(), s)
+			if err != nil || next.Role != "a" {
+				t.Fatalf("recovery=%v %v", next, err)
+			}
+			if changed {
+				if err := os.WriteFile(filepath.Join(a.cfg.Roles[0].Processes[0].Directory, "ops/bundle/plan.txt"), []byte("revised plan\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.History = append(s.History, chain.Result{Role: "a", Speaker: "runtime", FinishedAt: time.Now().UTC()}, chain.Result{Role: "b", Speaker: "runtime", FinishedAt: time.Now().UTC()})
+			if err := a.before(context.Background(), &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) {
+				t.Fatal(err)
+			}
+			posts, _ := chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
+			var again chain.ApprovalPost
+			for _, post := range posts {
+				if post.N == 2 {
+					again = post
+				}
+			}
+			if (again.Digest != p.Digest) != changed || again.CommentID == p.CommentID || !strings.Contains(f.all()[len(f.all())-1], "失敗しました。もう一度実行してよいか確認します。") {
+				t.Fatal("repost lost bundle or previous ending")
+			}
+			comparison := "計画は前回の確認と同じです。"
+			if changed {
+				comparison = "計画は前回の確認から変わりました。"
+			}
+			if !strings.Contains(f.all()[len(f.all())-1], comparison+"\n") {
+				t.Fatal("repost comparison does not match the saved digests")
+			}
+			if parentTickTest(t, a, &s) {
+				t.Fatal("old GO accepted on new post")
+			}
+			approvalAdd(t, f, again.CommentID+10, 7, "GO "+again.DigestPrefix, nil)
+			if !parentTickTest(t, a, &s) {
+				t.Fatal("new GO not accepted")
+			}
+		})
 	}
 }
 
@@ -488,7 +507,7 @@ func TestApprovalEndToEndCommandLaunchesOncePerGO(t *testing.T) {
 				p = post
 			}
 		}
-		if p.N != old.N+1 || p.Digest != old.Digest || !strings.Contains(f.all()[len(f.all())-1], "失敗しました。同じ計画で実行してよいか、もう一度確認します。") {
+		if p.N != old.N+1 || p.Digest != old.Digest || !strings.Contains(f.all()[len(f.all())-1], "失敗しました。もう一度実行してよいか確認します。") {
 			t.Fatalf("repost n=%d/%d digest=%s/%s text=%s", p.N, old.N, p.Digest, old.Digest, f.all()[len(f.all())-1])
 		}
 		runner()
