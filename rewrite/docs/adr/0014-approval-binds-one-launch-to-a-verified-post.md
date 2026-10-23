@@ -22,6 +22,74 @@ repeats the comparison, approver and saved-workflow checks. If they fail it
 holds the request again, without launching work. Their notices instruct the
 operator to stop and file a new request, without promising continuation.
 
+## Posted text
+
+The approval comment asks the requester to review the production operation in
+Japanese. It shows the optional `approval.summary` file verbatim as plain text,
+the exact GO line, a deadline in `approval.timezone` (default UTC), the previous
+execution outcome, and the stop conditions. From the second post onward, the
+current full digest is compared with post n-1 only when both belong to the same
+approval stage: `計画は前回の確認と同じです。`
+or `計画は前回の確認から変わりました。`. The first post, a missing post n-1,
+or a post n-1 from another stage has no comparison. A summary-only change also changes the digest.
+The two headings remain
+`## 試し実行の結果` and `## AI が書いた計画`. The summary is not repeated
+in the file listing, including its filename. Other files retain their order
+and fenced representation.
+
+````text
+本番の操作の確認をお願いします。
+
+やること:
+確認済みの設定を本番に反映します。
+
+実行してよければ、次の 1 行だけを新しいコメントに書いてください:
+GO 543f0e3e
+
+期限: 2026-10-25 22:06 (JST) まで。過ぎると一時停止します。続けるときは「再開」と書いてください (計画を作り直して、もう一度確認します)。
+前回の実行: まだ実行していません。
+止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。
+確認待ちの間に承認者が GO・停止・再開以外のコメントを書くと、修正の依頼として扱い、計画を作り直してから改めて確認します。
+最初の確認の投稿より後は、確認待ちかどうかに関わらず、承認者以外の人のコメントや、コメントの編集・削除 (受け付けた GO を除く) があると、安全のため実行せずに止まり、起票し直しになります。
+確認待ちでない間に承認者がコメントを書くと (停止・再開を除く)、その人は承認者から外れます。他に承認者がいなければ止まり、起票し直しになります。承認者が複数いるときは残りの承認者で続け、外れた人のコメントは修正の依頼として扱いません。
+
+## 試し実行の結果
+
+```
+dry-run.txt
+checked
+```
+
+## AI が書いた計画
+
+```
+plan.txt
+proposed
+```
+````
+
+The summary path is relative to the working copy and must be inside the bundle
+(check 12), follow the bundle filename and depth rules, and not also appear in
+`show`. Missing, empty after trimming, over 2,000 characters after trimming,
+invalid UTF-8, triple backticks or tildes, a line starting with `#` after leading
+spaces and tabs, a setext underline matching `^\s{0,3}(=+|-+)\s*$`, or a
+separator consisting of three or more identical `*`, `_`, or `-` characters
+after whitespace is removed produces
+`summary_unreadable`. Lines over 200 characters retain `bundle_limit`.
+Summary failures return to planning, with the configured path and repair
+instructions in the planning role's input; they do not add a pause reason.
+The existing credential checks also cover the summary.
+The summary's original bytes remain part of the copied bundle and digest.
+Check 11 rejects an unreadable time zone name. Embedded time zone data
+avoids depending on the image. Saved deadlines remain RFC3339 UTC.
+
+Account IDs, comment IDs, the full digest, internal stage names, and runtime
+clock terminology are absent from the fixed post text. GO matching, post and
+launch binding, and `sent_text_sha256` readback stay unchanged. Failure notices
+start with `確認の途中で止まりました。理由: ` and retain recovery instructions.
+If execution started but its result cannot be read, the notice starts with
+`実行を開始しましたが、結果が分かりません。理由: `.
+
 ## Alternatives compared
 
 Treating GO as a question reply would allow the requester to release approval.

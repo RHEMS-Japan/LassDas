@@ -18,7 +18,7 @@ type ApprovalFailure string
 
 func (r ApprovalFailure) Error() string { return ApprovalFailureText(string(r)) }
 
-var approvalReasons = []string{"rejected", "expired", "bundle_name", "bundle_kind", "bundle_limit", "bundle_credential", "show_missing", "post_size", "post_fence", "post_masked", "digest_collision", "receipt_unreadable"}
+var approvalReasons = []string{"rejected", "expired", "bundle_name", "bundle_kind", "bundle_limit", "bundle_credential", "show_missing", "post_size", "post_fence", "post_masked", "digest_collision", "receipt_unreadable", "summary_unreadable"}
 
 const approvalFailurePrefix = "承認条件が成立しなかった: "
 const approvalReceiptPrefix = "起動した・結果は読めない (効果不明): "

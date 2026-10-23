@@ -156,10 +156,14 @@ func pausedText(reason string, pause pauseEpisode, clock *workClock) string {
 	if pause.Reason == "approval_expired" {
 		reason += "作業を続ける場合は、再開以外のコメントを書かないでください。遅れた GO も除外の対象となり、承認できなくなります。"
 	}
-	if chain.ApprovalPauseText(pause.Reason) != "" && pause.Reason != "approval_expired" {
-		return "この依頼の自動処理を一時停止しています。" + reason + "依頼は未完了です。"
+	prefix := "この依頼の自動処理を一時停止しています。"
+	if chain.ApprovalPauseText(pause.Reason) != "" {
+		prefix = "確認の途中で止まりました。理由: "
+		if pause.Reason != "approval_expired" {
+			return prefix + reason + "依頼は未完了です。"
+		}
 	}
-	return "この依頼の自動処理を一時停止しています。" + reason + workPauseMeasured(clock, pause.Elapsed) +
+	return prefix + reason + workPauseMeasured(clock, pause.Elapsed) +
 		"依頼は未完了です。中断前の操作が既に反映されている場合があり、取り消してはいません。\n" +
 		"続ける場合は、最初の空でない行を「再開」として新しいコメントを投稿してください。必要な補足は次の行に書けます。保存した条件で、外部の状態を確かめてから続けます。" +
 		"対応を待つ場合は、このまま待てます。依頼を取りやめる場合は、最初の空でない行を「停止」としてください。"

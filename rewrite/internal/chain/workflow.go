@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	_ "time/tzdata"
 )
 
 // Workflow is operator configuration, not a verdict inferred from a role's
@@ -80,6 +81,48 @@ type Approval struct {
 	Bundle          string   `json:"bundle"`
 	Show            []string `json:"show"`
 	ExpiryHours     int      `json:"expiry_hours"`
+	Timezone        string   `json:"timezone,omitempty"`
+	Summary         string   `json:"summary,omitempty"`
+}
+
+// TimeLocation resolves only explicit IANA names; Local depends on the host.
+func (a Approval) TimeLocation() (*time.Location, error) {
+	if a.Timezone == "" {
+		return time.UTC, nil
+	}
+	if a.Timezone == "Local" {
+		return nil, errors.New("approval timezone must be an IANA name")
+	}
+	return time.LoadLocation(a.Timezone)
+}
+
+// SummaryPath returns the file's bundle-relative name without reading the workspace.
+func (a Approval) SummaryPath() (string, error) {
+	if a.Summary == "" {
+		return "", nil
+	}
+	if !filepath.IsLocal(a.Summary) {
+		return "", errors.New("approval summary must be a relative file path inside bundle")
+	}
+	relative, err := filepath.Rel(a.Bundle, a.Summary)
+	if err != nil || !filepath.IsLocal(relative) || relative == "." {
+		return "", errors.New("approval summary must be a relative file path inside bundle")
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	if len(parts) > 4 {
+		return "", errors.New("approval summary exceeds bundle path depth")
+	}
+	for _, part := range parts {
+		if !approvalName(part) {
+			return "", errors.New("approval summary must follow bundle filename rules")
+		}
+	}
+	for _, show := range a.Show {
+		if filepath.Clean(show) == relative {
+			return "", errors.New("approval summary must not also appear in show")
+		}
+	}
+	return filepath.ToSlash(relative), nil
 }
 
 // ValidateApproval checks current configuration, never a saved run's copy.
@@ -208,7 +251,7 @@ func (w *Workflow) clone() *Workflow {
 		ConfirmationReworkLimit: w.ConfirmationReworkLimit, EnvironmentPauseLimit: w.EnvironmentPauseLimit}
 	for i, stage := range w.Stages {
 		if a := stage.Approval; a != nil {
-			copy.Stages[i].Approval = &Approval{Bundle: a.Bundle, Show: slices.Clone(a.Show), ExpiryHours: a.ExpiryHours}
+			copy.Stages[i].Approval = &Approval{Bundle: a.Bundle, Show: slices.Clone(a.Show), ExpiryHours: a.ExpiryHours, Timezone: a.Timezone, Summary: a.Summary}
 		}
 	}
 	if w.Preview != nil {

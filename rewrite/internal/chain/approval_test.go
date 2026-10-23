@@ -424,3 +424,103 @@ func TestApprovalReceiptFailureIsRecordedAfterStage(t *testing.T) {
 		})
 	}
 }
+
+func TestApprovalDisplaySettingsSurviveWorkflowCopy(t *testing.T) {
+	var workflow Workflow
+	if err := json.Unmarshal([]byte(`{"stages":[{"name":"execute","kind":"command","approval":{"bundle":"ops/bundle","show":["dry-run.txt"],"expiry_hours":72,"approver_user_ids":[7],"timezone":"Asia/Tokyo","summary":"ops/bundle/summary.txt"}}]}`), &workflow); err != nil {
+		t.Fatal(err)
+	}
+	copied := workflow.clone()
+	data, err := json.Marshal(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"timezone":"Asia/Tokyo"`, `"summary":"ops/bundle/summary.txt"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("missing %s in %s", want, data)
+		}
+	}
+	if len(copied.Stages[0].Approval.ApproverUserIDs) != 0 {
+		t.Fatal("saved approvers")
+	}
+}
+
+func TestApprovalSummaryBundleBoundaryAndCredentials(t *testing.T) {
+	for _, tc := range []struct{ name, content, reason string }{
+		{"at limit", strings.Repeat(strings.Repeat("日", 99)+"\n", 19) + strings.Repeat("日", 100), ""},
+		{"trimmed", "  確認します。\n", ""},
+		{"line at limit", strings.Repeat("日", 200), ""},
+		{"line over limit", strings.Repeat("日", 201), "bundle_limit"},
+		{"indent link image", "  説明\n[link](https://example.com)\n![image](https://example.com/image.png)", ""},
+		{"read only operation", "やること: 本番の billsan_prod の master_users の行数を数える (読むだけ)\n戻し方: 不要\n影響: 表を 1 回読むだけ", ""},
+		{"bullet item", "- 項目", ""},
+		{"numbered item", "1. 項目", ""},
+		{"long vowel marks", "ーーー", ""},
+		{"dashes", "―――", ""},
+		{"url with hyphens", "参照: https://example.com/a---b", ""},
+		{"url with underscores", "参照: https://example.com/a___b", ""},
+		{"inline hyphen", "a - b", ""},
+		{"two hyphens", "-- 注意", ""},
+		{"masked", "synthetic-credential", "post_masked"},
+		{"format", "説明\u202e", "post_fence"},
+		{"control", "説明\r", "post_fence"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			approvalWrite(t, filepath.Join(root, "bundle/show.txt"), "checked\n")
+			approvalWrite(t, filepath.Join(root, "bundle/summary.txt"), tc.content)
+			dest := filepath.Join(t.TempDir(), "bundle-1")
+			bundle, err := CollectApprovalBundle(root, &Approval{Bundle: "bundle", Show: []string{"show.txt"}, Summary: "bundle/summary.txt"}, dest, []string{"synthetic-credential"})
+			if tc.reason != "" {
+				var failure ApprovalFailure
+				if !errors.As(err, &failure) || string(failure) != tc.reason {
+					t.Fatalf("got %v want %s", err, tc.reason)
+				}
+				if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("refused bundle was saved")
+				}
+				return
+			}
+			if err != nil || string(bundle.Contents["summary.txt"]) != tc.content {
+				t.Fatal("original summary not preserved", err)
+			}
+			digest := bundle.Digest
+			bundle.Contents["summary.txt"] = []byte(tc.content + "変更")
+			changed, err := ApprovalDigest(bundle.Contents)
+			if err != nil || changed == digest {
+				t.Fatal("summary not bound to digest", err)
+			}
+		})
+	}
+}
+
+func TestApprovalSummaryRecoveryInstruction(t *testing.T) {
+	workflow := &Workflow{Stages: []Stage{
+		{Name: "plan", Kind: ModelStage},
+		{Name: "check", Kind: CommandStage, OnFailure: "plan"},
+		{Name: "execute", Kind: CommandStage, OnFailure: "plan", Approval: &Approval{Summary: "ops/bundle/summary.txt"}},
+	}}
+	for _, reason := range approvalReasons {
+		state := State{Workflow: workflow, History: []Result{
+			{Role: "plan", Speaker: "runtime"}, {Role: "check", Speaker: "runtime"},
+			ApprovalFailureRecord("execute", reason),
+		}}
+		next, err := (StageRouter{}).Next(context.Background(), state)
+		if err != nil || next.Role != "plan" {
+			t.Fatalf("reason=%s next=%+v err=%v", reason, next, err)
+		}
+		prefix := "execute: " + ApprovalFailureText(reason)
+		if reason == "summary_unreadable" {
+			for _, want := range []string{prefix + " (ops/bundle/summary.txt", "2,000", "```", "~~~", "#", "= や - による見出しの下線", "同じ * / _ / - が 3 個以上", "平文で書き直す) (1 行 200 文字を超えると別の理由『量や形式』になる)"} {
+				if !strings.Contains(next.Instruction, want) {
+					t.Fatalf("missing %q: %s", want, next.Instruction)
+				}
+			}
+		} else if !strings.Contains(next.Instruction, prefix+"\n") {
+			t.Fatalf("other reason changed: %s", next.Instruction)
+		}
+		if state.History[len(state.History)-1].Error != ApprovalFailureText(reason) {
+			t.Fatal("saved failure text changed")
+		}
+	}
+}

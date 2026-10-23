@@ -832,7 +832,9 @@ A command stage can declare the following optional `approval` object:
   "approver_user_ids": [7],
   "bundle": "ops/bundle",
   "show": ["dry-run.txt"],
-  "expiry_hours": 72
+  "expiry_hours": 72,
+  "timezone": "Asia/Tokyo",
+  "summary": "ops/bundle/summary.txt"
 }
 ```
 
@@ -841,7 +843,14 @@ A command stage can declare the following optional `approval` object:
 - `bundle`: a local relative path from `TASK_WORKSPACE`, without `..` components.
 - `show`: one or more local paths relative to `bundle` (`filepath.IsLocal`).
 - `expiry_hours`: a positive number of hours. The first workflow copy preserves
-  this value, `bundle`, and an independent copy of `show`.
+  this value, `bundle`, `timezone`, `summary`, and an independent copy of `show`.
+- `timezone`: optional IANA time zone for the posted deadline; defaults to `UTC`.
+  The binary embeds time zone data. Records remain RFC3339 UTC.
+- `summary`: optional path relative to the working copy, inside `bundle`. The
+  process writes human-readable UTF-8 text here. It remains part of the digest,
+  appears as plain text under `やること:`, and is omitted from the file listing.
+  The bundle-relative path must follow the bundle filename rules, have at most
+  four components, and not also appear in `show`.
 
 The following checks apply to the current configuration before intake:
 
@@ -858,9 +867,12 @@ The following checks apply to the current configuration before intake:
 8. The tracker is Backlog.
 9. The fields meet the constraints above; a model stage cannot declare approval.
 10. Every `on_failure` after approval stays after that approval stage.
+11. `approval.timezone` must be a readable IANA time zone name, if set.
+12. `approval.summary` must be a relative file path inside `bundle`, if set,
+    follow the bundle filename rules and depth limit, and not also appear in `show`.
 
 The saved workflow is checked again on every child start with checks 3, 5, 6,
-and 7; checks 1, 2, and 10 run only once before the first copy.
+and 7; checks 1, 2, 10, 11, and 12 run only once before the first copy.
 
 Approval stages are usable end to end in watch mode.
 The startup guards require watch mode, a successful `Myself()` read,
@@ -4150,11 +4162,69 @@ State の `awaiting_approval` は `stage`, `post_n`, `post_comment_id`, `deadlin
 空の束は拒む。共通の JSON 試験ベクトルは `internal/chain/testdata/approval-digest-*.json`。
 
 不成立は Role=工程名、Speaker=`runtime`、Error=固定文と理由名。
-理由は `rejected`, `expired`, `bundle_name`, `bundle_kind`, `bundle_limit`, `bundle_credential`, `show_missing`, `post_size`, `post_fence`, `post_masked`, `digest_collision`, `receipt_unreadable`。
+理由は `rejected`, `expired`, `bundle_name`, `bundle_kind`, `bundle_limit`, `bundle_credential`, `show_missing`, `post_size`, `post_fence`, `post_masked`, `digest_collision`, `receipt_unreadable`, `summary_unreadable`。
 `receipt_unreadable` と、起動済みの承認条件の工程の receipt に資格の値があった場合の `bundle_credential` は「起動した・結果は読めない (効果不明)」と記録する。
-不正 UTF-8・書式文字・禁止制御文字は `post_fence`、空の束は `bundle_limit` とする。
+説明文以外の不正 UTF-8 と、書式文字・禁止制御文字は `post_fence`、空の束は `bundle_limit` とする。
 深さは束からのパス要素数、行長は Unicode の文字数、空白は空白とタブ、空行は空白とタブだけの行（末尾改行自体は数えない）。本文の固定文も含め32 KiBを超えたら投稿しない。
 
+
+投稿は次の形にする（`timezone: Asia/Tokyo`、`summary: ops/bundle/summary.txt` の例）。
+アカウント id・コメント id・64 桁の指紋・内部の工程名は固定文に出さない。
+期限は `2006-01-02 15:04 (MST)` の形で表示する。
+
+````text
+本番の操作の確認をお願いします。
+
+やること:
+確認済みの設定を本番に反映します。
+
+実行してよければ、次の 1 行だけを新しいコメントに書いてください:
+GO 543f0e3e
+
+期限: 2026-10-25 22:06 (JST) まで。過ぎると一時停止します。続けるときは「再開」と書いてください (計画を作り直して、もう一度確認します)。
+前回の実行: まだ実行していません。
+止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。
+確認待ちの間に承認者が GO・停止・再開以外のコメントを書くと、修正の依頼として扱い、計画を作り直してから改めて確認します。
+最初の確認の投稿より後は、確認待ちかどうかに関わらず、承認者以外の人のコメントや、コメントの編集・削除 (受け付けた GO を除く) があると、安全のため実行せずに止まり、起票し直しになります。
+確認待ちでない間に承認者がコメントを書くと (停止・再開を除く)、その人は承認者から外れます。他に承認者がいなければ止まり、起票し直しになります。承認者が複数いるときは残りの承認者で続け、外れた人のコメントは修正の依頼として扱いません。
+
+## 試し実行の結果
+
+```
+dry-run.txt
+checked
+```
+
+## AI が書いた計画
+
+```
+plan.txt
+proposed
+```
+````
+
+`summary` が未設定なら「やること:」の節ごと省く。設定時はファイルの本文をそのまま表示し、
+ファイル名を含め一覧には重ねて出さない。ファイルの並び順と他のファイルの表示形式は変えない。
+説明文が無い・trim 後に空・2,000 文字超・不正 UTF-8・コードフェンス（連続するバッククォート 3 個または `~~~`）を含む・
+行頭の空白やタブを除いて `#` で始まる行・正規表現 `^\s{0,3}(=+|-+)\s*$` に当たる見出しの下線・
+空白を除いて同じ `*` / `_` / `-` が 3 個以上並ぶだけの区切り線を含む場合は `summary_unreadable` として実行せず、
+「やることの説明文が無いか、読めません」と知らせる。説明文にも既存の束の制約と認証情報の検査を行う。
+
+説明文は見出し・code fence・区切り線を使えない。字下げ・リンク・画像は拒まないが投稿先の見え方は確かめていない。
+1 行 200 文字まで (bundle の決まりと同じ、超えると「量や形式」の理由になる)。
+説明文の不備は計画の工程からやり直す。
+現在の stages 形式では `workflow.launch_limit` は設定検査で拒否されるため、このやり直しの回数制限には使えない。
+回数の上限は無い。`intake.max_stage_attempts` は説明文の不備を 1 回と数えるが、計画の工程が走るたびに数え直すため、1 を設定したとき (不備 1 回で一時停止) を除いて、このやり直しを止めない。`intake.max_hard_exits` は強制終了だけを数える。時間で止めるには `intake.max_active_minutes` を正の値にする (既定 0 は無制限)。
+
+前回の実行は「まだ実行していません。」「途中で止まり、結果が分かりません。もう一度実行してよいか確認します。」
+「失敗しました。もう一度実行してよいか確認します。」
+「正常に終わりました。もう一度実行してよいか確認します。」のいずれか。
+実行前の確認の不成立を実行失敗とは数えず、直近に実行した結果を示す。
+2 回目以降の投稿では、直前の投稿 (n-1) が同じ承認の工程のときだけ、その指紋と比較し、
+「計画は前回の確認と同じです。」または「計画は前回の確認から変わりました。」を 1 行足す。1 回目・直前の投稿の記録が無い場合・別の工程の投稿の場合には出さない。
+説明文だけの変更も指紋に含まれるため「変わりました」になる。
+確認で止まった知らせは「確認の途中で止まりました。理由: …」とし、再開の方法も残す。
+起動したが結果を読めない場合は「実行を開始しましたが、結果が分かりません。理由: …」と知らせる。
 
 承認者は Web 上の本体名義の承認投稿の全文を読み、`GO <先頭8桁>` の半角1行を新しいコメントで返す。
 先頭8桁は小文字16進、空白は1つ。末尾の半角空白・タブ・CR・LFだけを除く。
@@ -4165,7 +4235,7 @@ State の `awaiting_approval` は `stage`, `post_n`, `post_comment_id`, `deadlin
 
 承認者は依頼者・本体アカウント・投稿までに本体が読んだ本文のあるコメントの作者にはなれない。
 承認者の「停止」「再開」と承認待ち中に処理したコメントは除外に数えない。
-投稿前の普通のコメントは承認資格を失わせる。投稿後の普通のコメントは差し戻しになる。
+確認待ちでない間の普通のコメントは承認資格を失わせる。確認待ちの間の普通のコメントは差し戻しになる。
 同じ読み取りの複数コメントは1件の差し戻しにまとめ、GO と同時なら差し戻しを優先する。
 差し戻しは工程の失敗と本文を記録して計画へ戻すが、起動の試行回数や開始通知には数えない。
 全角・大小違い等の1行 GO と承認待ち中の先頭行「再開」は固定文で知らせて待つ。

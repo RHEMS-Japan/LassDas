@@ -34,46 +34,65 @@ func parentTickTest(t *testing.T, a approvalChild, s *chain.State) bool {
 	return ready
 }
 func TestApprovalParentGOConsumptionAndRepost(t *testing.T) {
-	a, f, s, p := approvalPostFixture(t)
-	approvalAdd(t, f, 950, 7, "GO "+p.DigestPrefix+" \t\r\n", nil)
-	if !parentTickTest(t, a, &s) || s.AwaitingApproval != nil {
-		t.Fatal("GO not accepted")
-	}
-	if err := a.before(context.Background(), &s, chain.Assignment{Role: "c"}); err != nil {
-		t.Fatal(err)
-	}
-	gos, _ := chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
-	if len(gos) != 1 || gos[0].ConsumedAt.IsZero() || gos[0].LaunchHistoryLen != len(s.History) {
-		t.Fatal("GO not consumed at launch position")
-	}
-	if used, err := a.consume(&s, p, approvalView{gos: gos}, nil); used || err != nil {
-		t.Fatal("GO consumed twice")
-	}
-	s.History = append(s.History, chain.Result{Role: "c", Speaker: "runtime", Error: "synthetic failure", FinishedAt: time.Now().UTC()})
-	next, err := (chain.StageRouter{}).Next(context.Background(), s)
-	if err != nil || next.Role != "a" {
-		t.Fatalf("recovery=%v %v", next, err)
-	}
-	s.History = append(s.History, chain.Result{Role: "a", Speaker: "runtime", FinishedAt: time.Now().UTC()}, chain.Result{Role: "b", Speaker: "runtime", FinishedAt: time.Now().UTC()})
-	if err := a.before(context.Background(), &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) {
-		t.Fatal(err)
-	}
-	posts, _ := chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
-	var again chain.ApprovalPost
-	for _, post := range posts {
-		if post.N == 2 {
-			again = post
-		}
-	}
-	if again.Digest != p.Digest || again.CommentID == p.CommentID || !strings.Contains(f.all()[len(f.all())-1], "正常に終了しなかった") {
-		t.Fatal("repost lost bundle or previous ending")
-	}
-	if parentTickTest(t, a, &s) {
-		t.Fatal("old GO accepted on new post")
-	}
-	approvalAdd(t, f, again.CommentID+10, 7, "GO "+again.DigestPrefix, nil)
-	if !parentTickTest(t, a, &s) {
-		t.Fatal("new GO not accepted")
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
+			a, f, s, p := approvalPostFixture(t)
+			if strings.Contains(f.all()[0], "計画は前回の確認") {
+				t.Fatal("first post compares with a nonexistent post")
+			}
+			approvalAdd(t, f, 950, 7, "GO "+p.DigestPrefix+" \t\r\n", nil)
+			if !parentTickTest(t, a, &s) || s.AwaitingApproval != nil {
+				t.Fatal("GO not accepted")
+			}
+			if err := a.before(context.Background(), &s, chain.Assignment{Role: "c"}); err != nil {
+				t.Fatal(err)
+			}
+			gos, _ := chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
+			if len(gos) != 1 || gos[0].ConsumedAt.IsZero() || gos[0].LaunchHistoryLen != len(s.History) {
+				t.Fatal("GO not consumed at launch position")
+			}
+			if used, err := a.consume(&s, p, approvalView{gos: gos}, nil); used || err != nil {
+				t.Fatal("GO consumed twice")
+			}
+			s.History = append(s.History, chain.Result{Role: "c", Speaker: "runtime", Error: "synthetic failure", FinishedAt: time.Now().UTC()})
+			next, err := (chain.StageRouter{}).Next(context.Background(), s)
+			if err != nil || next.Role != "a" {
+				t.Fatalf("recovery=%v %v", next, err)
+			}
+			if changed {
+				if err := os.WriteFile(filepath.Join(a.cfg.Roles[0].Processes[0].Directory, "ops/bundle/plan.txt"), []byte("revised plan\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.History = append(s.History, chain.Result{Role: "a", Speaker: "runtime", FinishedAt: time.Now().UTC()}, chain.Result{Role: "b", Speaker: "runtime", FinishedAt: time.Now().UTC()})
+			if err := a.before(context.Background(), &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) {
+				t.Fatal(err)
+			}
+			posts, _ := chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
+			var again chain.ApprovalPost
+			for _, post := range posts {
+				if post.N == 2 {
+					again = post
+				}
+			}
+			if (again.Digest != p.Digest) != changed || again.CommentID == p.CommentID || !strings.Contains(f.all()[len(f.all())-1], "失敗しました。もう一度実行してよいか確認します。") {
+				t.Fatal("repost lost bundle or previous ending")
+			}
+			comparison := "計画は前回の確認と同じです。"
+			if changed {
+				comparison = "計画は前回の確認から変わりました。"
+			}
+			if !strings.Contains(f.all()[len(f.all())-1], comparison+"\n") {
+				t.Fatal("repost comparison does not match the saved digests")
+			}
+			if parentTickTest(t, a, &s) {
+				t.Fatal("old GO accepted on new post")
+			}
+			approvalAdd(t, f, again.CommentID+10, 7, "GO "+again.DigestPrefix, nil)
+			if !parentTickTest(t, a, &s) {
+				t.Fatal("new GO not accepted")
+			}
+		})
 	}
 }
 
@@ -136,6 +155,114 @@ func TestApprovalParentRejectionWinsAndRecoversOnce(t *testing.T) {
 		t.Fatal("rejection duplicated")
 	}
 }
+
+func TestApprovalParentCommentDuringReplanning(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		author int64
+		pause  string
+		posts  int
+	}{
+		{"approver", 7, "approval_no_approver", 2},
+		{"other_person", 88, "approval_tampered", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, f, s, _ := approvalPostFixture(t)
+			approvalAdd(t, f, 950, 7, "計画を直してください", nil)
+			if !parentTickTest(t, a, &s) || s.AwaitingApproval != nil {
+				t.Fatal("rejection did not leave the approval wait")
+			}
+			next, err := (chain.StageRouter{}).Next(context.Background(), s)
+			if err != nil || next.Role != "a" {
+				t.Fatalf("replanning: next=%+v err=%v", next, err)
+			}
+			approvalAdd(t, f, 951, tc.author, "計画の作り直し中のコメント", nil)
+			s.History = append(s.History,
+				chain.Result{Role: "a", Speaker: "runtime", FinishedAt: a.clock()},
+				chain.Result{Role: "b", Speaker: "runtime", FinishedAt: a.clock()})
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err = a.before(ctx, &s, chain.Assignment{Role: "c"})
+			if tc.author == 7 {
+				if !errors.Is(err, chain.ErrAwaitingApproval) || s.AwaitingApproval == nil || s.AwaitingApproval.PostN != 2 || s.ApprovalPaused() != "" {
+					t.Fatalf("expected a second post before pausing: err=%v wait=%+v pause=%s", err, s.AwaitingApproval, s.ApprovalPaused())
+				}
+				if parentTickTest(t, a, &s) {
+					t.Fatal("replanning comment left its author eligible after reposting")
+				}
+			} else if !errors.Is(err, chain.ErrApprovalPause) {
+				t.Fatalf("expected pause before reposting, got %v", err)
+			}
+			posts, err := chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
+			if err != nil || len(posts) != tc.posts || s.ApprovalPaused() != tc.pause || s.Pending != nil {
+				t.Fatalf("posts=%d pause=%s pending=%+v err=%v", len(posts), s.ApprovalPaused(), s.Pending, err)
+			}
+			gos, err := chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
+			if err != nil || len(gos) != 0 {
+				t.Fatalf("unexpected GO: %v err=%v", gos, err)
+			}
+		})
+	}
+}
+
+func TestApprovalParentReplanningCommentLeavesOtherApproverEligible(t *testing.T) {
+	a, f, s := approvalFixture(t)
+	a.cfg.Workflow.Stages[2].Approval.ApproverUserIDs = []int64{7, 8}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := a.before(ctx, &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) {
+		t.Fatal(err)
+	}
+	approvalAdd(t, f, 950, 7, "計画を直してください", nil)
+	if !parentTickTest(t, a, &s) || s.AwaitingApproval != nil {
+		t.Fatal("rejection did not leave the approval wait")
+	}
+	next, err := (chain.StageRouter{}).Next(ctx, s)
+	if err != nil || next.Role != "a" {
+		t.Fatalf("replanning: next=%+v err=%v", next, err)
+	}
+	approvalAdd(t, f, 951, 7, "計画の作り直し中のコメント", nil)
+	s.History = append(s.History,
+		chain.Result{Role: "a", Speaker: "runtime", FinishedAt: a.clock()},
+		chain.Result{Role: "b", Speaker: "runtime", FinishedAt: a.clock()})
+	if err := a.before(ctx, &s, chain.Assignment{Role: "c"}); !errors.Is(err, chain.ErrAwaitingApproval) {
+		t.Fatal(err)
+	}
+	posts, err := chain.ReadApprovalRecords[chain.ApprovalPost](a.approvalDirectory(), "post")
+	if err != nil || len(posts) != 2 {
+		t.Fatalf("posts=%d err=%v", len(posts), err)
+	}
+	var p chain.ApprovalPost
+	for _, post := range posts {
+		if post.N == 2 {
+			p = post
+		}
+	}
+	if p.N != 2 || parentTickTest(t, a, &s) || s.AwaitingApproval == nil || s.AwaitingApproval.PostN != 2 || s.ApprovalPaused() != "" {
+		t.Fatalf("remaining approver did not keep the second post waiting: wait=%+v pause=%s", s.AwaitingApproval, s.ApprovalPaused())
+	}
+	before := len(s.History)
+	approvalAdd(t, f, p.CommentID+10, 7, "もう一度計画を直してください", nil)
+	if parentTickTest(t, a, &s) || s.AwaitingApproval == nil || s.AwaitingApproval.PostN != 2 || s.ApprovalPaused() != "" || len(s.History) != before {
+		t.Fatal("excluded approver's comment rejected or paused the second post")
+	}
+	gos, err := chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
+	if err != nil || len(gos) != 0 {
+		t.Fatalf("excluded comment produced a GO record: records=%v err=%v", gos, err)
+	}
+	approvalAdd(t, f, p.CommentID+11, 8, "GO "+p.DigestPrefix, nil)
+	if !parentTickTest(t, a, &s) || s.AwaitingApproval != nil || s.ApprovalPaused() != "" {
+		t.Fatal("remaining approver's GO was not accepted")
+	}
+	gos, err = chain.ReadApprovalRecords[chain.ApprovalGO](a.approvalDirectory(), "go")
+	if err != nil || len(gos) != 1 {
+		t.Fatalf("accepted GO records=%v err=%v", gos, err)
+	}
+	if gos[0].AuthorID != 8 || gos[0].PostN != 2 || gos[0].GOCommentID != p.CommentID+11 || gos[0].Result != "go" || gos[0].AcceptedAt.IsZero() {
+		t.Fatalf("wrong GO accepted: %+v", gos[0])
+	}
+}
+
 func TestApprovalParentExpiryClassifiesBeforePause(t *testing.T) {
 	a, f, s, p := approvalPostFixture(t)
 	before := len(s.History)
@@ -488,7 +615,7 @@ func TestApprovalEndToEndCommandLaunchesOncePerGO(t *testing.T) {
 				p = post
 			}
 		}
-		if p.N != old.N+1 || p.Digest != old.Digest || !strings.Contains(f.all()[len(f.all())-1], "正常に終了しなかった") {
+		if p.N != old.N+1 || p.Digest != old.Digest || !strings.Contains(f.all()[len(f.all())-1], "失敗しました。もう一度実行してよいか確認します。") {
 			t.Fatalf("repost n=%d/%d digest=%s/%s text=%s", p.N, old.N, p.Digest, old.Digest, f.all()[len(f.all())-1])
 		}
 		runner()
@@ -604,7 +731,7 @@ func TestApprovalPauseStopSurvivesDamagedLedger(t *testing.T) {
 
 func TestApprovalRefusalWordsAndNoRoleQuotes(t *testing.T) {
 	cfg := approvalConfiguration()
-	for reason, description := range map[string]string{"rejected": "承認者から修正を求められた", "expired": "承認の期限が切れた"} {
+	for reason, description := range map[string]string{"rejected": "承認者から修正を求められました", "expired": "確認の期限が切れました"} {
 		state := chain.State{Workflow: cfg.Workflow, History: []chain.Result{chain.ApprovalFailureRecord("c", reason)}}
 		next, err := (chain.StageRouter{}).Next(context.Background(), state)
 		if err != nil || !strings.Contains(next.Instruction, reason) || strings.Contains(next.Instruction, "did not exit 0") {
