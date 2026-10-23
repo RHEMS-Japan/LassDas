@@ -855,6 +855,7 @@ A command stage can declare the following optional `approval` object:
   1 行 200 文字まで (bundle の決まりと同じ、超えると「量や形式」の理由になる)。
   説明文の不備は計画の工程からやり直す。
   現在の stages 形式では `workflow.launch_limit` は設定検査で拒否されるため、このやり直しの回数制限には使えない。
+  回数の上限は無く、依頼全体の `max_active_minutes` と `max_hard_exits` (どちらも設定) で止まる。
 
 The following checks apply to the current configuration before intake:
 
