@@ -228,6 +228,8 @@ func TestApprovalAvailableAfterAllChecks(t *testing.T) {
 		{"tracker", "approval stages require Backlog", func(c *config) { c.GitHub = &tracker.GitHub{} }},
 		{"show", "approval needs show paths", func(c *config) { c.Workflow.Stages[2].Approval.Show = nil }},
 		{"later_failure", "on_failure must stay after approval stage", func(c *config) { c.Workflow.Stages[4].OnFailure = "a" }},
+		{"timezone", "check 11", func(c *config) { c.Workflow.Stages[2].Approval.Timezone = "Invalid/Timezone" }},
+		{"summary", "check 12", func(c *config) { c.Workflow.Stages[2].Approval.Summary = "ops/outside.txt" }},
 	}
 	for _, tt := range changes {
 		t.Run(tt.name, func(t *testing.T) {
@@ -247,6 +249,8 @@ func TestApprovalAvailableAfterAllChecks(t *testing.T) {
 
 func TestApprovalJSONAndCheckHaveNoRemoteReads(t *testing.T) {
 	cfg := approvalConfiguration()
+	cfg.Workflow.Stages[2].Approval.Timezone = "Asia/Tokyo"
+	cfg.Workflow.Stages[2].Approval.Summary = "ops/bundle/summary.txt"
 	cfg.Backlog = watchConfiguration(t).Backlog
 	cfg.Intake.CreatedSince = "2026-01-02T00:00:00Z"
 	data, err := json.Marshal(cfg)

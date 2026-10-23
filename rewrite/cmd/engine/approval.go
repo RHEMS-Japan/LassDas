@@ -236,12 +236,34 @@ func validateApprovalLaterFailures(cfg config) error {
 	return nil
 }
 
+func validateApprovalTimezone(cfg config) error {
+	for _, stage := range approvalStages(cfg) {
+		if stage.Approval != nil {
+			if _, err := stage.Approval.TimeLocation(); err != nil {
+				return fmt.Errorf("stage %q: approval check 11: timezone must be a readable IANA name", stage.Name)
+			}
+		}
+	}
+	return nil
+}
+
+func validateApprovalSummary(cfg config) error {
+	for _, stage := range approvalStages(cfg) {
+		if stage.Approval != nil {
+			if _, err := stage.Approval.SummaryPath(); err != nil {
+				return fmt.Errorf("stage %q: approval check 12: summary must be a relative file path inside bundle", stage.Name)
+			}
+		}
+	}
+	return nil
+}
+
 func validateApprovalStages(cfg config) error {
 	for _, check := range []func(config) error{
 		validateApprovalPredecessor, validateApprovalFailure, validateApprovalSecrets,
 		validateApprovalStopUsers, validateApprovalTrackerAccess, validateApprovalStopReport,
 		validateApprovalProcessCount, validateApprovalTracker, validateApprovalValues,
-		validateApprovalLaterFailures,
+		validateApprovalLaterFailures, validateApprovalTimezone, validateApprovalSummary,
 	} {
 		if err := check(cfg); err != nil {
 			return err
@@ -321,7 +343,7 @@ func prepareStoredApprovals(cfg *config, store *chain.FileStore) error {
 	}
 	saved := *cfg
 	saved.Workflow = state.Workflow
-	// Shape checks 1, 2 and 10 already ran before the immutable copy was taken.
+	// Shape checks 1, 2, 10, 11 and 12 already ran before the immutable copy was taken.
 	for _, check := range []func(config) error{validateApprovalSecrets, validateApprovalTrackerAccess, validateApprovalStopReport, validateApprovalProcessCount} {
 		if err := check(saved); err != nil {
 			state.PauseApproval("approval_config_mismatch", time.Now().UTC())

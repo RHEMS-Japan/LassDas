@@ -110,7 +110,7 @@ func approvalAdd(t *testing.T, f *noticeTracker, id, author int64, body string, 
 func TestApprovalChildPostFullTextAndRestart(t *testing.T) {
 	a, f, s, p := approvalPostFixture(t)
 	text := f.all()[0]
-	for _, want := range []string{"## 試し実行の結果\n\n```\ndry-run.txt\nchecked\n```", "## AI が書いた計画\n\n```\nplan.txt\nproposed\n```", p.Digest, "GO " + p.DigestPrefix, p.Deadline.Format(time.RFC3339), "id 99", "コメント id", "前回の実行の終了状態: まだ起動していない", "GO の削除・編集", "承認者が普通のコメント", "承認待ちの間に他の人", "書き直しは新しいコメントで"} {
+	for _, want := range []string{"## 試し実行の結果\n\n```\ndry-run.txt\nchecked\n```", "## AI が書いた計画\n\n```\nplan.txt\nproposed\n```", "GO " + p.DigestPrefix, p.Deadline.Format("2006-01-02 15:04 (MST)"), "前回の実行: まだ実行していません。", "GO を消したり書き直したり", "承認者が GO・停止以外", "確認待ちの間に他の人"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q", want)
 		}
@@ -433,7 +433,7 @@ func TestApprovalChildConsumptionConditions(t *testing.T) {
 func TestApprovalFailureNoticeAndQuestionIsolation(t *testing.T) {
 	cfg := approvalConfiguration()
 	text := endingText(cfg, chain.Ending{Role: "c", ApprovalFailure: "post_fence", Error: chain.ApprovalFailureText("post_fence")})
-	if strings.Contains(text, "通りません") || strings.Contains(text, "post_fence") || !strings.Contains(text, "承認の投稿に使えない文字や書式") {
+	if strings.Contains(text, "通りません") || strings.Contains(text, "post_fence") || !strings.Contains(text, "確認のコメントに使えない文字や書式") {
 		t.Fatal(text)
 	}
 	state := chain.State{Waiting: true, AwaitingApproval: &chain.AwaitingApproval{Stage: "c"}}
@@ -444,19 +444,19 @@ func TestApprovalFailureNoticeAndQuestionIsolation(t *testing.T) {
 
 func TestApprovalFailureEndingTextPreservesMeaning(t *testing.T) {
 	for _, tc := range []struct{ name, text, posted string }{
-		{"receipt_credential", "起動した・結果は読めない (効果不明): bundle_credential", "起動した・結果は読めない (効果不明): ファイルに認証情報が含まれていた"},
-		{"bundle_credential", "承認条件が成立しなかった: bundle_credential", "承認条件が成立しなかった: ファイルに認証情報が含まれていた"},
-		{"receipt_unreadable", "起動した・結果は読めない (効果不明): receipt_unreadable", "起動した・結果は読めない (効果不明): 実行結果を読み取れない"},
-		{"post_fence", "承認条件が成立しなかった: post_fence", "承認条件が成立しなかった: 承認の投稿に使えない文字や書式が含まれている"},
-		{"rejected", "承認条件が成立しなかった: rejected", "承認条件が成立しなかった: 承認者から修正を求められた"},
-		{"expired", "承認条件が成立しなかった: expired", "承認条件が成立しなかった: 承認の期限が切れた"},
-		{"bundle_name", "承認条件が成立しなかった: bundle_name", "承認条件が成立しなかった: 承認対象のファイル名が条件を満たしていない"},
-		{"bundle_kind", "承認条件が成立しなかった: bundle_kind", "承認条件が成立しなかった: 承認対象のファイルを安全に扱えない"},
-		{"bundle_limit", "承認条件が成立しなかった: bundle_limit", "承認条件が成立しなかった: 承認対象のファイルが量や形式の条件を満たしていない"},
-		{"show_missing", "承認条件が成立しなかった: show_missing", "承認条件が成立しなかった: 試し実行の結果のファイルが見つからない"},
-		{"post_size", "承認条件が成立しなかった: post_size", "承認条件が成立しなかった: 承認の投稿が長すぎるか、投稿先に受け付けられなかった"},
-		{"post_masked", "承認条件が成立しなかった: post_masked", "承認条件が成立しなかった: 承認の投稿に認証情報が含まれている"},
-		{"digest_collision", "承認条件が成立しなかった: digest_collision", "承認条件が成立しなかった: 承認対象を指紋で区別できない"},
+		{"receipt_credential", "起動した・結果は読めない (効果不明): bundle_credential", "確認の途中で止まりました。理由: 確認用のファイルに認証情報が含まれていました。実行を開始しましたが、結果が分かりません"},
+		{"bundle_credential", "承認条件が成立しなかった: bundle_credential", "確認の途中で止まりました。理由: 確認用のファイルに認証情報が含まれていました"},
+		{"receipt_unreadable", "起動した・結果は読めない (効果不明): receipt_unreadable", "確認の途中で止まりました。理由: 実行結果を読み取れませんでした。実行を開始しましたが、結果が分かりません"},
+		{"post_fence", "承認条件が成立しなかった: post_fence", "確認の途中で止まりました。理由: 確認のコメントに使えない文字や書式が含まれています"},
+		{"rejected", "承認条件が成立しなかった: rejected", "確認の途中で止まりました。理由: 承認者から修正を求められました"},
+		{"expired", "承認条件が成立しなかった: expired", "確認の途中で止まりました。理由: 確認の期限が切れました"},
+		{"bundle_name", "承認条件が成立しなかった: bundle_name", "確認の途中で止まりました。理由: 確認用のファイルが決まりに合いません (名前)"},
+		{"bundle_kind", "承認条件が成立しなかった: bundle_kind", "確認の途中で止まりました。理由: 確認用のファイルが決まりに合いません (種類)"},
+		{"bundle_limit", "承認条件が成立しなかった: bundle_limit", "確認の途中で止まりました。理由: 確認用のファイルが決まりに合いません (量や形式)"},
+		{"show_missing", "承認条件が成立しなかった: show_missing", "確認の途中で止まりました。理由: 試し実行の結果のファイルがありません"},
+		{"post_size", "承認条件が成立しなかった: post_size", "確認の途中で止まりました。理由: 確認のコメントが長すぎるか、投稿できませんでした"},
+		{"post_masked", "承認条件が成立しなかった: post_masked", "確認の途中で止まりました。理由: 確認のコメントに認証情報が含まれています"},
+		{"digest_collision", "承認条件が成立しなかった: digest_collision", "確認の途中で止まりました。理由: 確認の対象を区別できませんでした"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := approvalConfiguration()
@@ -474,8 +474,12 @@ func TestApprovalFailureEndingTextPreservesMeaning(t *testing.T) {
 				t.Fatalf("rerun notice = %q, want prefix %q", text, want)
 			}
 			stage := cfg.Workflow.Stages[2]
-			posted, err := approvalPostText(stage, chain.ApprovalBundle{}, chain.ApprovalPost{}, 99, state, nil)
-			if err != nil || !strings.Contains(posted, "前回の実行の終了状態: "+tc.posted+"\n") || strings.Contains(posted, tc.text) {
+			posted, err := approvalPostText(stage, chain.ApprovalBundle{}, chain.ApprovalPost{}, state, nil)
+			previous := "正常に終わりました。同じ計画でもう一度実行してよいか確認します。"
+			if strings.HasPrefix(tc.text, "起動した・結果は読めない") {
+				previous = "途中で止まり、結果が分かりません。同じ計画で実行してよいか、もう一度確認します。"
+			}
+			if err != nil || !strings.Contains(posted, "前回の実行: "+previous+"\n") || strings.Contains(posted, tc.text) {
 				t.Fatalf("post = %q, err = %v", posted, err)
 			}
 			if state.History[len(state.History)-1].Error != tc.text {
@@ -545,12 +549,12 @@ func TestApprovalChildPostSizeAndMaskedText(t *testing.T) {
 			contents := "safe\n"
 			credentials := []string(nil)
 			if variant == "size" {
-				contents = strings.Repeat("x\n", 16000)
+				contents = strings.Repeat("x\n", chain.ApprovalBytes/2)
 			} else {
 				credentials = []string{"safe"}
 			}
 			bundle := chain.ApprovalBundle{Files: []chain.ApprovalFile{{Path: "dry-run.txt"}}, Contents: map[string][]byte{"dry-run.txt": []byte(contents)}}
-			_, err := approvalPostText(stage, bundle, post, 99, s, credentials)
+			_, err := approvalPostText(stage, bundle, post, s, credentials)
 			if err == nil || !strings.Contains(err.Error(), "post_"+variant) {
 				t.Fatal(err)
 			}

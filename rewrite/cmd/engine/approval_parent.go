@@ -15,8 +15,8 @@ import (
 )
 
 const approvalUnreadableNotice = "approval_unreadable_go"
-const approvalUnreadableText = "GO を読み取れませんでした。承認の投稿にある先頭 8 桁を使い、半角の「GO <8桁>」だけを新しいコメントに書いてください。元のコメントは編集・削除しないでください。承認待ちの「再開」では作業は進みません。"
-const approvalResumeBlockedText = "再開の指示を記録しました。承認の検査に通らない限り作業は続きません。停止して起票し直してください。"
+const approvalUnreadableText = "GO を読み取れませんでした。確認のコメントにある「GO 」から始まる 1 行を、そのまま新しいコメントに書いてください。元のコメントは編集・削除しないでください。確認待ちの間は「再開」では進みません。"
+const approvalResumeBlockedText = "「再開」を記録しました。確認の内容に問題があったため、このままでは進みません。「停止」と書いてから、課題を起票し直してください。"
 
 var approvalGOFormat = regexp.MustCompile(`^GO [0-9a-f]{8}$`)
 

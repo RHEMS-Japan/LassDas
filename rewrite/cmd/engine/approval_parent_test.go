@@ -65,7 +65,7 @@ func TestApprovalParentGOConsumptionAndRepost(t *testing.T) {
 			again = post
 		}
 	}
-	if again.Digest != p.Digest || again.CommentID == p.CommentID || !strings.Contains(f.all()[len(f.all())-1], "正常に終了しなかった") {
+	if again.Digest != p.Digest || again.CommentID == p.CommentID || !strings.Contains(f.all()[len(f.all())-1], "失敗しました。同じ計画で実行してよいか、もう一度確認します。") {
 		t.Fatal("repost lost bundle or previous ending")
 	}
 	if parentTickTest(t, a, &s) {
@@ -488,7 +488,7 @@ func TestApprovalEndToEndCommandLaunchesOncePerGO(t *testing.T) {
 				p = post
 			}
 		}
-		if p.N != old.N+1 || p.Digest != old.Digest || !strings.Contains(f.all()[len(f.all())-1], "正常に終了しなかった") {
+		if p.N != old.N+1 || p.Digest != old.Digest || !strings.Contains(f.all()[len(f.all())-1], "失敗しました。同じ計画で実行してよいか、もう一度確認します。") {
 			t.Fatalf("repost n=%d/%d digest=%s/%s text=%s", p.N, old.N, p.Digest, old.Digest, f.all()[len(f.all())-1])
 		}
 		runner()
@@ -604,7 +604,7 @@ func TestApprovalPauseStopSurvivesDamagedLedger(t *testing.T) {
 
 func TestApprovalRefusalWordsAndNoRoleQuotes(t *testing.T) {
 	cfg := approvalConfiguration()
-	for reason, description := range map[string]string{"rejected": "承認者から修正を求められた", "expired": "承認の期限が切れた"} {
+	for reason, description := range map[string]string{"rejected": "承認者から修正を求められました", "expired": "確認の期限が切れました"} {
 		state := chain.State{Workflow: cfg.Workflow, History: []chain.Result{chain.ApprovalFailureRecord("c", reason)}}
 		next, err := (chain.StageRouter{}).Next(context.Background(), state)
 		if err != nil || !strings.Contains(next.Instruction, reason) || strings.Contains(next.Instruction, "did not exit 0") {

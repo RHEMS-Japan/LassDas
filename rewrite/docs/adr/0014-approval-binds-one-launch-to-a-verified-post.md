@@ -22,6 +22,58 @@ repeats the comparison, approver and saved-workflow checks. If they fail it
 holds the request again, without launching work. Their notices instruct the
 operator to stop and file a new request, without promising continuation.
 
+## Posted text
+
+The approval comment asks the requester to review the production operation in
+Japanese. It shows the optional `approval.summary` file verbatim as plain text,
+the exact GO line, a deadline in `approval.timezone` (default UTC), the previous
+execution outcome, and the stop conditions. The two headings remain
+`## 試し実行の結果` and `## AI が書いた計画`. The summary is not repeated
+in the file listing, including its filename. Other files retain their order
+and fenced representation.
+
+````text
+本番の操作の確認をお願いします。
+
+やること:
+確認済みの設定を本番に反映します。
+
+実行してよければ、次の 1 行だけを新しいコメントに書いてください:
+GO 543f0e3e
+
+期限: 2026-10-25 22:06 (JST) まで。過ぎたら計画を作り直して、もう一度確認します。
+前回の実行: まだ実行していません。
+止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。
+安全のため、確認待ちの間に他の人がコメントしたり、コメントが編集・削除されたり、承認者が GO・停止以外のコメントを書いたりすると、実行せずに止まります。
+
+## 試し実行の結果
+
+```
+dry-run.txt
+checked
+```
+
+## AI が書いた計画
+
+```
+plan.txt
+proposed
+```
+````
+
+The summary path is relative to the working copy and must be inside the bundle
+(preflight 12). Missing, empty after trimming, over 2,000 characters after
+trimming, invalid UTF-8, triple backticks, or a line starting with `#` produces
+`summary_unreadable`. The existing credential checks also cover the summary.
+The summary's original bytes remain part of the copied bundle and digest.
+Preflight 11 rejects an unreadable time zone name. Embedded time zone data
+avoids depending on the image. Saved deadlines remain RFC3339 UTC.
+
+Account IDs, comment IDs, the full digest, internal stage names, and runtime
+clock terminology are absent from the fixed post text. GO matching, post and
+launch binding, and `sent_text_sha256` readback stay unchanged. Failure notices
+start with `確認の途中で止まりました。理由: ` and retain recovery instructions.
+
 ## Alternatives compared
 
 Treating GO as a question reply would allow the requester to release approval.

@@ -424,3 +424,60 @@ func TestApprovalReceiptFailureIsRecordedAfterStage(t *testing.T) {
 		})
 	}
 }
+
+func TestApprovalDisplaySettingsSurviveWorkflowCopy(t *testing.T) {
+	var workflow Workflow
+	if err := json.Unmarshal([]byte(`{"stages":[{"name":"execute","kind":"command","approval":{"bundle":"ops/bundle","show":["dry-run.txt"],"expiry_hours":72,"approver_user_ids":[7],"timezone":"Asia/Tokyo","summary":"ops/bundle/summary.txt"}}]}`), &workflow); err != nil {
+		t.Fatal(err)
+	}
+	copied := workflow.clone()
+	data, err := json.Marshal(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"timezone":"Asia/Tokyo"`, `"summary":"ops/bundle/summary.txt"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("missing %s in %s", want, data)
+		}
+	}
+	if len(copied.Stages[0].Approval.ApproverUserIDs) != 0 {
+		t.Fatal("saved approvers")
+	}
+}
+
+func TestApprovalSummaryBundleBoundaryAndCredentials(t *testing.T) {
+	for _, tc := range []struct{ name, content, reason string }{
+		{"at limit", strings.Repeat(strings.Repeat("日", 99)+"\n", 19) + strings.Repeat("日", 100), ""},
+		{"trimmed", "  確認します。\n", ""},
+		{"masked", "synthetic-credential", "post_masked"},
+		{"format", "説明\u202e", "post_fence"},
+		{"control", "説明\r", "post_fence"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			approvalWrite(t, filepath.Join(root, "bundle/show.txt"), "checked\n")
+			approvalWrite(t, filepath.Join(root, "bundle/summary.txt"), tc.content)
+			dest := filepath.Join(t.TempDir(), "bundle-1")
+			bundle, err := CollectApprovalBundle(root, &Approval{Bundle: "bundle", Show: []string{"show.txt"}, Summary: "bundle/summary.txt"}, dest, []string{"synthetic-credential"})
+			if tc.reason != "" {
+				var failure ApprovalFailure
+				if !errors.As(err, &failure) || string(failure) != tc.reason {
+					t.Fatalf("got %v want %s", err, tc.reason)
+				}
+				if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("refused bundle was saved")
+				}
+				return
+			}
+			if err != nil || string(bundle.Contents["summary.txt"]) != tc.content {
+				t.Fatal("original summary not preserved", err)
+			}
+			digest := bundle.Digest
+			bundle.Contents["summary.txt"] = []byte(tc.content + "変更")
+			changed, err := ApprovalDigest(bundle.Contents)
+			if err != nil || changed == digest {
+				t.Fatal("summary not bound to digest", err)
+			}
+		})
+	}
+}

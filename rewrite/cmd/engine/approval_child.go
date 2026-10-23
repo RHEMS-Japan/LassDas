@@ -346,26 +346,52 @@ func (a approvalChild) read(ctx context.Context, state chain.State, stage string
 // Translate only posted text; saved failure reasons retain their internal names.
 func approvalFailurePostText(reason, recorded string) string {
 	descriptions := map[string]string{
-		"rejected":           "承認者から修正を求められた",
-		"expired":            "承認の期限が切れた",
-		"bundle_name":        "承認対象のファイル名が条件を満たしていない",
-		"bundle_kind":        "承認対象のファイルを安全に扱えない",
-		"bundle_limit":       "承認対象のファイルが量や形式の条件を満たしていない",
-		"bundle_credential":  "ファイルに認証情報が含まれていた",
-		"show_missing":       "試し実行の結果のファイルが見つからない",
-		"post_size":          "承認の投稿が長すぎるか、投稿先に受け付けられなかった",
-		"post_fence":         "承認の投稿に使えない文字や書式が含まれている",
-		"post_masked":        "承認の投稿に認証情報が含まれている",
-		"digest_collision":   "承認対象を指紋で区別できない",
-		"receipt_unreadable": "実行結果を読み取れない",
+		"rejected":           "承認者から修正を求められました",
+		"expired":            "確認の期限が切れました",
+		"bundle_name":        "確認用のファイルが決まりに合いません (名前)",
+		"bundle_kind":        "確認用のファイルが決まりに合いません (種類)",
+		"bundle_limit":       "確認用のファイルが決まりに合いません (量や形式)",
+		"bundle_credential":  "確認用のファイルに認証情報が含まれていました",
+		"show_missing":       "試し実行の結果のファイルがありません",
+		"post_size":          "確認のコメントが長すぎるか、投稿できませんでした",
+		"post_fence":         "確認のコメントに使えない文字や書式が含まれています",
+		"post_masked":        "確認のコメントに認証情報が含まれています",
+		"digest_collision":   "確認の対象を区別できませんでした",
+		"receipt_unreadable": "実行結果を読み取れませんでした",
+		"summary_unreadable": "やることの説明文が無いか、読めません",
 	}
-	return strings.TrimSuffix(recorded, reason) + descriptions[reason]
+	text := "確認の途中で止まりました。理由: " + descriptions[reason]
+	if strings.HasPrefix(recorded, "起動した・結果は読めない (効果不明): ") {
+		text += "。実行を開始しましたが、結果が分かりません"
+	}
+	return text
 }
 
-func approvalPostText(stage chain.Stage, bundle chain.ApprovalBundle, post chain.ApprovalPost, me int64, state chain.State, credentials []string) (string, error) {
+func approvalPostText(stage chain.Stage, bundle chain.ApprovalBundle, post chain.ApprovalPost, state chain.State, credentials []string) (string, error) {
 	var b strings.Builder
-	fmt.Fprintf(&b, "承認の対象: この投稿（本体のアカウント id %d、コメント id はこのコメント自身の id）の中身だけが GO の対象です。\n指紋: %s\n先頭 8 桁: %s\nGO の書き方: GO %s （この1行だけ）\n期限 D（本体の時計）: %s\n", me, post.Digest, post.DigestPrefix, post.DigestPrefix, post.Deadline.Format(time.RFC3339))
-	ending := "まだ起動していない"
+	b.WriteString("本番の操作の確認をお願いします。\n\n")
+	summary, err := stage.Approval.SummaryPath()
+	if err != nil {
+		return "", err
+	}
+	if summary != "" {
+		data := bundle.Contents[summary]
+		if err := chain.ApprovalSummary(data); err != nil {
+			return "", err
+		}
+		b.WriteString("やること:\n")
+		b.Write(data)
+		if !strings.HasSuffix(string(data), "\n") {
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+	}
+	location, err := stage.Approval.TimeLocation()
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(&b, "実行してよければ、次の 1 行だけを新しいコメントに書いてください:\nGO %s\n\n期限: %s まで。過ぎたら計画を作り直して、もう一度確認します。\n", post.DigestPrefix, post.Deadline.In(location).Format("2006-01-02 15:04 (MST)"))
+	ending := "まだ実行していません。"
 	for i := len(state.History) - 1; i >= 0; i-- {
 		r := state.History[i]
 		if r.Role != stage.Name || r.Speaker != "runtime" {
@@ -381,19 +407,21 @@ func approvalPostText(stage chain.Stage, bundle chain.ApprovalBundle, post chain
 			}
 		}
 		switch {
+		case strings.HasPrefix(r.Error, "起動した・結果は読めない (効果不明): "):
+			ending = "途中で止まり、結果が分かりません。同じ計画で実行してよいか、もう一度確認します。"
 		case chain.ApprovalFailureReason(r) != "":
-			ending = approvalFailurePostText(chain.ApprovalFailureReason(r), r.Error)
+			continue
 		case r.Interrupted:
-			ending = "中断した（効果不明）"
+			ending = "途中で止まり、結果が分かりません。同じ計画で実行してよいか、もう一度確認します。"
 		case r.Error != "":
-			ending = "正常に終了しなかった"
+			ending = "失敗しました。同じ計画で実行してよいか、もう一度確認します。"
 		default:
-			ending = "正常に終了した"
+			ending = "正常に終わりました。同じ計画でもう一度実行してよいか確認します。"
 		}
 		break
 	}
-	fmt.Fprintf(&b, "前回の実行の終了状態: %s\n", ending)
-	b.WriteString("GO の削除・編集は取り消しにならず、止められるのは `停止` だけ。\n承認者が普通のコメントを書くとこの依頼は承認できなくなる。\n承認待ちの間に他の人がコメントするとこの依頼は止まる。\nコメントの編集・削除（読めない GO の書き直しを含む）でこの依頼は止まる。書き直しは新しいコメントで。\n")
+	fmt.Fprintf(&b, "前回の実行: %s\n", ending)
+	b.WriteString("止めたいときは「停止」とだけ書いてください。GO を消したり書き直したりしても取り消しにはなりません。\n安全のため、確認待ちの間に他の人がコメントしたり、コメントが編集・削除されたり、承認者が GO・停止以外のコメントを書いたりすると、実行せずに止まります。\n")
 	for _, show := range []bool{true, false} {
 		if show {
 			b.WriteString("\n## 試し実行の結果\n")
@@ -401,7 +429,7 @@ func approvalPostText(stage chain.Stage, bundle chain.ApprovalBundle, post chain
 			b.WriteString("\n## AI が書いた計画\n")
 		}
 		for _, f := range bundle.Files {
-			if slices.Contains(stage.Approval.Show, f.Path) != show {
+			if f.Path == summary || slices.Contains(stage.Approval.Show, f.Path) != show {
 				continue
 			}
 			fmt.Fprintf(&b, "\n```\n%s\n", f.Path)
@@ -481,7 +509,7 @@ func (a approvalChild) post(ctx context.Context, stage chain.Stage, state chain.
 		if err = chain.CheckApprovalCollision(post.Digest, v.posts); err != nil {
 			return post, err
 		}
-		text, err := approvalPostText(stage, bundle, post, v.me, state, credentialValues(cfg))
+		text, err := approvalPostText(stage, bundle, post, state, credentialValues(cfg))
 		if err != nil {
 			return post, err
 		}

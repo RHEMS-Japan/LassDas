@@ -241,6 +241,22 @@ func hasCredential(data []byte, values []string) bool {
 	}
 	return false
 }
+
+// ApprovalSummary validates presentation without changing the bytes that are hashed.
+func ApprovalSummary(data []byte) error {
+	text := string(data)
+	trimmed := strings.TrimSpace(text)
+	if !utf8.Valid(data) || trimmed == "" || utf8.RuneCountInString(trimmed) > 2000 || strings.Contains(text, "```") {
+		return ApprovalFailure("summary_unreadable")
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "#") {
+			return ApprovalFailure("summary_unreadable")
+		}
+	}
+	return nil
+}
+
 func CollectApprovalBundle(workspace string, approval *Approval, destination string, credentials []string) (ApprovalBundle, error) {
 	root, err := approvalRoot(workspace, approval.Bundle)
 	if err != nil {
@@ -264,9 +280,29 @@ func CollectApprovalBundle(workspace string, approval *Approval, destination str
 			return ApprovalBundle{}, ApprovalFailure("bundle_credential")
 		}
 	}
+	summary, err := approval.SummaryPath()
+	if err != nil {
+		return ApprovalBundle{}, ApprovalFailure("summary_unreadable")
+	}
+	if summary != "" {
+		// Check before generic bundle limits so malformed summaries have their own
+		// actionable reason. The collected bytes are checked again below.
+		data, err := readReceipt(workspace, filepath.Join(workspace, approval.Bundle), filepath.FromSlash(summary))
+		if err != nil {
+			return ApprovalBundle{}, ApprovalFailure("summary_unreadable")
+		}
+		if err := ApprovalSummary(data); err != nil {
+			return ApprovalBundle{}, err
+		}
+	}
 	b, err := collectApproval(root)
 	if err != nil {
 		return b, err
+	}
+	if summary != "" {
+		if err := ApprovalSummary(b.Contents[summary]); err != nil {
+			return b, err
+		}
 	}
 	for _, show := range approval.Show {
 		if _, ok := b.Contents[filepath.ToSlash(show)]; !ok {
